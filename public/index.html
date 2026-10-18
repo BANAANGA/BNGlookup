@@ -16,7 +16,15 @@
           <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
           <span>DNS<span class="brand-light">Lookup</span></span>
         </a>
-        <span class="online"><span></span> DNS over HTTPS</span>
+        <div class="topbar-actions">
+          <span class="online"><span></span> DNS over HTTPS</span>
+          <nav class="account-nav" id="account-nav" aria-label="Account" hidden>
+            <span id="account-name"></span>
+            <a id="admin-link" href="/admin.html" hidden>Admin</a>
+            <a id="login-link" href="/login.html">Log in</a>
+            <button id="logout-button" type="button" hidden>Log out</button>
+          </nav>
+        </div>
       </header>
 
       <section class="lookup-card" aria-label="DNS lookup">

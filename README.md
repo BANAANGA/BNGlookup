@@ -74,6 +74,29 @@ DOH_ENDPOINT=https://cloudflare-dns.com/dns-query docker compose up --build -d
 
 The DNS provider receives the names and record types you query.
 
+## Accounts, roles, and feature access
+
+The first time the app starts with an empty data volume, it opens a one-time
+setup page for creating the administrator username and password. Passwords
+must be at least 12 characters and are stored as salted scrypt hashes. **Before
+creating the first administrator, restrict access to the app to a trusted
+network.** Whoever reaches the setup page first can create the initial admin.
+
+The administrator can create and manage user accounts, assign the Admin or
+User role, disable accounts, reset passwords, and set each feature to **Public**,
+**Logged-in users**, or **Administrators**. By default DNS lookup, reverse
+lookup, Whois, and MAC lookup require a logged-in user; Magic scan and both
+port-scan tools require an administrator. Public access can be enabled or
+changed from the admin panel. Sessions use HttpOnly, SameSite cookies and expire
+after 12 hours.
+
+SQLite stores users, feature-access settings, and sessions in the Compose
+`app_data` volume at `/data/bnglookup.sqlite`. Keep this volume to preserve
+accounts across container replacements, and back it up with your other
+application data. To enable the cookie's `Secure` attribute behind HTTPS, set
+`COOKIE_SECURE=true` in the deployment environment. Do not expose the service
+over an untrusted network without HTTPS.
+
 ## Deploy with Arcane
 
 Arcane can deploy this repository as a Compose project. Since the Compose file

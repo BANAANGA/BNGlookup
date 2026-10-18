@@ -20,7 +20,13 @@ const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
 const formHint = document.querySelector("#form-hint");
 const tabs = [...document.querySelectorAll(".mode-tab")];
+const accountNav = document.querySelector("#account-nav");
+const accountName = document.querySelector("#account-name");
+const adminLink = document.querySelector("#admin-link");
+const loginLink = document.querySelector("#login-link");
+const logoutButton = document.querySelector("#logout-button");
 let mode = "scan";
+let authState = null;
 
 function setMode(nextMode) {
   mode = nextMode;
@@ -31,7 +37,6 @@ function setMode(nextMode) {
   const customPortScan = mode === "custom-port";
   const bulkPortScan = mode === "bulk-port";
   const portScan = customPortScan || bulkPortScan;
-  const standardLookup = !customPortScan && !bulkPortScan;
   const supportsNameserver = ["forward", "reverse", "scan"].includes(mode);
   tabs.forEach((tab) => {
     const selected = tab.dataset.mode === mode;
@@ -78,6 +83,44 @@ function setMode(nextMode) {
   resultPanel.hidden = true;
   input.focus();
 }
+
+async function initializeAccount() {
+  try {
+    const response = await fetch("/api/auth/status", { credentials: "same-origin" });
+    authState = await response.json();
+    if (authState.setupRequired) {
+      window.location.replace("/setup.html");
+      return;
+    }
+    accountNav.hidden = false;
+    loginLink.hidden = Boolean(authState.user);
+    logoutButton.hidden = !authState.user;
+    adminLink.hidden = authState.user?.role !== "admin";
+    accountName.textContent = authState.user
+      ? `${authState.user.username} (${authState.user.role})`
+      : "Guest";
+    tabs.forEach((tab) => {
+      const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
+      const requiredRole = authState.featureAccess[feature] || "user";
+      const locked = requiredRole === "admin" && authState.user?.role !== "admin";
+      const needsLogin = requiredRole !== "public" && !authState.user;
+      tab.classList.toggle("restricted-tab", locked || needsLogin);
+      tab.title = locked
+        ? "Administrator access required"
+        : needsLogin
+          ? "Log in to use this feature"
+          : "";
+    });
+  } catch {
+    errorMessage.textContent = "Unable to load account status. Refresh the page to try again.";
+    errorMessage.hidden = false;
+  }
+}
+
+logoutButton.addEventListener("click", async () => {
+  await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+  window.location.reload();
+});
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({
@@ -455,7 +498,21 @@ function renderDomainInfo(data) {
   resultPanel.hidden = false;
 }
 
-tabs.forEach((tab) => tab.addEventListener("click", () => setMode(tab.dataset.mode)));
+tabs.forEach((tab) => tab.addEventListener("click", () => {
+  const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
+  const requiredRole = authState?.featureAccess?.[feature] || "user";
+  if (requiredRole !== "public" && !authState?.user) {
+    const next = `${window.location.pathname}${window.location.search}`;
+    window.location.assign(`/login.html?next=${encodeURIComponent(next)}`);
+    return;
+  }
+  if (requiredRole === "admin" && authState?.user?.role !== "admin") {
+    errorMessage.textContent = "This feature is restricted to administrators.";
+    errorMessage.hidden = false;
+    return;
+  }
+  setMode(tab.dataset.mode);
+}));
 recordType.addEventListener("change", () => {
   customType.hidden = mode === "reverse" || recordType.value !== "custom";
   if (!customType.hidden) customType.focus();
@@ -516,6 +573,11 @@ form.addEventListener("submit", async (event) => {
         : {};
     const response = await fetch(isPortScan ? endpoint : `${endpoint}?${params}`, requestOptions);
     const data = await response.json();
+    if (response.status === 401) {
+      const next = `${window.location.pathname}${window.location.search}`;
+      window.location.assign(`/login.html?next=${encodeURIComponent(next)}`);
+      return;
+    }
     if (!response.ok) throw new Error(data.error || "DNS lookup failed.");
     if (mode === "details") renderDomainInfo(data);
     else if (mode === "mac") renderMacResult(data);
@@ -530,3 +592,5 @@ form.addEventListener("submit", async (event) => {
     submitButton.innerHTML = `<span>${mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Custom port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   }
 });
+
+initializeAccount();
