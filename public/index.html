@@ -34,29 +34,6 @@
           <span class="client-info-ptr-label">PTR</span>
           <span id="client-ptr">Looking up reverse DNS…</span>
         </div>
-        <div class="mode-tabs" role="tablist" aria-label="Lookup mode" hidden>
-          <button class="mode-tab" id="forward-tab" type="button" role="tab" aria-selected="false" data-mode="forward" hidden>
-            <span aria-hidden="true">⌕</span> DNS lookup
-          </button>
-          <button class="mode-tab" id="reverse-tab" type="button" role="tab" aria-selected="false" data-mode="reverse" hidden>
-            <span aria-hidden="true">↶</span> Reverse lookup
-          </button>
-          <button class="mode-tab" id="details-tab" type="button" role="tab" aria-selected="false" data-mode="details" hidden>
-            <span aria-hidden="true">ⓘ</span> Whois
-          </button>
-          <button class="mode-tab" id="mac-tab" type="button" role="tab" aria-selected="false" data-mode="mac" hidden>
-            <span aria-hidden="true">◇</span> MAC lookup
-          </button>
-          <button class="mode-tab active" id="scan-tab" type="button" role="tab" aria-selected="true" data-mode="scan" hidden>
-            <span aria-hidden="true">⌕</span> Magic scan
-          </button>
-          <button class="mode-tab" id="custom-port-tab" type="button" role="tab" aria-selected="false" data-mode="custom-port" hidden>
-            <span aria-hidden="true">⚙</span> Custom port scan
-          </button>
-          <button class="mode-tab" id="bulk-port-tab" type="button" role="tab" aria-selected="false" data-mode="bulk-port" hidden>
-            <span aria-hidden="true">⇢</span> Bulk port scan
-          </button>
-        </div>
 
         <p class="login-required-notice" id="login-required-notice" role="status" hidden>
           <span id="login-required-message">Log in to access the available lookup tools.</span>
@@ -67,11 +44,11 @@
         </p>
         <p class="error-message" id="error-message" role="alert" hidden></p>
         <form id="lookup-form" hidden>
-          <label class="field-label" id="name-label" for="name-input">Domain name</label>
+          <label class="field-label" id="name-label" for="name-input">Lookup</label>
           <div class="search-row">
             <div class="input-wrap" id="primary-input-wrap">
               <span class="input-icon" aria-hidden="true">⌕</span>
-              <input id="name-input" name="name" type="text" maxlength="253" placeholder="e.g. example.com" autocomplete="url" spellcheck="false" required>
+              <input id="name-input" name="name" type="text" maxlength="2048" placeholder="Domain, IP address, or MAC address" autocomplete="url" spellcheck="false" required>
             </div>
             <div class="type-control" id="type-control" hidden>
               <label class="sr-only" for="record-type">Record type</label>
@@ -123,8 +100,36 @@
             <input id="bulk-port-input" type="number" min="1" max="65535" placeholder="e.g. 443" inputmode="numeric">
             <span>Scans one port on up to 256 IPs. Local targets require permission for your role; other reserved addresses are skipped.</span>
           </div>
-          <p class="hint" id="form-hint">Scan DNS records, cloud-provider hostnames, SPF, and DKIM. Optionally choose the nameserver.</p>
+          <p class="hint auto-detect-hint" id="auto-detect-hint">Enter a domain for DNS, an IP address for reverse DNS, or a MAC address for vendor details.</p>
+          <p class="hint" id="form-hint">Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.</p>
         </form>
+
+        <div class="mode-tabs" role="tablist" aria-label="Lookup mode" hidden>
+          <button class="mode-tab active" id="auto-tab" type="button" role="tab" aria-selected="true" data-mode="auto" hidden>
+            <span aria-hidden="true">⌕</span> Auto lookup
+          </button>
+          <button class="mode-tab" id="forward-tab" type="button" role="tab" aria-selected="false" data-mode="forward" hidden>
+            <span aria-hidden="true">⌕</span> DNS lookup
+          </button>
+          <button class="mode-tab" id="reverse-tab" type="button" role="tab" aria-selected="false" data-mode="reverse" hidden>
+            <span aria-hidden="true">↶</span> Reverse lookup
+          </button>
+          <button class="mode-tab" id="details-tab" type="button" role="tab" aria-selected="false" data-mode="details" hidden>
+            <span aria-hidden="true">ⓘ</span> Whois
+          </button>
+          <button class="mode-tab" id="mac-tab" type="button" role="tab" aria-selected="false" data-mode="mac" hidden>
+            <span aria-hidden="true">◇</span> MAC lookup
+          </button>
+          <button class="mode-tab" id="scan-tab" type="button" role="tab" aria-selected="false" data-mode="scan" hidden>
+            <span aria-hidden="true">⌕</span> Magic scan
+          </button>
+          <button class="mode-tab" id="custom-port-tab" type="button" role="tab" aria-selected="false" data-mode="custom-port" hidden>
+            <span aria-hidden="true">⚙</span> Custom port scan
+          </button>
+          <button class="mode-tab" id="bulk-port-tab" type="button" role="tab" aria-selected="false" data-mode="bulk-port" hidden>
+            <span aria-hidden="true">⇢</span> Bulk port scan
+          </button>
+        </div>
 
         <div class="result" id="result" aria-live="polite" hidden></div>
       </section>

@@ -20,6 +20,8 @@ const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
 const formHint = document.querySelector("#form-hint");
 const tabs = [...document.querySelectorAll(".mode-tab")];
+const autoTab = document.querySelector("#auto-tab");
+const autoDetectHint = document.querySelector("#auto-detect-hint");
 const modeTabs = document.querySelector(".mode-tabs");
 const lookupForm = document.querySelector("#lookup-form");
 const loginRequiredNotice = document.querySelector("#login-required-notice");
@@ -35,7 +37,7 @@ const clientInfo = document.querySelector("#client-info");
 const clientInfoLabel = document.querySelector("#client-info-label");
 const clientIp = document.querySelector("#client-ip");
 const clientPtr = document.querySelector("#client-ptr");
-let mode = "scan";
+let mode = "auto";
 let authState = null;
 
 async function loadClientInfo() {
@@ -62,6 +64,7 @@ async function loadClientInfo() {
 
 function setMode(nextMode) {
   mode = nextMode;
+  const automatic = mode === "auto";
   const reverse = mode === "reverse";
   const details = mode === "details";
   const mac = mode === "mac";
@@ -78,17 +81,21 @@ function setMode(nextMode) {
   nameLabel.hidden = bulkPortScan;
   primaryInputWrap.hidden = bulkPortScan;
   input.required = !bulkPortScan;
-  nameLabel.textContent = reverse ? "IP address" : mac ? "MAC address" : "Domain name or IP address";
+  nameLabel.textContent = automatic
+    ? "Search"
+    : reverse ? "IP address" : mac ? "MAC address" : "Domain name or IP address";
   input.placeholder = reverse
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
       ? "e.g. 00:1A:2B:3C:4D:5E"
+    : automatic
+      ? "Domain, IP address, or MAC address"
     : customPortScan
       ? "e.g. example.com or 8.8.8.8"
       : "e.g. example.com";
   input.autocomplete = reverse || mac || portScan ? "off" : "url";
-  typeControl.hidden = reverse || details || mac || scan || portScan;
-  customType.hidden = reverse || details || mac || scan || portScan || recordType.value !== "custom";
+  typeControl.hidden = automatic || reverse || details || mac || scan || portScan;
+  customType.hidden = automatic || reverse || details || mac || scan || portScan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
   portScanControl.hidden = !scan || !authState?.user;
   customPortsControl.hidden = !customPortScan;
@@ -97,7 +104,11 @@ function setMode(nextMode) {
   customPortsInput.required = customPortScan;
   bulkTargetsInput.required = bulkPortScan;
   bulkPortInput.required = bulkPortScan;
-  formHint.textContent = reverse
+  autoDetectHint.hidden = !automatic;
+  formHint.hidden = automatic;
+  formHint.textContent = automatic
+    ? "Automatic lookup: domains use DNS, IP addresses use reverse DNS, and MAC addresses use vendor lookup."
+    : reverse
     ? "Find the PTR record associated with an IPv4 or IPv6 address."
     : details
       ? "View public domain registration (RDAP/WHOIS) and authoritative nameserver details."
@@ -110,9 +121,10 @@ function setMode(nextMode) {
       : bulkPortScan
         ? "Check one TCP port across an explicit list or CIDR block of IP addresses."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
-  submitButton.innerHTML = `<span>${scan ? "Magic scan" : customPortScan ? "Custom port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+  submitButton.innerHTML = `<span>${automatic ? "Auto lookup" : scan ? "Magic scan" : customPortScan ? "Custom port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
+  if (automatic) updateAutoDetectHint();
   input.focus();
 }
 
@@ -132,7 +144,7 @@ async function initializeAccount() {
       ? `${authState.user.username} (${authState.user.role})`
       : "Guest";
     const availableTabs = [];
-    tabs.forEach((tab) => {
+    tabs.filter((tab) => tab !== autoTab).forEach((tab) => {
       const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
       const access = authState.featureAccess[feature] || "user";
       const portScanRequiresUser = ["custom-port", "bulk-port"].includes(tab.dataset.mode);
@@ -145,7 +157,8 @@ async function initializeAccount() {
       tab.title = "";
       if (canUse) availableTabs.push(tab);
     });
-    const initialTab = availableTabs.find((tab) => tab.dataset.mode === mode) || availableTabs[0];
+    autoTab.hidden = availableTabs.length === 0;
+    const initialTab = availableTabs.length ? autoTab : null;
     modeTabs.hidden = !initialTab;
     lookupForm.hidden = !initialTab;
     loginRequiredNotice.hidden = Boolean(initialTab);
@@ -154,7 +167,7 @@ async function initializeAccount() {
       loginRequiredMessage.textContent = "No lookup tools are available to your account. Contact an administrator.";
       toolsLoginLink.hidden = true;
     }
-    if (initialTab) setMode(initialTab.dataset.mode);
+    if (initialTab) setMode("auto");
   } catch {
     lookupForm.hidden = true;
     modeTabs.hidden = true;
@@ -182,11 +195,36 @@ function escapeHtml(value) {
   })[character]);
 }
 
-function renderRecords(records, ptrLookups = {}) {
+const dnsRecordTypeNames = {
+  1: "A",
+  2: "NS",
+  5: "CNAME",
+  6: "SOA",
+  12: "PTR",
+  15: "MX",
+  16: "TXT",
+  28: "AAAA",
+  33: "SRV",
+  39: "DNAME",
+  43: "DS",
+  44: "SSHFP",
+  46: "RRSIG",
+  47: "NSEC",
+  48: "DNSKEY",
+  52: "TLSA",
+  64: "SVCB",
+  65: "HTTPS",
+  257: "CAA",
+};
+
+function renderDnsResults(sections, ptrLookups = {}) {
+  const records = sections.flatMap(({ title, records: sectionRecords }) =>
+    sectionRecords.map((record) => ({ ...record, section: title })),
+  );
   if (!records.length) {
     return '<p class="empty-result">No records were returned for this query.</p>';
   }
-  const recordRows = records.map((record) => {
+  const recordRows = records.map((record, index) => {
     const reverse = ptrLookups[record.data];
     const ptrContent = reverse
       ? reverse.error
@@ -195,19 +233,41 @@ function renderRecords(records, ptrLookups = {}) {
           ? `<span class="ptr-result">PTR: ${reverse.answers.map(escapeHtml).join(", ")}</span>`
           : `<span class="ptr-result">PTR: no record (${escapeHtml(reverse.status)})</span>`
       : "";
+    const type = dnsRecordTypeNames[record.type] || `TYPE${record.type}`;
     return `
-    <div class="record-row">
-      <span class="record-name">${escapeHtml(record.name)}</span>
-      <span class="record-ttl">${escapeHtml(record.TTL)}s</span>
-      <span class="record-data">${escapeHtml(record.data)}${ptrContent}</span>
-    </div>`;
+    <tr>
+      <td class="dns-row-number">${index + 1}</td>
+      <td>${escapeHtml(record.section)}</td>
+      <td class="record-name">${escapeHtml(record.name)}</td>
+      <td>${escapeHtml(type)}</td>
+      <td data-sort-value="${escapeHtml(record.TTL)}">${escapeHtml(record.TTL)}s</td>
+      <td class="record-data">${escapeHtml(record.data)}${ptrContent}</td>
+    </tr>`;
   }).join("");
-  return `<div class="records">${recordRows}</div>`;
-}
-
-function renderSection(title, records, ptrLookups) {
-  if (!records.length) return "";
-  return `<section class="record-section"><h3>${escapeHtml(title)}<span>${escapeHtml(records.length)}</span></h3>${renderRecords(records, ptrLookups)}</section>`;
+  return `
+    <section class="record-section dns-results">
+      <div class="dns-results-toolbar">
+        <h3>DNS records <span class="dns-results-count">${records.length}</span></h3>
+        <label class="dns-results-search-label">
+          <span class="sr-only">Search DNS results</span>
+          <input class="dns-results-search" type="search" placeholder="Search results…" autocomplete="off">
+        </label>
+      </div>
+      <div class="dns-results-table-wrap">
+        <table class="dns-results-table">
+          <thead><tr>
+            <th scope="col">#</th>
+            <th scope="col"><button type="button" data-sort-column="1" data-sort-type="text">Section</button></th>
+            <th scope="col"><button type="button" data-sort-column="2" data-sort-type="text">Name</button></th>
+            <th scope="col"><button type="button" data-sort-column="3" data-sort-type="text">Type</button></th>
+            <th scope="col"><button type="button" data-sort-column="4" data-sort-type="number">TTL</button></th>
+            <th scope="col"><button type="button" data-sort-column="5" data-sort-type="text">Data</button></th>
+          </tr></thead>
+          <tbody>${recordRows}</tbody>
+        </table>
+      </div>
+      <p class="empty-result dns-results-empty" hidden>No records match your search.</p>
+    </section>`;
 }
 
 function showResult(data) {
@@ -222,12 +282,61 @@ function showResult(data) {
     </div>
     ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span><strong>${escapeHtml(data.nameserver)}</strong></div>` : ""}
     <div class="query-meta"><span>Record type</span><strong>${escapeHtml(data.type)}</strong></div>
-    ${renderSection("Answers", data.answers, data.ptrLookups)}
-    ${renderSection("Authority", data.authority, data.ptrLookups)}
-    ${renderSection("Additional", data.additional, data.ptrLookups)}
+    ${renderDnsResults([
+      { title: "Answers", records: data.answers },
+      { title: "Authority", records: data.authority },
+      { title: "Additional", records: data.additional },
+    ], data.ptrLookups)}
     ${data.status === 0 && !data.answers.length ? '<p class="empty-result">The query succeeded, but no matching records were returned.</p>' : ""}`;
   resultPanel.hidden = false;
 }
+
+resultPanel.addEventListener("input", (event) => {
+  if (!event.target.matches(".dns-results-search")) return;
+  const table = resultPanel.querySelector(".dns-results-table");
+  const query = event.target.value.trim().toLocaleLowerCase();
+  let visibleCount = 0;
+  for (const row of table.tBodies[0].rows) {
+    row.hidden = !row.textContent.toLocaleLowerCase().includes(query);
+    if (!row.hidden) {
+      visibleCount += 1;
+      row.cells[0].textContent = visibleCount;
+    }
+  }
+  resultPanel.querySelector(".dns-results-empty").hidden = visibleCount !== 0;
+  resultPanel.querySelector(".dns-results-count").textContent = visibleCount;
+});
+
+resultPanel.addEventListener("click", (event) => {
+  const button = event.target.closest(".dns-results-table button[data-sort-column]");
+  if (!button) return;
+  const table = button.closest("table");
+  const body = table.tBodies[0];
+  const column = Number(button.dataset.sortColumn);
+  const numeric = button.dataset.sortType === "number";
+  const ascending = button.getAttribute("aria-sort") !== "ascending";
+  const rows = [...body.rows];
+  rows.sort((left, right) => {
+    const leftCell = left.cells[column];
+    const rightCell = right.cells[column];
+    const leftValue = leftCell.dataset.sortValue ?? leftCell.textContent.trim();
+    const rightValue = rightCell.dataset.sortValue ?? rightCell.textContent.trim();
+    const comparison = numeric
+      ? Number(leftValue) - Number(rightValue)
+      : leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: "base" });
+    return ascending ? comparison : -comparison;
+  });
+  rows.forEach((row, index) => {
+    row.cells[0].textContent = index + 1;
+    body.append(row);
+  });
+  table.querySelectorAll("th button[aria-sort]").forEach((sortButton) => {
+    sortButton.removeAttribute("aria-sort");
+  });
+  button.setAttribute("aria-sort", ascending ? "ascending" : "descending");
+  const search = resultPanel.querySelector(".dns-results-search");
+  if (search.value) search.dispatchEvent(new Event("input", { bubbles: true }));
+});
 
 function renderScanResult(data) {
   const foundHosts = data.hosts.filter((host) => host.records.length);
@@ -550,7 +659,90 @@ function renderDomainInfo(data) {
   resultPanel.hidden = false;
 }
 
+function detectAutomaticLookup(value) {
+  const candidate = value.trim();
+  const macPattern = /^(?:[0-9a-f]{12}|(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|(?:[0-9a-f]{2}-){5}[0-9a-f]{2}|(?:[0-9a-f]{4}\.){2}[0-9a-f]{4})$/i;
+  if (macPattern.test(candidate)) return { mode: "mac", name: candidate };
+
+  const ipv4Parts = candidate.split(".");
+  if (ipv4Parts.length === 4 && ipv4Parts.every((part) => /^\d{1,3}$/.test(part))) {
+    if (ipv4Parts.every((part) => Number(part) <= 255)) {
+      return { mode: "reverse", name: candidate };
+    }
+    throw new Error("Enter a valid IPv4 address.");
+  }
+
+  if (!/^https?:\/\//i.test(candidate)) {
+    try {
+      const ipv6Candidate = candidate.startsWith("[") && candidate.endsWith("]")
+        ? candidate.slice(1, -1)
+        : candidate;
+      const ipv6 = new URL(`http://[${ipv6Candidate}]/`).hostname;
+      if (ipv6.startsWith("[") && ipv6.endsWith("]")) {
+        return { mode: "reverse", name: ipv6Candidate };
+      }
+    } catch {
+      if (candidate.includes(":")) throw new Error("Enter a valid IPv6 address.");
+    }
+  }
+
+  if (!candidate || /\s/.test(candidate)) {
+    throw new Error("Enter a domain name, an IP address, or a MAC address.");
+  }
+
+  try {
+    const isUrl = /^https?:\/\//i.test(candidate);
+    const url = new URL(isUrl ? candidate : `https://${candidate}`);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      (!isUrl && url.port)
+    ) {
+      throw new Error();
+    }
+    const hostname = url.hostname;
+    if (hostname.startsWith("[") && hostname.endsWith("]")) {
+      return { mode: "reverse", name: hostname.slice(1, -1) };
+    }
+    const hostnameParts = hostname.split(".");
+    if (
+      hostnameParts.length === 4 &&
+      hostnameParts.every((part) => /^\d{1,3}$/.test(part)) &&
+      hostnameParts.every((part) => Number(part) <= 255)
+    ) {
+      return { mode: "reverse", name: hostname };
+    }
+    return { mode: "forward", name: hostname };
+  } catch {
+    throw new Error("Enter a valid domain name, an IP address, or a MAC address.");
+  }
+}
+
+function updateAutoDetectHint() {
+  const value = input.value.trim();
+  if (!value) {
+    autoDetectHint.textContent = "Enter a domain for DNS, an IP address for reverse DNS, or a MAC address for vendor details.";
+    return;
+  }
+  try {
+    const { mode: detectedMode } = detectAutomaticLookup(value);
+    const labels = {
+      forward: "DNS lookup",
+      reverse: "reverse DNS lookup",
+      mac: "MAC vendor lookup",
+    };
+    autoDetectHint.textContent = `Detected: ${labels[detectedMode]}.`;
+  } catch (error) {
+    autoDetectHint.textContent = error.message;
+  }
+}
+
 tabs.forEach((tab) => tab.addEventListener("click", () => {
+  if (tab === autoTab) {
+    setMode("auto");
+    return;
+  }
   const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
   const requiredRole = authState?.featureAccess?.[feature] || "user";
   if (requiredRole !== "public" && !authState?.user) {
@@ -565,6 +757,9 @@ tabs.forEach((tab) => tab.addEventListener("click", () => {
   }
   setMode(tab.dataset.mode);
 }));
+input.addEventListener("input", () => {
+  if (mode === "auto") updateAutoDetectHint();
+});
 recordType.addEventListener("change", () => {
   customType.hidden = mode === "reverse" || recordType.value !== "custom";
   if (!customType.hidden) customType.focus();
@@ -572,23 +767,49 @@ recordType.addEventListener("change", () => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  let requestMode = mode;
+  let lookupName = input.value.trim();
+  if (mode === "auto") {
+    try {
+      ({ mode: requestMode, name: lookupName } = detectAutomaticLookup(lookupName));
+    } catch (error) {
+      errorMessage.textContent = error.message;
+      errorMessage.hidden = false;
+      return;
+    }
+    const feature = requestMode === "mac" ? "mac" : requestMode;
+    const access = authState?.featureAccess?.[feature] || "user";
+    const permitted = Boolean(authState?.user) &&
+      (access !== "admin" || authState.user.role === "admin") ||
+      access === "public";
+    if (!permitted) {
+      if (access !== "public" && !authState?.user) {
+        const next = `${window.location.pathname}${window.location.search}`;
+        window.location.assign(`/login.html?next=${encodeURIComponent(next)}`);
+        return;
+      }
+      errorMessage.textContent = "This lookup is restricted by the administrator.";
+      errorMessage.hidden = false;
+      return;
+    }
+  }
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   submitButton.disabled = true;
-  const customPortScan = mode === "custom-port";
-  const bulkPortScan = mode === "bulk-port";
+  const customPortScan = requestMode === "custom-port";
+  const bulkPortScan = requestMode === "bulk-port";
   const isPortScan = customPortScan || bulkPortScan;
-  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${mode === "scan" ? "Scanning" : isPortScan ? "Scanning ports" : "Looking up"}</span>`;
+  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${requestMode === "scan" ? "Scanning" : isPortScan ? "Scanning ports" : "Looking up"}</span>`;
 
   const params = new URLSearchParams({
-    name: input.value.trim(),
+    name: lookupName,
     type: recordType.value === "custom" ? customType.value.trim() : recordType.value,
-    reverse: String(mode === "reverse"),
-    nameserver: mode === "forward" || mode === "reverse" || mode === "scan"
+    reverse: String(requestMode === "reverse"),
+    nameserver: requestMode === "forward" || requestMode === "reverse" || requestMode === "scan"
       ? nameserverInput.value.trim()
       : "",
   });
-  if (mode === "scan" && portScanInput.checked) {
+  if (requestMode === "scan" && portScanInput.checked) {
     params.set("ports", "common");
   }
 
@@ -597,11 +818,11 @@ form.addEventListener("submit", async (event) => {
       ? "/api/custom-port-scan"
       : bulkPortScan
         ? "/api/bulk-port-scan"
-      : mode === "details"
+        : requestMode === "details"
       ? "/api/domain-info"
-      : mode === "mac"
+        : requestMode === "mac"
         ? "/api/mac-lookup"
-      : mode === "scan"
+        : requestMode === "scan"
         ? "/api/scan"
         : "/api/lookup";
     const requestOptions = customPortScan
@@ -631,9 +852,9 @@ form.addEventListener("submit", async (event) => {
       return;
     }
     if (!response.ok) throw new Error(data.error || "DNS lookup failed.");
-    if (mode === "details") renderDomainInfo(data);
-    else if (mode === "mac") renderMacResult(data);
-    else if (mode === "scan") renderScanResult(data);
+    if (requestMode === "details") renderDomainInfo(data);
+    else if (requestMode === "mac") renderMacResult(data);
+    else if (requestMode === "scan") renderScanResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Custom port scan" : "Bulk port scan");
     else showResult(data);
   } catch (error) {
@@ -641,7 +862,7 @@ form.addEventListener("submit", async (event) => {
     errorMessage.hidden = false;
   } finally {
     submitButton.disabled = false;
-    submitButton.innerHTML = `<span>${mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Custom port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+    submitButton.innerHTML = `<span>${mode === "auto" ? "Auto lookup" : mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Custom port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   }
 });
 
