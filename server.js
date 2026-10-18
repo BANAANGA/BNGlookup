@@ -118,10 +118,33 @@ const dkimSelectors = [
   ["mxvault", "Common DKIM"],
 ];
 const scanConcurrency = 12;
+const commonTcpPorts = [
+  20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 465, 587, 993, 995,
+  1433, 1521, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017,
+];
+const nonPublicAddressRanges = new net.BlockList();
+[
+  ["0.0.0.0", 8, "ipv4"], ["10.0.0.0", 8, "ipv4"],
+  ["100.64.0.0", 10, "ipv4"], ["127.0.0.0", 8, "ipv4"],
+  ["169.254.0.0", 16, "ipv4"], ["172.16.0.0", 12, "ipv4"],
+  ["192.0.0.0", 24, "ipv4"], ["192.0.2.0", 24, "ipv4"],
+  ["192.88.99.0", 24, "ipv4"], ["192.168.0.0", 16, "ipv4"],
+  ["198.18.0.0", 15, "ipv4"], ["198.51.100.0", 24, "ipv4"],
+  ["203.0.113.0", 24, "ipv4"], ["224.0.0.0", 4, "ipv4"],
+  ["240.0.0.0", 4, "ipv4"], ["::", 128, "ipv6"],
+  ["::1", 128, "ipv6"], ["64:ff9b:1::", 48, "ipv6"],
+  ["100::", 64, "ipv6"],
+  ["2001::", 23, "ipv6"], ["2001:db8::", 32, "ipv6"],
+  ["fc00::", 7, "ipv6"], ["fe80::", 10, "ipv6"],
+  ["ff00::", 8, "ipv6"],
+].forEach(([address, prefix, family]) => {
+  nonPublicAddressRanges.addSubnet(address, prefix, family);
+});
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".svg": "image/svg+xml",
 };
 
 function reverseName(address) {
@@ -612,10 +635,147 @@ async function queryDnsRecords(name, type) {
   return data.Answer || [];
 }
 
+function isPublicAddress(address) {
+  const family = isIP(address);
+  return family !== 0 &&
+    !address.toLowerCase().startsWith("::ffff:") &&
+    !nonPublicAddressRanges.check(address, family === 4 ? "ipv4" : "ipv6");
+}
+
+function checkTcpPort(address, port) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const socket = net.createConnection({ host: address, port, family: isIP(address) }, () => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve(true);
+      }
+    });
+    socket.setTimeout(900, () => socket.destroy());
+    socket.once("error", () => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    });
+    socket.once("close", () => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    });
+  });
+}
+
+async function scanCommonTcpPorts(addresses) {
+  const uniqueAddresses = [...new Set(addresses)];
+  const publicAddresses = uniqueAddresses.filter(isPublicAddress);
+  const targets = publicAddresses.slice(0, 8);
+  const tasks = targets.flatMap((address) =>
+    commonTcpPorts.map((port) => ({ address, port })),
+  );
+  const openPortsByAddress = new Map(targets.map((address) => [address, []]));
+  let nextTask = 0;
+
+  async function runWorker() {
+    while (nextTask < tasks.length) {
+      const task = tasks[nextTask];
+      nextTask += 1;
+      if (await checkTcpPort(task.address, task.port)) {
+        openPortsByAddress.get(task.address).push(task.port);
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(32, tasks.length) }, () => runWorker()),
+  );
+  return {
+    enabled: true,
+    portsChecked: commonTcpPorts.length,
+    addressesScanned: targets.length,
+    addressesSkipped: uniqueAddresses.length - targets.length,
+    results: targets.map((address) => ({
+      address,
+      openPorts: openPortsByAddress.get(address).sort((left, right) => left - right),
+    })),
+  };
+}
+
+async function fetchIpGeolocation(address) {
+  if (!isPublicAddress(address)) {
+    return {
+      error: "Private or reserved IP address; not sent to the geolocation provider.",
+    };
+  }
+
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(`https://ipwho.is/${encodeURIComponent(address)}`, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) {
+        return { error: `Geolocation provider returned HTTP ${response.status}.` };
+      }
+      const data = await response.json();
+      if (data.success !== true || typeof data.country !== "string") {
+        return {
+          error: typeof data.message === "string"
+            ? data.message
+            : "Geolocation provider returned no country information.",
+        };
+      }
+      return {
+        country: data.country,
+        countryCode: typeof data.country_code === "string" ? data.country_code : null,
+        region: typeof data.region === "string" ? data.region : null,
+        city: typeof data.city === "string" ? data.city : null,
+        latitude: Number.isFinite(data.latitude) ? data.latitude : null,
+        longitude: Number.isFinite(data.longitude) ? data.longitude : null,
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return {
+    error: lastError?.name === "TimeoutError"
+      ? "Geolocation provider timed out."
+      : lastError?.message || "Unable to retrieve IP geolocation.",
+  };
+}
+
+async function fetchIpGeolocations(addresses) {
+  const uniqueAddresses = [...new Set(addresses.filter((address) => isIP(address)))];
+  const results = {};
+  let nextAddress = 0;
+
+  async function runWorker() {
+    while (nextAddress < uniqueAddresses.length) {
+      const address = uniqueAddresses[nextAddress];
+      nextAddress += 1;
+      results[address] = await fetchIpGeolocation(address);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(8, uniqueAddresses.length) }, () => runWorker()),
+  );
+  return results;
+}
+
 async function bulkScan(url, response) {
   const domain = normalizeDomain(url.searchParams.get("name") || "");
   if (!domain) {
     sendJson(response, 400, { error: "Enter a valid domain name." });
+    return;
+  }
+
+  const portScanOption = url.searchParams.get("ports") || "";
+  if (portScanOption && portScanOption !== "common") {
+    sendJson(response, 400, { error: "Unsupported port scan option." });
     return;
   }
 
@@ -743,6 +903,13 @@ async function bulkScan(url, response) {
       record.answers.map((answer) => answer.data),
     ),
   );
+  const rootAddresses = recordsByHost.get(domain)
+    .filter((record) => record.type === "A" || record.type === "AAAA")
+    .flatMap((record) => record.answers.map((answer) => answer.data))
+    .filter((address) => isIP(address) !== 0);
+  const portScan = portScanOption === "common"
+    ? await scanCommonTcpPorts(rootAddresses)
+    : null;
   const registrationResult = await registrationPromise;
 
   sendJson(response, 200, {
@@ -761,6 +928,8 @@ async function bulkScan(url, response) {
       dkimSelectorsChecked: dkimRecords.length,
       dkimRecords: dkimRecords.filter((entry) => entry.records.length),
     },
+    portScan,
+    ipGeolocations: await fetchIpGeolocations(addresses),
     failedQueries,
     ptrLookups: await fetchPtrLookups(addresses, nameserver),
     nameserver: nameserver

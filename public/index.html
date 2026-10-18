@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f6f8fb">
     <title>DNS Lookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" defer></script>
   </head>
@@ -12,17 +13,11 @@
     <main class="page">
       <header class="topbar">
         <a class="brand" href="/" aria-label="DNS Lookup home">
-          <span class="brand-mark" aria-hidden="true">D</span>
+          <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
           <span>DNS<span class="brand-light">Lookup</span></span>
         </a>
         <span class="online"><span></span> DNS over HTTPS</span>
       </header>
-
-      <section class="intro">
-        <p class="eyebrow">DNS TOOLKIT</p>
-        <h1>Find what the internet knows.</h1>
-        <p class="subtitle">Explore DNS records, choose a nameserver, and look up domains and MAC vendors.</p>
-      </section>
 
       <section class="lookup-card" aria-label="DNS lookup">
         <div class="mode-tabs" role="tablist" aria-label="Lookup mode">
@@ -33,7 +28,7 @@
             <span aria-hidden="true">↶</span> Reverse lookup
           </button>
           <button class="mode-tab" id="details-tab" type="button" role="tab" aria-selected="false" data-mode="details">
-            <span aria-hidden="true">ⓘ</span> Domain details
+            <span aria-hidden="true">ⓘ</span> Whois
           </button>
           <button class="mode-tab" id="mac-tab" type="button" role="tab" aria-selected="false" data-mode="mac">
             <span aria-hidden="true">◇</span> MAC lookup
@@ -80,6 +75,10 @@
             <label for="nameserver-input">Query nameserver (optional)</label>
             <input id="nameserver-input" name="nameserver" type="text" placeholder="Default DNS-over-HTTPS provider, or e.g. 1.1.1.1" autocomplete="off" spellcheck="false">
             <span>Optional: enter a nameserver IP or hostname, with port if needed (for example, 1.1.1.1:53 or ns1.example.net:53).</span>
+          </div>
+          <div class="port-scan-control" id="port-scan-control" hidden>
+            <label><input id="port-scan-input" type="checkbox"> Also scan 25 common TCP ports on the domain's public IP addresses</label>
+            <span>Optional active check. Only the domain's public IPv4/IPv6 addresses are scanned, up to 8 addresses.</span>
           </div>
           <p class="hint" id="form-hint">Scan DNS records, cloud-provider hostnames, SPF, and DKIM. Optionally choose the nameserver.</p>
           <p class="error-message" id="error-message" role="alert" hidden></p>

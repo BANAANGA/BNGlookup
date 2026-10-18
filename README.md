@@ -13,7 +13,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Look up the registered vendor and address attributes for a MAC address.
 - Scan a domain and common subdomains for DNS records, cloud-provider
   endpoints, WHOIS/RDAP registration data, SPF policies, and common DKIM
-  selectors.
+  selectors, with IP geolocation and country information for returned IPs.
+- Optionally scan 25 common TCP ports on the domain's public IP addresses.
 - Look up PTR records from IPv4 or IPv6 addresses.
 - Display PTR hostnames for IP addresses returned in DNS results and for
   resolved nameserver addresses.
@@ -132,7 +133,7 @@ DNS-over-HTTPS provider. A custom port can be provided after the IPv4 address
 (`[2606:4700:4700::1111]:53`). Hostnames are resolved using the container's
 configured system resolver before querying the selected server.
 
-Choose **Domain details** to view publicly available registration information
+Choose **Whois** to view publicly available registration information
 and compare registered nameservers with the domain's live DNS NS records.
 Registration data is retrieved from RDAP using `rdap.org`, which redirects to
 the responsible registry. The domain name is sent to the RDAP service;
@@ -145,7 +146,17 @@ verification names used by AWS/SES, Azure, Google Cloud, Cloudflare, Vercel,
 Netlify, Heroku, DigitalOcean, and other providers. The scan also retrieves
 public RDAP (WHOIS) registration data for the domain. SPF is identified from
 scanned TXT records; DKIM checks common selectors for TXT and CNAME records.
-Returned IP addresses include PTR lookups where available.
+Returned IP addresses include PTR lookups where available and approximate
+geolocation details, including country, city, and region when available.
+Public IPs discovered in scan results are sent to the `ipwho.is` geolocation
+service; private and reserved IP addresses are not sent. Geolocation may be
+unavailable or inaccurate.
+
+Enable **Scan common TCP ports** before starting a Magic scan to check the
+domain's public A/AAAA addresses for 25 commonly used TCP ports. The check is
+optional, limited to eight public IP addresses, and omits private and reserved
+addresses. It reports ports that accepted a TCP connection; it is not a
+vulnerability assessment. Only scan systems you are authorized to test.
 
 Subdomain and DKIM selector checks use built-in candidate lists rather than
 enumeration. DNS cannot list every subdomain or a domain's custom DKIM
