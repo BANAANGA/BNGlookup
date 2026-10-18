@@ -6,4 +6,11 @@ services:
     environment:
       PORT: 3000
       DOH_ENDPOINT: "${DOH_ENDPOINT:-https://cloudflare-dns.com/dns-query}"
+      DATA_DIR: /data
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+    volumes:
+      - app_data:/data
     restart: unless-stopped
+
+volumes:
+  app_data:

@@ -4,6 +4,9 @@ const path = require("node:path");
 const { isIP } = require("node:net");
 const dgram = require("node:dgram");
 const net = require("node:net");
+const crypto = require("node:crypto");
+const { promisify } = require("node:util");
+const { DatabaseSync } = require("node:sqlite");
 const { lookup: resolveHost } = require("node:dns/promises");
 const { domainToASCII } = require("node:url");
 
@@ -11,6 +14,56 @@ const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
 const dohEndpoint = process.env.DOH_ENDPOINT || "https://cloudflare-dns.com/dns-query";
 const publicDir = path.join(__dirname, "public");
+const dataDir = path.resolve(process.env.DATA_DIR || "/data");
+fs.mkdirSync(dataDir, { recursive: true });
+process.umask(0o077);
+const database = new DatabaseSync(path.join(dataDir, "bnglookup.sqlite"));
+fs.chmodSync(path.join(dataDir, "bnglookup.sqlite"), 0o600);
+const scrypt = promisify(crypto.scrypt);
+const sessionCookieName = "bnglookup_session";
+const sessionDurationMs = 12 * 60 * 60 * 1000;
+const featureAccessDefaults = {
+  forward: "user",
+  reverse: "user",
+  whois: "user",
+  mac: "user",
+  scan: "admin",
+  "custom-port": "admin",
+  "bulk-port": "admin",
+};
+const featureNames = {
+  forward: "DNS lookup",
+  reverse: "Reverse lookup",
+  whois: "Whois",
+  mac: "MAC lookup",
+  scan: "Magic scan",
+  "custom-port": "Custom port scan",
+  "bulk-port": "Bulk port scan",
+};
+database.exec(`
+  PRAGMA foreign_keys = ON;
+  PRAGMA journal_mode = WAL;
+  PRAGMA busy_timeout = 5000;
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS user_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS user_sessions_expiry ON user_sessions(expires_at);
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`);
 const dnsStatusNames = {
   0: "NOERROR",
   1: "FORMERR",
@@ -1254,6 +1307,421 @@ function sendJson(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+function sendRedirect(response, location) {
+  response.writeHead(303, { location, "cache-control": "no-store" });
+  response.end();
+}
+
+function appSetupRequired() {
+  return database.prepare("SELECT COUNT(*) AS count FROM users").get().count === 0;
+}
+
+function getFeatureAccess() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'feature_access'").get();
+  if (!row) return { ...featureAccessDefaults };
+  try {
+    const saved = JSON.parse(row.value);
+    return Object.fromEntries(Object.entries(featureAccessDefaults).map(([feature, fallback]) => [
+      feature,
+      ["public", "user", "admin"].includes(saved[feature]) ? saved[feature] : fallback,
+    ]));
+  } catch {
+    return { ...featureAccessDefaults };
+  }
+}
+
+function readCookie(request, name) {
+  const cookieHeader = request.headers.cookie || "";
+  for (const item of cookieHeader.split(";")) {
+    const separator = item.indexOf("=");
+    if (separator < 0) continue;
+    if (item.slice(0, separator).trim() === name) {
+      return item.slice(separator + 1).trim();
+    }
+  }
+  return "";
+}
+
+function currentUser(request) {
+  const token = readCookie(request, sessionCookieName);
+  if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const session = database.prepare(`
+    SELECT users.id, users.username, users.role, user_sessions.expires_at
+    FROM user_sessions JOIN users ON users.id = user_sessions.user_id
+    WHERE user_sessions.token_hash = ? AND users.active = 1
+  `).get(tokenHash);
+  if (!session) return null;
+  if (session.expires_at <= Date.now()) {
+    database.prepare("DELETE FROM user_sessions WHERE token_hash = ?").run(tokenHash);
+    return null;
+  }
+  return { id: session.id, username: session.username, role: session.role };
+}
+
+function setSessionCookie(response, token) {
+  const secure = process.env.COOKIE_SECURE === "true" ? "; Secure" : "";
+  response.setHeader("set-cookie", `${sessionCookieName}=${token}; Path=/; Max-Age=${sessionDurationMs / 1000}; HttpOnly; SameSite=Strict${secure}`);
+}
+
+function clearSessionCookie(response) {
+  const secure = process.env.COOKIE_SECURE === "true" ? "; Secure" : "";
+  response.setHeader("set-cookie", `${sessionCookieName}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict${secure}`);
+}
+
+function sameOrigin(request) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === request.headers.host;
+  } catch {
+    return false;
+  }
+}
+
+function enforceSameOrigin(request, response) {
+  if (sameOrigin(request)) return true;
+  sendJson(response, 403, { error: "Cross-origin requests are not allowed." });
+  return false;
+}
+
+const authAttempts = new Map();
+function allowAuthAttempt(request) {
+  const key = request.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  if (authAttempts.size > 10000) {
+    for (const [address, attempt] of authAttempts) {
+      if (attempt.blockedUntil < now && now - attempt.startedAt > 15 * 60 * 1000) {
+        authAttempts.delete(address);
+      }
+    }
+  }
+  const attempt = authAttempts.get(key);
+  if (attempt && attempt.blockedUntil > now) return false;
+  if (!attempt && authAttempts.size >= 10000) return false;
+  if (!attempt || now - attempt.startedAt > 15 * 60 * 1000) {
+    authAttempts.set(key, { startedAt: now, count: 1, blockedUntil: 0 });
+    return true;
+  }
+  attempt.count += 1;
+  if (attempt.count > 10) {
+    attempt.blockedUntil = now + 15 * 60 * 1000;
+    return false;
+  }
+  return true;
+}
+
+function resetAuthAttempts(request) {
+  authAttempts.delete(request.socket.remoteAddress || "unknown");
+}
+
+function validateUsername(username) {
+  return typeof username === "string" &&
+    /^[a-zA-Z0-9_.-]{3,32}$/.test(username);
+}
+
+function validatePassword(password) {
+  return typeof password === "string" && password.length >= 12 && password.length <= 128;
+}
+
+async function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = await scrypt(password, salt, 64);
+  return { salt, hash: hash.toString("hex") };
+}
+
+async function readAuthBody(request, response) {
+  try {
+    return await readJsonRequest(request);
+  } catch (error) {
+    sendJson(response, error.statusCode || 400, { error: error.message });
+    return null;
+  }
+}
+
+function handleAuthStatus(request, response) {
+  const setupRequired = appSetupRequired();
+  const user = setupRequired ? null : currentUser(request);
+  sendJson(response, 200, {
+    setupRequired,
+    user,
+    featureAccess: getFeatureAccess(),
+    features: featureNames,
+  });
+}
+
+async function handleInitialSetup(request, response) {
+  if (!enforceSameOrigin(request, response)) return;
+  if (appSetupRequired() && !allowAuthAttempt(request)) {
+    sendJson(response, 429, { error: "Too many setup attempts. Try again later." });
+    return;
+  }
+  const body = await readAuthBody(request, response);
+  if (!body) return;
+  const { username, password } = body;
+  if (!validateUsername(username)) {
+    sendJson(response, 400, { error: "Username must be 3–32 characters using letters, numbers, dot, underscore, or hyphen." });
+    return;
+  }
+  if (!validatePassword(password)) {
+    sendJson(response, 400, { error: "Password must be between 12 and 128 characters." });
+    return;
+  }
+  const credentials = await hashPassword(password);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    if (!appSetupRequired()) {
+      database.exec("ROLLBACK");
+      sendJson(response, 409, { error: "Initial admin setup has already been completed." });
+      return;
+    }
+    const result = database.prepare(`
+      INSERT INTO users (username, password_hash, password_salt, role)
+      VALUES (?, ?, ?, 'admin')
+    `).run(username, credentials.hash, credentials.salt);
+    database.exec("COMMIT");
+    await establishSession(Number(result.lastInsertRowid), response);
+    resetAuthAttempts(request);
+    sendJson(response, 201, {
+      user: { username, role: "admin" },
+      featureAccess: getFeatureAccess(),
+    });
+  } catch (error) {
+    database.exec("ROLLBACK");
+    if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+      sendJson(response, 409, { error: "That username is already in use." });
+      return;
+    }
+    console.error("Initial admin setup failed:", error);
+    sendJson(response, 500, { error: "Unable to complete initial admin setup." });
+  }
+}
+
+async function establishSession(userId, response) {
+  const token = crypto.randomBytes(32).toString("base64url");
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  database.prepare("DELETE FROM user_sessions WHERE expires_at <= ?").run(Date.now());
+  database.prepare(`
+    INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)
+  `).run(tokenHash, userId, Date.now() + sessionDurationMs);
+  setSessionCookie(response, token);
+}
+
+async function handleLogin(request, response) {
+  if (!enforceSameOrigin(request, response)) return;
+  if (!allowAuthAttempt(request)) {
+    sendJson(response, 429, { error: "Too many login attempts. Try again in 15 minutes." });
+    return;
+  }
+  const body = await readAuthBody(request, response);
+  if (!body) return;
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  const password = typeof body.password === "string" ? body.password : "";
+  const user = database.prepare(`
+    SELECT id, username, password_hash, password_salt, role
+    FROM users WHERE username = ? AND active = 1
+  `).get(username);
+  const storedHash = user?.password_hash || "00".repeat(64);
+  const salt = user?.password_salt || "00".repeat(16);
+  const supplied = await scrypt(password.slice(0, 128), salt, 64);
+  const validHash = Buffer.from(storedHash, "hex");
+  const valid = validHash.length === supplied.length &&
+    crypto.timingSafeEqual(validHash, supplied);
+  if (!user || !valid) {
+    sendJson(response, 401, { error: "Invalid username or password." });
+    return;
+  }
+  resetAuthAttempts(request);
+  await establishSession(user.id, response);
+  sendJson(response, 200, {
+    user: { username: user.username, role: user.role },
+    featureAccess: getFeatureAccess(),
+  });
+}
+
+function handleLogout(request, response) {
+  const token = readCookie(request, sessionCookieName);
+  if (token) {
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    database.prepare("DELETE FROM user_sessions WHERE token_hash = ?").run(tokenHash);
+  }
+  clearSessionCookie(response);
+  sendJson(response, 200, { loggedOut: true });
+}
+
+function requireAdmin(request, response) {
+  const user = currentUser(request);
+  if (!user) {
+    sendJson(response, 401, { error: "Log in to continue." });
+    return null;
+  }
+  if (user.role !== "admin") {
+    sendJson(response, 403, { error: "Administrator access is required." });
+    return null;
+  }
+  return user;
+}
+
+function handleAdminSettings(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") {
+    sendJson(response, 200, { featureAccess: getFeatureAccess(), features: featureNames });
+    return;
+  }
+  if (request.method !== "PUT") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response).then((body) => {
+    if (!body) return;
+    const access = body.featureAccess;
+    if (!access || typeof access !== "object" || Array.isArray(access) ||
+      Object.keys(access).length !== Object.keys(featureAccessDefaults).length ||
+      Object.entries(featureAccessDefaults).some(([feature]) =>
+        !["public", "user", "admin"].includes(access[feature]),
+      )) {
+      sendJson(response, 400, { error: "Choose Public, Logged-in users, or Administrators for every feature." });
+      return;
+    }
+    database.prepare(`
+      INSERT INTO app_settings (key, value) VALUES ('feature_access', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(JSON.stringify(access));
+    sendJson(response, 200, { featureAccess: access });
+  }).catch((error) => {
+    console.error("Feature access settings update failed:", error);
+    sendJson(response, 500, { error: "Unable to save feature access settings." });
+  });
+}
+
+function handleAdminUsers(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") {
+    const users = database.prepare(`
+      SELECT id, username, role, active, created_at AS createdAt
+      FROM users ORDER BY id
+    `).all();
+    sendJson(response, 200, { users });
+    return;
+  }
+  if (request.method !== "POST") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response).then(async (body) => {
+    if (!body) return;
+    if (!validateUsername(body.username)) {
+      sendJson(response, 400, { error: "Username must be 3–32 characters using letters, numbers, dot, underscore, or hyphen." });
+      return;
+    }
+    if (!validatePassword(body.password)) {
+      sendJson(response, 400, { error: "Password must be between 12 and 128 characters." });
+      return;
+    }
+    if (!["admin", "user"].includes(body.role)) {
+      sendJson(response, 400, { error: "Choose the admin or user role." });
+      return;
+    }
+    const credentials = await hashPassword(body.password);
+    try {
+      database.prepare(`
+        INSERT INTO users (username, password_hash, password_salt, role)
+        VALUES (?, ?, ?, ?)
+      `).run(body.username, credentials.hash, credentials.salt, body.role);
+      sendJson(response, 201, { created: true });
+    } catch (error) {
+      if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+        sendJson(response, 409, { error: "That username is already in use." });
+        return;
+      }
+      console.error("User creation failed:", error);
+      sendJson(response, 500, { error: "Unable to create user." });
+    }
+  }).catch((error) => {
+    console.error("User creation failed:", error);
+    sendJson(response, 500, { error: "Unable to create user." });
+  });
+}
+
+function handleAdminUser(request, response, userId) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method !== "PATCH") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response).then(async (body) => {
+    if (!body) return;
+    const target = database.prepare("SELECT id, role, active FROM users WHERE id = ?").get(userId);
+    if (!target) {
+      sendJson(response, 404, { error: "User not found." });
+      return;
+    }
+    const role = body.role === undefined ? target.role : body.role;
+    const active = body.active === undefined ? target.active : Number(body.active);
+    if (!["admin", "user"].includes(role) || ![0, 1].includes(active)) {
+      sendJson(response, 400, { error: "Choose a valid role and account status." });
+      return;
+    }
+    const hasPassword = body.password !== undefined && body.password !== "";
+    if (hasPassword && !validatePassword(body.password)) {
+      sendJson(response, 400, { error: "Password must be between 12 and 128 characters." });
+      return;
+    }
+    const removesAdmin = target.role === "admin" && target.active === 1 &&
+      (role !== "admin" || active !== 1);
+    if (removesAdmin) {
+      const activeAdmins = database.prepare(`
+        SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND active = 1
+      `).get().count;
+      if (activeAdmins <= 1) {
+        sendJson(response, 409, { error: "The last active administrator cannot be disabled or demoted." });
+        return;
+      }
+    }
+    if (hasPassword) {
+      const credentials = await hashPassword(body.password);
+      database.prepare(`
+        UPDATE users SET role = ?, active = ?, password_hash = ?, password_salt = ?
+        WHERE id = ?
+      `).run(role, active, credentials.hash, credentials.salt, userId);
+    } else {
+      database.prepare("UPDATE users SET role = ?, active = ? WHERE id = ?")
+        .run(role, active, userId);
+    }
+    if (!active || hasPassword) {
+      database.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+    }
+    sendJson(response, 200, { updated: true });
+  }).catch((error) => {
+    console.error("User update failed:", error);
+    sendJson(response, 500, { error: "Unable to update user." });
+  });
+}
+
+function checkFeatureAccess(request, response, feature) {
+  if (appSetupRequired()) {
+    sendJson(response, 503, { error: "Complete initial administrator setup before using the app.", setupRequired: true });
+    return false;
+  }
+  const access = getFeatureAccess()[feature] || "admin";
+  if (access === "public") return true;
+  const user = currentUser(request);
+  if (!user) {
+    sendJson(response, 401, { error: "Log in to use this feature.", loginRequired: true });
+    return false;
+  }
+  if (access === "admin" && user.role !== "admin") {
+    sendJson(response, 403, { error: "This feature is restricted to administrators." });
+    return false;
+  }
+  return true;
+}
+
 async function macLookup(url, response) {
   const input = (url.searchParams.get("name") || "").trim();
   const validMac = /^(?:[0-9a-f]{12}|(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|(?:[0-9a-f]{2}-){5}[0-9a-f]{2}|(?:[0-9a-f]{4}\.){2}[0-9a-f]{4})$/i;
@@ -1443,6 +1911,76 @@ async function lookup(url, response) {
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
 
+  if (url.pathname === "/api/auth/status") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    handleAuthStatus(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/auth/setup") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void handleInitialSetup(request, response).catch((error) => {
+      console.error("Initial admin setup failed:", error);
+      sendJson(response, 500, { error: "Unable to complete initial admin setup." });
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/login") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void handleLogin(request, response).catch((error) => {
+      console.error("Login failed:", error);
+      sendJson(response, 500, { error: "Unable to sign in." });
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/logout") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    if (!enforceSameOrigin(request, response)) return;
+    handleLogout(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/settings") {
+    handleAdminSettings(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/users") {
+    handleAdminUsers(request, response);
+    return;
+  }
+
+  const adminUserMatch = url.pathname.match(/^\/api\/admin\/users\/(\d+)$/);
+  if (adminUserMatch) {
+    handleAdminUser(request, response, Number(adminUserMatch[1]));
+    return;
+  }
+
+  const protectedFeatures = {
+    "/api/lookup": url.searchParams.get("reverse") === "true" ? "reverse" : "forward",
+    "/api/domain-info": "whois",
+    "/api/scan": "scan",
+    "/api/custom-port-scan": "custom-port",
+    "/api/bulk-port-scan": "bulk-port",
+    "/api/mac-lookup": "mac",
+  };
+  const feature = protectedFeatures[url.pathname];
+  if (feature && !checkFeatureAccess(request, response, feature)) return;
+
   if (url.pathname === "/api/lookup") {
     if (request.method !== "GET") {
       sendJson(response, 405, { error: "Method not allowed." });
@@ -1503,6 +2041,42 @@ const server = http.createServer((request, response) => {
     return;
   }
 
+  if (appSetupRequired() && (url.pathname === "/" || url.pathname === "/index.html")) {
+    sendRedirect(response, "/setup.html");
+    return;
+  }
+  if (url.pathname === "/setup.html") {
+    if (!appSetupRequired()) {
+      sendRedirect(response, "/login.html");
+      return;
+    }
+  }
+  if (url.pathname === "/login.html" && appSetupRequired()) {
+    sendRedirect(response, "/setup.html");
+    return;
+  }
+  if (url.pathname === "/login.html") {
+    const user = currentUser(request);
+    if (user) {
+      sendRedirect(response, user.role === "admin" ? "/admin.html" : "/");
+      return;
+    }
+  }
+  if (url.pathname === "/admin.html") {
+    if (appSetupRequired()) {
+      sendRedirect(response, "/setup.html");
+      return;
+    }
+    const user = currentUser(request);
+    if (!user) {
+      sendRedirect(response, "/login.html?next=%2Fadmin.html");
+      return;
+    }
+    if (user.role !== "admin") {
+      sendRedirect(response, "/");
+      return;
+    }
+  }
   const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname;
   const filePath = path.resolve(publicDir, `.${requestedPath}`);
   if (!filePath.startsWith(`${publicDir}${path.sep}`)) {

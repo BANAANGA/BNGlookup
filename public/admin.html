@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101810">
+    <title>Administration · BNGlookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/admin.js" defer></script>
+  </head>
+  <body>
+    <main class="page account-page admin-page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="DNS Lookup home">
+          <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
+          <span>DNS<span class="brand-light">Lookup</span></span>
+        </a>
+        <nav class="account-nav"><a href="/">DNS lookup</a><button id="admin-logout" type="button">Log out</button></nav>
+      </header>
+      <section class="admin-heading">
+        <p class="eyebrow">ADMINISTRATION</p>
+        <h1>Settings &amp; users</h1>
+        <p class="account-description">Choose which features are public, available to logged-in users, or restricted to administrators.</p>
+      </section>
+      <p class="error-message" id="admin-error" role="alert" hidden></p>
+      <p class="success-message" id="admin-success" role="status" hidden></p>
+      <section class="account-card admin-card">
+        <h2>Feature access</h2>
+        <p class="form-hint">Public features do not require login. User features require any active account. Admin features require the administrator role.</p>
+        <form id="settings-form">
+          <div id="feature-settings" class="feature-settings"></div>
+          <button class="submit-button" type="submit"><span>Save feature access</span><span aria-hidden="true">→</span></button>
+        </form>
+      </section>
+      <section class="account-card admin-card">
+        <h2>Create user</h2>
+        <form id="create-user-form" class="admin-create-form">
+          <label for="new-username">Username</label>
+          <input id="new-username" name="username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" autocomplete="off" required>
+          <label for="new-password">Temporary password</label>
+          <input id="new-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+          <label for="new-role">Role</label>
+          <select id="new-role" name="role"><option value="user">User</option><option value="admin">Admin</option></select>
+          <button class="submit-button" type="submit"><span>Create user</span><span aria-hidden="true">→</span></button>
+        </form>
+      </section>
+      <section class="account-card admin-card">
+        <h2>User accounts</h2>
+        <div id="user-list" class="user-list"></div>
+      </section>
+    </main>
+  </body>
+</html>

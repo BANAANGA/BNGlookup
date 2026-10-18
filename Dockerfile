@@ -6,6 +6,9 @@ WORKDIR /app
 COPY server.js ./server.js
 COPY public ./public
 
+RUN mkdir -p /data && chown node:node /data
+VOLUME ["/data"]
+
 EXPOSE 3000
 USER node
 
