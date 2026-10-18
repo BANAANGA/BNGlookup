@@ -1,5 +1,7 @@
 const form = document.querySelector("#lookup-form");
 const input = document.querySelector("#name-input");
+const nameLabel = document.querySelector("#name-label");
+const primaryInputWrap = document.querySelector("#primary-input-wrap");
 const recordType = document.querySelector("#record-type");
 const customType = document.querySelector("#custom-type");
 const typeControl = document.querySelector("#type-control");
@@ -7,10 +9,15 @@ const nameserverControl = document.querySelector("#nameserver-control");
 const nameserverInput = document.querySelector("#nameserver-input");
 const portScanControl = document.querySelector("#port-scan-control");
 const portScanInput = document.querySelector("#port-scan-input");
+const customPortsControl = document.querySelector("#custom-ports-control");
+const customPortsInput = document.querySelector("#custom-ports-input");
+const bulkTargetsControl = document.querySelector("#bulk-targets-control");
+const bulkTargetsInput = document.querySelector("#bulk-targets-input");
+const bulkPortControl = document.querySelector("#bulk-port-control");
+const bulkPortInput = document.querySelector("#bulk-port-input");
 const resultPanel = document.querySelector("#result");
 const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
-const nameLabel = document.querySelector("#name-label");
 const formHint = document.querySelector("#form-hint");
 const tabs = [...document.querySelectorAll(".mode-tab")];
 let mode = "scan";
@@ -21,23 +28,38 @@ function setMode(nextMode) {
   const details = mode === "details";
   const mac = mode === "mac";
   const scan = mode === "scan";
-  const supportsNameserver = !details && !mac;
+  const customPortScan = mode === "custom-port";
+  const bulkPortScan = mode === "bulk-port";
+  const portScan = customPortScan || bulkPortScan;
+  const standardLookup = !customPortScan && !bulkPortScan;
+  const supportsNameserver = ["forward", "reverse", "scan"].includes(mode);
   tabs.forEach((tab) => {
     const selected = tab.dataset.mode === mode;
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", String(selected));
   });
-  nameLabel.textContent = reverse ? "IP address" : mac ? "MAC address" : "Domain name";
+  nameLabel.hidden = bulkPortScan;
+  primaryInputWrap.hidden = bulkPortScan;
+  input.required = !bulkPortScan;
+  nameLabel.textContent = reverse ? "IP address" : mac ? "MAC address" : "Domain name or IP address";
   input.placeholder = reverse
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
       ? "e.g. 00:1A:2B:3C:4D:5E"
-    : "e.g. example.com";
-  input.autocomplete = reverse || mac ? "off" : "url";
-  typeControl.hidden = reverse || details || mac || scan;
-  customType.hidden = reverse || details || mac || scan || recordType.value !== "custom";
+    : customPortScan
+      ? "e.g. example.com or 8.8.8.8"
+      : "e.g. example.com";
+  input.autocomplete = reverse || mac || portScan ? "off" : "url";
+  typeControl.hidden = reverse || details || mac || scan || portScan;
+  customType.hidden = reverse || details || mac || scan || portScan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
   portScanControl.hidden = !scan;
+  customPortsControl.hidden = !customPortScan;
+  bulkTargetsControl.hidden = !bulkPortScan;
+  bulkPortControl.hidden = !bulkPortScan;
+  customPortsInput.required = customPortScan;
+  bulkTargetsInput.required = bulkPortScan;
+  bulkPortInput.required = bulkPortScan;
   formHint.textContent = reverse
     ? "Find the PTR record associated with an IPv4 or IPv6 address."
     : details
@@ -46,8 +68,12 @@ function setMode(nextMode) {
         ? "Find the registered hardware vendor and MAC address type."
       : scan
         ? "Scan DNS records, cloud-provider hostnames, SPF, and DKIM. Optionally choose the nameserver."
+      : customPortScan
+        ? "Scan a custom list or range of TCP ports on one domain or IP address."
+      : bulkPortScan
+        ? "Check one TCP port across an explicit list or CIDR block of public IP addresses."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
-  submitButton.innerHTML = `<span>${scan ? "Magic scan" : mac ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+  submitButton.innerHTML = `<span>${scan ? "Magic scan" : customPortScan ? "Custom port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   input.focus();
@@ -174,7 +200,10 @@ function renderScanResult(data) {
         : "";
     return `
       <div class="port-scan-address">
-        <strong>${escapeHtml(result.address)}</strong>
+        <div class="port-scan-target">
+          <strong>${escapeHtml(result.domain)}</strong>
+          <small>${escapeHtml(result.address)}</small>
+        </div>
         <span>${result.openPorts.length
     ? result.openPorts.map((port) => `<span class="port-badge">${port}</span>`).join("")
     : "No open ports found in the checked set"}
@@ -269,6 +298,35 @@ function renderScanResult(data) {
     ${portScanSection}
     ${hostCards || '<p class="empty-result">No records found for the domain or the checked subdomains.</p>'}
     <p class="scan-disclaimer">Subdomain discovery checks a built-in list of common names; it does not enumerate every subdomain. IP geolocation is provided by ipwho.is and may be unavailable or approximate.</p>`;
+  resultPanel.hidden = false;
+}
+
+function renderPortScanResult(data, title) {
+  const results = data.results.map((result) => `
+    <div class="port-scan-address">
+      <div class="port-scan-target">
+        <strong>${escapeHtml(result.target)}</strong>
+        ${result.target !== result.address ? `<small>${escapeHtml(result.address)}</small>` : ""}
+      </div>
+      <span>${result.openPorts.length
+    ? result.openPorts.map((port) => `<span class="port-badge">${port}</span>`).join("")
+    : "No open ports found"}
+      </span>
+    </div>
+  `).join("");
+  const openPortCount = data.results.reduce((count, result) => count + result.openPorts.length, 0);
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">${escapeHtml(title.toUpperCase())}</p><h2>${escapeHtml(data.scanLabel)}</h2></div>
+      <span class="status-badge ${openPortCount ? "success" : "warning"}">${openPortCount} open</span>
+    </div>
+    <div class="scan-summary">
+      <span>${data.addressesScanned} public IP address(es) scanned</span>
+      <span>${data.portsChecked} TCP port(s) checked per address</span>
+    </div>
+    ${data.addressesSkipped ? `<p class="detail-notice">${data.addressesSkipped} private, reserved, or excess IP address(es) were skipped.</p>` : ""}
+    ${results || '<p class="empty-result">No public IP addresses were available to scan.</p>'}
+    <p class="scan-disclaimer">Only ports that accepted a TCP connection are listed. Scan only systems you are authorized to test.</p>`;
   resultPanel.hidden = false;
 }
 
@@ -408,7 +466,10 @@ form.addEventListener("submit", async (event) => {
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   submitButton.disabled = true;
-  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${mode === "scan" ? "Scanning" : "Looking up"}</span>`;
+  const customPortScan = mode === "custom-port";
+  const bulkPortScan = mode === "bulk-port";
+  const isPortScan = customPortScan || bulkPortScan;
+  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${mode === "scan" ? "Scanning" : isPortScan ? "Scanning ports" : "Looking up"}</span>`;
 
   const params = new URLSearchParams({
     name: input.value.trim(),
@@ -423,25 +484,49 @@ form.addEventListener("submit", async (event) => {
   }
 
   try {
-    const endpoint = mode === "details"
+    const endpoint = customPortScan
+      ? "/api/custom-port-scan"
+      : bulkPortScan
+        ? "/api/bulk-port-scan"
+      : mode === "details"
       ? "/api/domain-info"
       : mode === "mac"
         ? "/api/mac-lookup"
       : mode === "scan"
         ? "/api/scan"
         : "/api/lookup";
-    const response = await fetch(`${endpoint}?${params}`);
+    const requestOptions = customPortScan
+      ? {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: input.value.trim(),
+          ports: customPortsInput.value.trim(),
+        }),
+      }
+      : bulkPortScan
+        ? {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            targets: bulkTargetsInput.value,
+            port: bulkPortInput.value,
+          }),
+        }
+        : {};
+    const response = await fetch(isPortScan ? endpoint : `${endpoint}?${params}`, requestOptions);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "DNS lookup failed.");
     if (mode === "details") renderDomainInfo(data);
     else if (mode === "mac") renderMacResult(data);
     else if (mode === "scan") renderScanResult(data);
+    else if (isPortScan) renderPortScanResult(data, customPortScan ? "Custom port scan" : "Bulk port scan");
     else showResult(data);
   } catch (error) {
     errorMessage.textContent = error.message || "Unable to complete the lookup.";
     errorMessage.hidden = false;
   } finally {
     submitButton.disabled = false;
-    submitButton.innerHTML = `<span>${mode === "scan" ? "Magic scan" : mode === "mac" ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+    submitButton.innerHTML = `<span>${mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Custom port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   }
 });
