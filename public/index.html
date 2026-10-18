@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f6f8fb">
+    <title>DNS Lookup</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="DNS Lookup home">
+          <span class="brand-mark" aria-hidden="true">D</span>
+          <span>DNS<span class="brand-light">Lookup</span></span>
+        </a>
+        <span class="online"><span></span> DNS over HTTPS</span>
+      </header>
+
+      <section class="intro">
+        <p class="eyebrow">DNS TOOLKIT</p>
+        <h1>Find what the internet knows.</h1>
+        <p class="subtitle">Look up DNS records for any domain, or find the hostname behind an IP address.</p>
+      </section>
+
+      <section class="lookup-card" aria-label="DNS lookup">
+        <div class="mode-tabs" role="tablist" aria-label="Lookup mode">
+          <button class="mode-tab active" id="forward-tab" type="button" role="tab" aria-selected="true" data-mode="forward">
+            <span aria-hidden="true">⌕</span> DNS lookup
+          </button>
+          <button class="mode-tab" id="reverse-tab" type="button" role="tab" aria-selected="false" data-mode="reverse">
+            <span aria-hidden="true">↶</span> Reverse lookup
+          </button>
+        </div>
+
+        <form id="lookup-form">
+          <label class="field-label" id="name-label" for="name-input">Domain name</label>
+          <div class="search-row">
+            <div class="input-wrap">
+              <span class="input-icon" aria-hidden="true">⌕</span>
+              <input id="name-input" name="name" type="text" placeholder="e.g. example.com" autocomplete="url" spellcheck="false" required>
+            </div>
+            <div class="type-control" id="type-control">
+              <label class="sr-only" for="record-type">Record type</label>
+              <select id="record-type" name="type">
+                <option>A</option>
+                <option>AAAA</option>
+                <option>ANY</option>
+                <option>CAA</option>
+                <option>CNAME</option>
+                <option>HTTPS</option>
+                <option>MX</option>
+                <option>NS</option>
+                <option>PTR</option>
+                <option>SOA</option>
+                <option>SRV</option>
+                <option>SSHFP</option>
+                <option>SVCB</option>
+                <option>TLSA</option>
+                <option>TXT</option>
+                <option value="custom">Custom…</option>
+              </select>
+            </div>
+            <input id="custom-type" class="custom-type" type="text" placeholder="Type" aria-label="Custom DNS record type" maxlength="32" hidden>
+            <button class="submit-button" id="submit-button" type="submit">
+              <span>Lookup</span><span aria-hidden="true">→</span>
+            </button>
+          </div>
+          <p class="hint" id="form-hint">Choose a record type or enter a custom DNS type. ANY requests all available records.</p>
+          <p class="error-message" id="error-message" role="alert" hidden></p>
+        </form>
+
+        <div class="result" id="result" aria-live="polite" hidden></div>
+      </section>
+
+      <footer>
+        <span>Simple, fast, and open DNS lookups.</span>
+        <span>Queries are resolved via DNS over HTTPS.</span>
+      </footer>
+    </main>
+  </body>
+</html>
