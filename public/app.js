@@ -15,6 +15,7 @@ function setMode(nextMode) {
   mode = nextMode;
   const reverse = mode === "reverse";
   const details = mode === "details";
+  const scan = mode === "scan";
   tabs.forEach((tab) => {
     const selected = tab.dataset.mode === mode;
     tab.classList.toggle("active", selected);
@@ -25,13 +26,16 @@ function setMode(nextMode) {
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : "e.g. example.com";
   input.autocomplete = reverse ? "off" : "url";
-  typeControl.hidden = reverse || details;
-  customType.hidden = reverse || details || recordType.value !== "custom";
+  typeControl.hidden = reverse || details || scan;
+  customType.hidden = reverse || details || scan || recordType.value !== "custom";
   formHint.textContent = reverse
     ? "Find the PTR record associated with an IPv4 or IPv6 address."
     : details
       ? "View public domain registration (RDAP/WHOIS) and authoritative nameserver details."
-      : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
+      : scan
+        ? "Check 10 common DNS record types for the domain and 24 commonly used subdomains."
+        : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
+  submitButton.innerHTML = `<span>${scan ? "Scan domain" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   input.focus();
@@ -90,6 +94,48 @@ function showResult(data) {
     ${renderSection("Authority", data.authority, data.ptrLookups)}
     ${renderSection("Additional", data.additional, data.ptrLookups)}
     ${data.status === 0 && !data.answers.length ? '<p class="empty-result">The query succeeded, but no matching records were returned.</p>' : ""}`;
+  resultPanel.hidden = false;
+}
+
+function renderScanResult(data) {
+  const foundHosts = data.hosts.filter((host) => host.records.length);
+  const hostCards = foundHosts.map((host) => {
+    const recordGroups = host.records.map((record) => `
+      <div class="scan-record">
+        <span class="scan-record-type">${escapeHtml(record.type)}</span>
+        <div class="scan-record-answers">${record.answers.map((answer) => {
+          const ptr = data.ptrLookups?.[answer.data];
+          const ptrText = ptr
+            ? ptr.error
+              ? `PTR lookup: ${ptr.error}`
+              : ptr.answers.length
+                ? `PTR: ${ptr.answers.join(", ")}`
+                : `PTR: no record (${ptr.status})`
+            : "";
+          return `<div class="scan-answer">
+            <span>${escapeHtml(answer.data)}</span>
+            ${ptrText ? `<small>${escapeHtml(ptrText)}</small>` : ""}
+          </div>`;
+        }).join("")}</div>
+      </div>`).join("");
+    return `<article class="scan-host">
+      <h3>${escapeHtml(host.name)}${host.name === data.domain ? '<span class="scan-root-tag">domain</span>' : ""}</h3>
+      <div class="scan-records">${recordGroups}</div>
+    </article>`;
+  }).join("");
+
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">BULK DNS SCAN</p><h2>${escapeHtml(data.domain)}</h2></div>
+      <span class="status-badge success">${data.hostsWithRecords} hosts found</span>
+    </div>
+    <div class="scan-summary">
+      <span>${data.subdomainsChecked} subdomains checked</span>
+      <span>${data.recordTypes.map(escapeHtml).join(" · ")}</span>
+    </div>
+    ${data.failedQueries ? `<p class="detail-notice">${data.failedQueries} DNS queries could not be completed.</p>` : ""}
+    ${hostCards || '<p class="empty-result">No records found for the domain or the checked subdomains.</p>'}
+    <p class="scan-disclaimer">Subdomain discovery checks a built-in list of common names; it does not enumerate every subdomain.</p>`;
   resultPanel.hidden = false;
 }
 
@@ -197,7 +243,7 @@ form.addEventListener("submit", async (event) => {
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   submitButton.disabled = true;
-  submitButton.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Looking up</span>';
+  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${mode === "scan" ? "Scanning" : "Looking up"}</span>`;
 
   const params = new URLSearchParams({
     name: input.value.trim(),
@@ -206,17 +252,22 @@ form.addEventListener("submit", async (event) => {
   });
 
   try {
-    const endpoint = mode === "details" ? "/api/domain-info" : "/api/lookup";
+    const endpoint = mode === "details"
+      ? "/api/domain-info"
+      : mode === "scan"
+        ? "/api/scan"
+        : "/api/lookup";
     const response = await fetch(`${endpoint}?${params}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "DNS lookup failed.");
     if (mode === "details") renderDomainInfo(data);
+    else if (mode === "scan") renderScanResult(data);
     else showResult(data);
   } catch (error) {
     errorMessage.textContent = error.message || "Unable to complete the lookup.";
     errorMessage.hidden = false;
   } finally {
     submitButton.disabled = false;
-    submitButton.innerHTML = '<span>Lookup</span><span aria-hidden="true">→</span>';
+    submitButton.innerHTML = `<span>${mode === "scan" ? "Scan domain" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   }
 });

@@ -16,6 +16,13 @@ const dnsStatusNames = {
   4: "NOTIMP",
   5: "REFUSED",
 };
+const scanRecordTypes = ["A", "AAAA", "CAA", "CNAME", "HTTPS", "MX", "NS", "SOA", "SRV", "TXT"];
+const commonSubdomains = [
+  "www", "mail", "webmail", "ftp", "api", "app", "admin", "portal",
+  "blog", "shop", "dev", "staging", "test", "status", "cdn", "static",
+  "vpn", "smtp", "imap", "pop", "files", "docs", "support", "git",
+];
+const scanConcurrency = 12;
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -207,6 +214,93 @@ async function fetchPtrLookups(addresses) {
     })));
   }
   return Object.fromEntries(results);
+}
+
+async function queryDnsRecords(name, type) {
+  const queryUrl = new URL(dohEndpoint);
+  queryUrl.searchParams.set("name", name);
+  queryUrl.searchParams.set("type", type);
+  const response = await fetch(queryUrl, {
+    headers: { accept: "application/dns-json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) {
+    throw new Error(`DNS provider returned HTTP ${response.status}.`);
+  }
+  const data = await response.json();
+  if (typeof data.Status !== "number" || !Array.isArray(data.Answer || [])) {
+    throw new Error("DNS provider returned an invalid response.");
+  }
+  return data.Answer || [];
+}
+
+async function bulkScan(url, response) {
+  const domain = normalizeDomain(url.searchParams.get("name") || "");
+  if (!domain) {
+    sendJson(response, 400, { error: "Enter a valid domain name." });
+    return;
+  }
+
+  const hostnames = [
+    domain,
+    ...commonSubdomains
+      .map((label) => `${label}.${domain}`)
+      .filter((name) => name.length <= 253 && validDnsName(name)),
+  ];
+  const recordsByHost = new Map(hostnames.map((name) => [name, []]));
+  const tasks = hostnames.flatMap((name) =>
+    scanRecordTypes.map((type) => ({ name, type })),
+  );
+  let nextTask = 0;
+  let failedQueries = 0;
+
+  async function runWorker() {
+    while (nextTask < tasks.length) {
+      const task = tasks[nextTask];
+      nextTask += 1;
+      try {
+        const answers = await queryDnsRecords(task.name, task.type);
+        if (answers.length) {
+          recordsByHost.get(task.name).push({ type: task.type, answers });
+        }
+      } catch {
+        failedQueries += 1;
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(scanConcurrency, tasks.length) },
+      () => runWorker(),
+    ),
+  );
+  for (const records of recordsByHost.values()) {
+    records.sort(
+      (left, right) =>
+        scanRecordTypes.indexOf(left.type) - scanRecordTypes.indexOf(right.type),
+    );
+  }
+
+  const hosts = hostnames.map((name) => ({
+    name,
+    records: recordsByHost.get(name),
+  }));
+  const addresses = hosts.flatMap((host) =>
+    host.records.flatMap((record) =>
+      record.answers.map((answer) => answer.data),
+    ),
+  );
+
+  sendJson(response, 200, {
+    domain,
+    recordTypes: scanRecordTypes,
+    subdomainsChecked: hostnames.length - 1,
+    hosts,
+    hostsWithRecords: hosts.filter((host) => host.records.length).length,
+    failedQueries,
+    ptrLookups: await fetchPtrLookups(addresses),
+  });
 }
 
 async function fetchNameservers(domain) {
@@ -425,6 +519,15 @@ const server = http.createServer((request, response) => {
       return;
     }
     domainInfo(url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/scan") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    bulkScan(url, response);
     return;
   }
 
