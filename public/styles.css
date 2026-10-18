@@ -340,6 +340,25 @@ h1 {
 .scan-answer + .scan-answer { margin-top: 8px; }
 .scan-answer small { display: block; margin-top: 3px; color: #4773d9; font-family: "DM Sans", sans-serif; font-size: 10px; }
 .scan-disclaimer { margin: 15px 0 0; color: #8a96a9; font-size: 10px; line-height: 1.5; }
+.scan-provider-tag { padding: 3px 6px; border: 1px solid #2b593c; border-radius: 10px; color: #8aeab1; background: #14251a; font-size: 9px; font-weight: 500; }
+.email-auth {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid #294c36;
+  border-radius: 8px;
+  background: #0a120d;
+}
+.email-auth > h3 { margin: 0 0 12px; color: #9ce9b9; font-size: 12px; }
+.email-auth-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.email-auth-grid > div { min-width: 0; }
+.email-auth-grid h4 { display: flex; align-items: center; gap: 8px; margin: 0 0 9px; color: #d8e8dd; font-size: 11px; }
+.email-auth-status { padding: 3px 6px; border-radius: 10px; font-size: 9px; font-weight: 500; }
+.email-auth-status.found { color: #8aeab1; background: #173421; }
+.email-auth-status.missing { color: #c0c0c0; background: #252525; }
+.email-auth-record { display: flex; flex-direction: column; gap: 4px; margin-top: 7px; padding: 8px; border: 1px solid #223528; border-radius: 5px; }
+.email-auth-record strong { color: #b6e6c7; font-size: 10px; overflow-wrap: anywhere; }
+.email-auth-record span { color: #d0d0d0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; overflow-wrap: anywhere; }
+.email-auth .scan-disclaimer { margin-bottom: 0; }
 
 footer {
   display: flex;
@@ -388,6 +407,7 @@ footer {
   .detail-row > span, .contact-row > span { flex-basis: auto; }
   .detail-row strong, .contact-row strong { text-align: left; }
   .scan-summary { flex-direction: column; }
+  .email-auth-grid { grid-template-columns: 1fr; }
   footer { flex-direction: column; gap: 7px; }
 }
 

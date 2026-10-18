@@ -22,6 +22,62 @@ const commonSubdomains = [
   "blog", "shop", "dev", "staging", "test", "status", "cdn", "static",
   "vpn", "smtp", "imap", "pop", "files", "docs", "support", "git",
 ];
+const providerCandidates = [
+  { name: "_amazonses", provider: "AWS / SES", types: ["TXT"] },
+  { name: "selector1._domainkey", provider: "AWS / SES", types: ["CNAME", "TXT"] },
+  { name: "selector2._domainkey", provider: "AWS / SES", types: ["CNAME", "TXT"] },
+  { name: "amazonses._domainkey", provider: "AWS / SES", types: ["CNAME", "TXT"] },
+  { name: "awverify", provider: "Azure", types: ["CNAME", "TXT"] },
+  { name: "awverify.www", provider: "Azure", types: ["CNAME", "TXT"] },
+  { name: "asuid", provider: "Azure", types: ["TXT"] },
+  { name: "asuid.www", provider: "Azure", types: ["TXT"] },
+  { name: "afdverify", provider: "Azure Front Door", types: ["CNAME", "TXT"] },
+  { name: "afdverify.www", provider: "Azure Front Door", types: ["CNAME", "TXT"] },
+  { name: "azurefd", provider: "Azure Front Door", types: ["A", "AAAA", "CNAME"] },
+  { name: "azurewebsites", provider: "Azure App Service", types: ["A", "AAAA", "CNAME"] },
+  { name: "trafficmanager", provider: "Azure Traffic Manager", types: ["A", "AAAA", "CNAME"] },
+  { name: "appspot", provider: "Google Cloud", types: ["A", "AAAA", "CNAME"] },
+  { name: "ghs", provider: "Google Cloud", types: ["A", "AAAA", "CNAME"] },
+  { name: "googleapis", provider: "Google Cloud", types: ["A", "AAAA", "CNAME"] },
+  { name: "cloudrun", provider: "Google Cloud Run", types: ["A", "AAAA", "CNAME"] },
+  { name: "cloudfunctions", provider: "Google Cloud Functions", types: ["A", "AAAA", "CNAME"] },
+  { name: "storage", provider: "Google Cloud Storage", types: ["A", "AAAA", "CNAME"] },
+  { name: "_cloudflare", provider: "Cloudflare", types: ["TXT", "CNAME"] },
+  { name: "workers", provider: "Cloudflare Workers", types: ["A", "AAAA", "CNAME"] },
+  { name: "pages", provider: "Cloudflare Pages / GitHub Pages", types: ["A", "AAAA", "CNAME", "TXT"] },
+  { name: "_vercel", provider: "Vercel", types: ["TXT", "CNAME"] },
+  { name: "vercel", provider: "Vercel", types: ["A", "AAAA", "CNAME"] },
+  { name: "netlify", provider: "Netlify", types: ["A", "AAAA", "CNAME"] },
+  { name: "_netlify", provider: "Netlify", types: ["TXT", "CNAME"] },
+  { name: "heroku", provider: "Heroku", types: ["A", "AAAA", "CNAME"] },
+  { name: "herokuapp", provider: "Heroku", types: ["A", "AAAA", "CNAME"] },
+  { name: "digitalocean", provider: "DigitalOcean", types: ["A", "AAAA", "CNAME"] },
+  { name: "render", provider: "Render", types: ["A", "AAAA", "CNAME"] },
+  { name: "fly", provider: "Fly.io", types: ["A", "AAAA", "CNAME"] },
+  { name: "railway", provider: "Railway", types: ["A", "AAAA", "CNAME"] },
+  { name: "shopify", provider: "Shopify", types: ["A", "AAAA", "CNAME", "TXT"] },
+  { name: "_acme-challenge", provider: "ACME certificate validation", types: ["TXT", "CNAME"] },
+  { name: "_dmarc", provider: "Email security", types: ["TXT"] },
+  { name: "_mta-sts", provider: "Email security", types: ["TXT"] },
+  { name: "_smtp._tls", provider: "Email security", types: ["TXT"] },
+];
+const dkimSelectors = [
+  ["default", "Common DKIM"],
+  ["google", "Google Workspace"],
+  ["selector1", "Microsoft 365"],
+  ["selector2", "Microsoft 365"],
+  ["k1", "Mailchimp"],
+  ["s1", "Common DKIM"],
+  ["s2", "Common DKIM"],
+  ["mail", "Common DKIM"],
+  ["smtp", "Common DKIM"],
+  ["dkim", "Common DKIM"],
+  ["amazonses", "AWS / SES"],
+  ["mandrill", "Mailchimp / Mandrill"],
+  ["zoho", "Zoho Mail"],
+  ["protonmail", "Proton Mail"],
+  ["mxvault", "Common DKIM"],
+];
 const scanConcurrency = 12;
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -241,15 +297,51 @@ async function bulkScan(url, response) {
     return;
   }
 
-  const hostnames = [
-    domain,
-    ...commonSubdomains
-      .map((label) => `${label}.${domain}`)
-      .filter((name) => name.length <= 253 && validDnsName(name)),
+  const registrationPromise = fetchRdap(domain).then(
+    (registration) => ({ registration, error: null }),
+    (error) => ({
+      registration: null,
+      error: error.message || "Unable to retrieve registration details.",
+    }),
+  );
+  const hostCandidates = new Map([
+    [domain, { name: domain, providers: [], types: scanRecordTypes }],
+  ]);
+  for (const label of commonSubdomains) {
+    const name = `${label}.${domain}`;
+    if (name.length <= 253 && validDnsName(name)) {
+      hostCandidates.set(name, { name, providers: [], types: scanRecordTypes });
+    }
+  }
+  const scanCandidates = [
+    ...providerCandidates,
+    ...dkimSelectors.map(([selector, provider]) => ({
+      name: `${selector}._domainkey`,
+      provider: `DKIM / ${provider}`,
+      types: ["TXT", "CNAME"],
+    })),
   ];
-  const recordsByHost = new Map(hostnames.map((name) => [name, []]));
-  const tasks = hostnames.flatMap((name) =>
-    scanRecordTypes.map((type) => ({ name, type })),
+  for (const candidate of scanCandidates) {
+    const name = `${candidate.name}.${domain}`;
+    if (!validDnsName(name)) continue;
+    const existing = hostCandidates.get(name);
+    if (existing) {
+      if (!existing.providers.includes(candidate.provider)) {
+        existing.providers.push(candidate.provider);
+      }
+      existing.types = [...new Set([...existing.types, ...candidate.types])];
+    } else {
+      hostCandidates.set(name, {
+        name,
+        providers: [candidate.provider],
+        types: candidate.types,
+      });
+    }
+  }
+  const candidates = [...hostCandidates.values()];
+  const recordsByHost = new Map(candidates.map(({ name }) => [name, []]));
+  const tasks = candidates.flatMap(({ name, providers, types }) =>
+    types.map((type) => ({ name, providers, type })),
   );
   let nextTask = 0;
   let failedQueries = 0;
@@ -261,7 +353,11 @@ async function bulkScan(url, response) {
       try {
         const answers = await queryDnsRecords(task.name, task.type);
         if (answers.length) {
-          recordsByHost.get(task.name).push({ type: task.type, answers });
+          recordsByHost.get(task.name).push({
+            type: task.type,
+            answers,
+            providers: task.providers,
+          });
         }
       } catch {
         failedQueries += 1;
@@ -282,22 +378,57 @@ async function bulkScan(url, response) {
     );
   }
 
-  const hosts = hostnames.map((name) => ({
+  const hosts = candidates.map(({ name, providers }) => ({
     name,
+    providers,
     records: recordsByHost.get(name),
   }));
+  const spfRecords = hosts.flatMap((host) =>
+    host.records
+      .filter((record) => record.type === "TXT")
+      .flatMap((record) => record.answers
+        .filter((answer) => answer.data.replace(/^"|"$/g, "").trim().toLowerCase().startsWith("v=spf1"))
+        .map((answer) => ({ name: host.name, data: answer.data }))),
+  );
+  const dkimRecords = hosts
+    .filter((host) => host.name.includes("._domainkey."))
+    .map((host) => ({
+      name: host.name,
+      records: host.records
+        .filter((record) => record.type === "TXT" || record.type === "CNAME")
+        .flatMap((record) => record.answers.map((answer) => ({
+          type: record.type,
+          data: answer.data,
+        })))
+        .filter((record) =>
+          record.type === "CNAME" ||
+          (/v=DKIM1/i.test(record.data) &&
+            /(?:^|[;\s])p\s*=\s*"?[^"\s;]/i.test(record.data)),
+        ),
+    }));
   const addresses = hosts.flatMap((host) =>
     host.records.flatMap((record) =>
       record.answers.map((answer) => answer.data),
     ),
   );
+  const registrationResult = await registrationPromise;
 
   sendJson(response, 200, {
     domain,
     recordTypes: scanRecordTypes,
-    subdomainsChecked: hostnames.length - 1,
+    subdomainsChecked: candidates.length - 1,
+    providerCandidatesChecked: providerCandidates.length,
+    providerNames: [...new Set(providerCandidates.map((candidate) => candidate.provider))],
     hosts,
     hostsWithRecords: hosts.filter((host) => host.records.length).length,
+    registration: registrationResult.registration,
+    registrationError: registrationResult.error,
+    emailSecurity: {
+      spfRecords,
+      rootSpfFound: spfRecords.some((record) => record.name === domain),
+      dkimSelectorsChecked: dkimRecords.length,
+      dkimRecords: dkimRecords.filter((entry) => entry.records.length),
+    },
     failedQueries,
     ptrLookups: await fetchPtrLookups(addresses),
   });

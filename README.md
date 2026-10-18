@@ -8,8 +8,9 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Query common DNS records: A, AAAA, ANY, CAA, CNAME, HTTPS, MX, NS, PTR, SOA,
   SRV, SSHFP, SVCB, TLSA, and TXT.
 - Query other record types by name or numeric DNS type code.
-- Scan a domain and a built-in list of common subdomains for 10 common DNS
-  record types in one operation.
+- Scan a domain and common subdomains for DNS records, cloud-provider
+  endpoints, WHOIS/RDAP registration data, SPF policies, and common DKIM
+  selectors.
 - Look up PTR records from IPv4 or IPv6 addresses.
 - Display PTR hostnames for IP addresses returned in DNS results and for
   resolved nameserver addresses.
@@ -126,9 +127,15 @@ Registration data is retrieved from RDAP using `rdap.org`, which redirects to
 the responsible registry. The domain name is sent to the RDAP service;
 contact details may be redacted or unavailable.
 
-Choose **Bulk scan** to check common record types for the domain and 24
-frequently used subdomain names (such as `www`, `mail`, `api`, and `staging`).
-It checks A, AAAA, CAA, CNAME, HTTPS, MX, NS, SOA, SRV, and TXT records and
-shows PTR hostnames for returned IP addresses. This uses a built-in candidate
-list; DNS does not provide a way to enumerate every subdomain, so results are
-not exhaustive.
+The **Magic scan** tool opens by default. It checks A, AAAA, CAA, CNAME, HTTPS,
+MX, NS, SOA, SRV, and TXT records for the domain and common subdomains such as
+`www`, `mail`, `api`, and `staging`. It also checks common service and
+verification names used by AWS/SES, Azure, Google Cloud, Cloudflare, Vercel,
+Netlify, Heroku, DigitalOcean, and other providers. The scan also retrieves
+public RDAP (WHOIS) registration data for the domain. SPF is identified from
+scanned TXT records; DKIM checks common selectors for TXT and CNAME records.
+Returned IP addresses include PTR lookups where available.
+
+Subdomain and DKIM selector checks use built-in candidate lists rather than
+enumeration. DNS cannot list every subdomain or a domain's custom DKIM
+selectors, so scan results may not include every configured record.

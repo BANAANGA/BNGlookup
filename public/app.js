@@ -9,7 +9,7 @@ const submitButton = document.querySelector("#submit-button");
 const nameLabel = document.querySelector("#name-label");
 const formHint = document.querySelector("#form-hint");
 const tabs = [...document.querySelectorAll(".mode-tab")];
-let mode = "forward";
+let mode = "scan";
 
 function setMode(nextMode) {
   mode = nextMode;
@@ -33,9 +33,9 @@ function setMode(nextMode) {
     : details
       ? "View public domain registration (RDAP/WHOIS) and authoritative nameserver details."
       : scan
-        ? "Check 10 common DNS record types for the domain and 24 commonly used subdomains."
+        ? "Scan DNS records, cloud-provider hostnames, SPF policies, and common DKIM selectors."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
-  submitButton.innerHTML = `<span>${scan ? "Scan domain" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+  submitButton.innerHTML = `<span>${scan ? "Magic scan" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   input.focus();
@@ -100,6 +100,9 @@ function showResult(data) {
 function renderScanResult(data) {
   const foundHosts = data.hosts.filter((host) => host.records.length);
   const hostCards = foundHosts.map((host) => {
+    const providerBadges = host.providers.map((provider) =>
+      `<span class="scan-provider-tag">${escapeHtml(provider)}</span>`,
+    ).join("");
     const recordGroups = host.records.map((record) => `
       <div class="scan-record">
         <span class="scan-record-type">${escapeHtml(record.type)}</span>
@@ -119,21 +122,93 @@ function renderScanResult(data) {
         }).join("")}</div>
       </div>`).join("");
     return `<article class="scan-host">
-      <h3>${escapeHtml(host.name)}${host.name === data.domain ? '<span class="scan-root-tag">domain</span>' : ""}</h3>
+      <h3>${escapeHtml(host.name)}${host.name === data.domain ? '<span class="scan-root-tag">domain</span>' : ""}${providerBadges}</h3>
       <div class="scan-records">${recordGroups}</div>
     </article>`;
   }).join("");
+  const emailSecurity = data.emailSecurity;
+  const spfRecords = emailSecurity.spfRecords.map((record) => `
+    <div class="email-auth-record"><strong>${escapeHtml(record.name)}</strong><span>${escapeHtml(record.data)}</span></div>
+  `).join("");
+  const dkimRecords = emailSecurity.dkimRecords.map((entry) => `
+    <div class="email-auth-record">
+      <strong>${escapeHtml(entry.name)}</strong>
+      <span>${entry.records.map((record) => `${escapeHtml(record.type)}: ${escapeHtml(record.data)}`).join("<br>")}</span>
+    </div>
+  `).join("");
+  const registration = data.registration;
+  const registrationDates = registration?.dates || {};
+  const whoisDateLabels = {
+    registration: "Registered",
+    expiration: "Expires",
+    "last changed": "Last updated",
+    "last update of RDAP database": "RDAP record updated",
+  };
+  const registrationContacts = (registration?.contacts || []).map((contact) => {
+    const role = contact.roles.length ? contact.roles.join(", ") : "Contact";
+    const values = [
+      contact.name,
+      contact.organization,
+      contact.email,
+      contact.phone,
+      contact.address,
+    ].filter(Boolean);
+    return values.length
+      ? `<div class="contact-row"><span>${escapeHtml(role)}</span><strong>${values.map(escapeHtml).join(" · ")}</strong></div>`
+      : "";
+  }).join("");
+  const registrationNameservers = (registration?.nameservers || []).map((nameserver) => `
+    <div class="detail-row">
+      <span>Nameserver</span>
+      <strong>${escapeHtml(nameserver.name)}${[...nameserver.ipv4, ...nameserver.ipv6].length
+    ? ` · ${[...nameserver.ipv4, ...nameserver.ipv6].map(escapeHtml).join(", ")}`
+    : ""}</strong>
+    </div>
+  `).join("");
+  const registrationDetails = registration
+    ? `<div class="detail-list">
+        ${renderDetail("Registrar", registration.registrar?.organization || registration.registrar?.name)}
+        ${renderDetail("Registry handle", registration.handle)}
+        ${Object.entries(registrationDates).map(([action, date]) =>
+    renderDetail(whoisDateLabels[action] || action, new Date(date).toLocaleDateString()),
+  ).join("")}
+        ${registrationNameservers}
+      </div>
+      ${registration.statuses.length
+    ? `<div class="status-list">${registration.statuses.map((status) => `<span>${escapeHtml(status)}</span>`).join("")}</div>`
+    : ""}
+      ${registrationContacts ? `<div class="contact-list">${registrationContacts}</div>` : ""}`
+    : `<p class="detail-notice">${escapeHtml(data.registrationError || "No registration details were returned.")}</p>`;
 
   resultPanel.innerHTML = `
     <div class="result-heading">
-      <div><p class="eyebrow">BULK DNS SCAN</p><h2>${escapeHtml(data.domain)}</h2></div>
+      <div><p class="eyebrow">MAGIC SCAN</p><h2>${escapeHtml(data.domain)}</h2></div>
       <span class="status-badge success">${data.hostsWithRecords} hosts found</span>
     </div>
     <div class="scan-summary">
       <span>${data.subdomainsChecked} subdomains checked</span>
-      <span>${data.recordTypes.map(escapeHtml).join(" · ")}</span>
+      <span>${data.recordTypes.map(escapeHtml).join(" · ")} plus provider checks</span>
     </div>
     ${data.failedQueries ? `<p class="detail-notice">${data.failedQueries} DNS queries could not be completed.</p>` : ""}
+    <section class="email-auth">
+      <h3>Domain registration <span class="email-auth-status ${registration ? "found" : "missing"}">${registration ? "WHOIS / RDAP" : "Unavailable"}</span></h3>
+      ${registrationDetails}
+      <p class="scan-disclaimer">Registration information is provided by RDAP, the modern WHOIS service. Contact details may be redacted or unavailable.</p>
+    </section>
+    <section class="email-auth">
+      <h3>Email authentication</h3>
+      <div class="email-auth-grid">
+        <div>
+          <h4>SPF <span class="email-auth-status ${emailSecurity.rootSpfFound ? "found" : "missing"}">${emailSecurity.rootSpfFound ? "Found" : "No root record"}</span></h4>
+          ${spfRecords || '<p class="empty-result">No SPF policy found in scanned TXT records.</p>'}
+        </div>
+        <div>
+          <h4>DKIM <span class="email-auth-status ${emailSecurity.dkimRecords.length ? "found" : "missing"}">${emailSecurity.dkimRecords.length ? `${emailSecurity.dkimRecords.length} found` : "No records found"}</span></h4>
+          ${dkimRecords || `<p class="empty-result">No DKIM records found for ${emailSecurity.dkimSelectorsChecked} common selectors.</p>`}
+        </div>
+      </div>
+      <p class="scan-disclaimer">SPF is checked on the domain and scanned hosts. DKIM checks common selectors; your mail provider may use a custom selector that is not included.</p>
+    </section>
     ${hostCards || '<p class="empty-result">No records found for the domain or the checked subdomains.</p>'}
     <p class="scan-disclaimer">Subdomain discovery checks a built-in list of common names; it does not enumerate every subdomain.</p>`;
   resultPanel.hidden = false;
@@ -268,6 +343,6 @@ form.addEventListener("submit", async (event) => {
     errorMessage.hidden = false;
   } finally {
     submitButton.disabled = false;
-    submitButton.innerHTML = `<span>${mode === "scan" ? "Scan domain" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+    submitButton.innerHTML = `<span>${mode === "scan" ? "Magic scan" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   }
 });
