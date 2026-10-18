@@ -2,6 +2,9 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { isIP } = require("node:net");
+const dgram = require("node:dgram");
+const net = require("node:net");
+const { lookup: resolveHost } = require("node:dns/promises");
 const { domainToASCII } = require("node:url");
 
 const port = Number(process.env.PORT || 3000);
@@ -15,7 +18,43 @@ const dnsStatusNames = {
   3: "NXDOMAIN",
   4: "NOTIMP",
   5: "REFUSED",
+  6: "YXDOMAIN",
+  7: "YXRRSET",
+  8: "NXRRSET",
+  9: "NOTAUTH",
+  10: "NOTZONE",
+  16: "BADVERS",
+  23: "BADCOOKIE",
 };
+const dnsTypeCodes = {
+  A: 1,
+  NS: 2,
+  CNAME: 5,
+  SOA: 6,
+  PTR: 12,
+  MX: 15,
+  TXT: 16,
+  AAAA: 28,
+  SRV: 33,
+  DNAME: 39,
+  OPT: 41,
+  DS: 43,
+  SSHFP: 44,
+  RRSIG: 46,
+  NSEC: 47,
+  DNSKEY: 48,
+  NSEC3: 50,
+  TLSA: 52,
+  CDS: 59,
+  CDNSKEY: 60,
+  SVCB: 64,
+  HTTPS: 65,
+  CAA: 257,
+  ANY: 255,
+};
+const dnsTypeNames = Object.fromEntries(
+  Object.entries(dnsTypeCodes).map(([name, code]) => [code, name]),
+);
 const scanRecordTypes = ["A", "AAAA", "CAA", "CNAME", "HTTPS", "MX", "NS", "SOA", "SRV", "TXT"];
 const commonSubdomains = [
   "www", "mail", "webmail", "ftp", "api", "app", "admin", "portal",
@@ -235,7 +274,290 @@ async function fetchRdap(domain) {
   };
 }
 
-async function fetchPtr(address) {
+function parseNameserver(input) {
+  if (!input) return null;
+  let address = input.trim();
+  let port = 53;
+
+  const ipv6WithPort = address.match(/^\[([^\]]+)\](?::(\d+))?$/);
+  if (ipv6WithPort) {
+    address = ipv6WithPort[1];
+    if (ipv6WithPort[2]) port = Number(ipv6WithPort[2]);
+  } else {
+    const ipv4WithPort = address.match(/^([^:]+):(\d+)$/);
+    if (ipv4WithPort) {
+      address = ipv4WithPort[1];
+      port = Number(ipv4WithPort[2]);
+    }
+  }
+
+  const family = isIP(address);
+  const hostname = family ? null : normalizeDomain(address);
+  if ((!family && !hostname) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Enter a valid nameserver IP address or hostname, optionally followed by a port.");
+  }
+  return { address: family ? address : hostname, family, port };
+}
+
+async function resolveNameserver(nameserver) {
+  if (!nameserver || nameserver.family) return nameserver;
+  const addresses = await resolveHost(nameserver.address, { all: true, verbatim: true });
+  const address = addresses.find((entry) => entry.family === 4 || entry.family === 6);
+  if (!address) throw new Error("The nameserver hostname did not resolve to an IP address.");
+  return { ...nameserver, address: address.address, family: address.family };
+}
+
+function dnsQuestionType(type) {
+  if (/^\d+$/.test(type)) {
+    const code = Number(type);
+    if (code > 0 && code <= 65535) return code;
+    throw new Error("Enter a valid DNS record type.");
+  }
+  const code = dnsTypeCodes[type];
+  if (code) return code;
+  throw new Error("This record type is not supported for direct nameserver queries.");
+}
+
+function encodeDnsQuery(name, typeCode) {
+  const labels = name.replace(/\.$/, "").split(".");
+  const encodedName = Buffer.concat([
+    ...labels.map((label) => {
+      const bytes = Buffer.from(label, "ascii");
+      if (bytes.length === 0 || bytes.length > 63) {
+        throw new Error("The DNS name contains an invalid label.");
+      }
+      return Buffer.concat([Buffer.from([bytes.length]), bytes]);
+    }),
+    Buffer.from([0]),
+  ]);
+  const header = Buffer.alloc(12);
+  header.writeUInt16BE(Math.floor(Math.random() * 65536), 0);
+  header.writeUInt16BE(0x0100, 2);
+  header.writeUInt16BE(1, 4);
+  const questionTail = Buffer.alloc(4);
+  questionTail.writeUInt16BE(typeCode, 0);
+  questionTail.writeUInt16BE(1, 2);
+  return Buffer.concat([header, encodedName, questionTail]);
+}
+
+function decodeDnsName(packet, start) {
+  const labels = [];
+  let offset = start;
+  let nextOffset = null;
+  let jumps = 0;
+  while (offset < packet.length) {
+    const length = packet[offset];
+    if ((length & 0xc0) === 0xc0) {
+      if (offset + 1 >= packet.length || jumps++ > 20) {
+        throw new Error("DNS response contains an invalid name pointer.");
+      }
+      const pointer = ((length & 0x3f) << 8) | packet[offset + 1];
+      if (nextOffset === null) nextOffset = offset + 2;
+      offset = pointer;
+      continue;
+    }
+    if (length & 0xc0) throw new Error("DNS response contains an invalid label.");
+    offset += 1;
+    if (length === 0) {
+      return { name: labels.join(".") || ".", nextOffset: nextOffset ?? offset };
+    }
+    if (length > 63 || offset + length > packet.length) {
+      throw new Error("DNS response contains an invalid label.");
+    }
+    labels.push(packet.toString("utf8", offset, offset + length));
+    offset += length;
+  }
+  throw new Error("DNS response contains a truncated name.");
+}
+
+function decodeDnsRecordData(packet, typeCode, start, length) {
+  const end = start + length;
+  if (end > packet.length) throw new Error("DNS response contains truncated record data.");
+  if (typeCode === 1 && length === 4) return [...packet.subarray(start, end)].join(".");
+  if (typeCode === 28 && length === 16) {
+    const groups = [];
+    for (let i = start; i < end; i += 2) groups.push(packet.readUInt16BE(i).toString(16));
+    return groups.join(":");
+  }
+  if ([2, 5, 12, 39].includes(typeCode)) return decodeDnsName(packet, start).name;
+  if (typeCode === 15 && length >= 3) {
+    return `${packet.readUInt16BE(start)} ${decodeDnsName(packet, start + 2).name}`;
+  }
+  if (typeCode === 33 && length >= 7) {
+    return `${packet.readUInt16BE(start)} ${packet.readUInt16BE(start + 2)} ${packet.readUInt16BE(start + 4)} ${decodeDnsName(packet, start + 6).name}`;
+  }
+  if (typeCode === 6) {
+    const mname = decodeDnsName(packet, start);
+    const rname = decodeDnsName(packet, mname.nextOffset);
+    const numbersOffset = rname.nextOffset;
+    if (numbersOffset + 20 > end) throw new Error("DNS response contains truncated SOA data.");
+    return `${mname.name} ${rname.name} ${[
+      packet.readUInt32BE(numbersOffset),
+      packet.readUInt32BE(numbersOffset + 4),
+      packet.readUInt32BE(numbersOffset + 8),
+      packet.readUInt32BE(numbersOffset + 12),
+      packet.readUInt32BE(numbersOffset + 16),
+    ].join(" ")}`;
+  }
+  if (typeCode === 16) {
+    const chunks = [];
+    for (let offset = start; offset < end;) {
+      const chunkLength = packet[offset++];
+      if (offset + chunkLength > end) throw new Error("DNS response contains truncated TXT data.");
+      chunks.push(JSON.stringify(packet.toString("utf8", offset, offset + chunkLength)));
+      offset += chunkLength;
+    }
+    return chunks.join(" ");
+  }
+  if (typeCode === 257 && length >= 2) {
+    const flags = packet[start];
+    const tagLength = packet[start + 1];
+    if (start + 2 + tagLength > end) throw new Error("DNS response contains truncated CAA data.");
+    const tag = packet.toString("ascii", start + 2, start + 2 + tagLength);
+    const value = packet.toString("utf8", start + 2 + tagLength, end);
+    return `${flags} ${tag} ${JSON.stringify(value)}`;
+  }
+  return `\\# ${length} ${packet.subarray(start, end).toString("hex").toUpperCase()}`;
+}
+
+function parseDnsPacket(packet) {
+  if (packet.length < 12) throw new Error("DNS server returned a truncated response.");
+  const flags = packet.readUInt16BE(2);
+  const questionCount = packet.readUInt16BE(4);
+  const counts = [
+    packet.readUInt16BE(6),
+    packet.readUInt16BE(8),
+    packet.readUInt16BE(10),
+  ];
+  let offset = 12;
+  for (let i = 0; i < questionCount; i += 1) {
+    offset = decodeDnsName(packet, offset).nextOffset + 4;
+  }
+  const sections = [];
+  for (const count of counts) {
+    const records = [];
+    for (let i = 0; i < count; i += 1) {
+      const decodedName = decodeDnsName(packet, offset);
+      offset = decodedName.nextOffset;
+      if (offset + 10 > packet.length) throw new Error("DNS server returned a truncated record.");
+      const typeCode = packet.readUInt16BE(offset);
+      const recordClass = packet.readUInt16BE(offset + 2);
+      const ttl = packet.readUInt32BE(offset + 4);
+      const dataLength = packet.readUInt16BE(offset + 8);
+      const dataStart = offset + 10;
+      offset = dataStart + dataLength;
+      if (offset > packet.length) throw new Error("DNS server returned truncated record data.");
+      if (recordClass !== 1) continue;
+      records.push({
+        name: decodedName.name,
+        type: typeCode,
+        typeName: dnsTypeNames[typeCode] || `TYPE${typeCode}`,
+        TTL: ttl,
+        data: decodeDnsRecordData(packet, typeCode, dataStart, dataLength),
+      });
+    }
+    sections.push(records);
+  }
+  return {
+    status: flags & 0x000f,
+    truncated: Boolean(flags & 0x0200),
+    answers: sections[0],
+    authority: sections[1],
+    additional: sections[2],
+  };
+}
+
+function sendDnsUdp(nameserver, query) {
+  return new Promise((resolve, reject) => {
+    const socket = dgram.createSocket(nameserver.family === 6 ? "udp6" : "udp4");
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error("The selected nameserver did not respond before timeout."));
+    }, 5000);
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      socket.close();
+      reject(error);
+    });
+    socket.on("message", (message) => {
+      clearTimeout(timeout);
+      socket.close();
+      resolve(message);
+    });
+    socket.send(query, nameserver.port, nameserver.address, (error) => {
+      if (error) {
+        clearTimeout(timeout);
+        socket.close();
+        reject(error);
+      }
+    });
+  });
+}
+
+function sendDnsTcp(nameserver, query) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({
+      host: nameserver.address,
+      port: nameserver.port,
+      family: nameserver.family,
+    });
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("The selected nameserver TCP query timed out."));
+    }, 5000);
+    let response = Buffer.alloc(0);
+    let expectedLength = null;
+    socket.once("connect", () => {
+      const length = Buffer.alloc(2);
+      length.writeUInt16BE(query.length);
+      socket.write(Buffer.concat([length, query]));
+    });
+    socket.on("data", (chunk) => {
+      response = Buffer.concat([response, chunk]);
+      if (expectedLength === null && response.length >= 2) {
+        expectedLength = response.readUInt16BE(0);
+      }
+      if (expectedLength !== null && response.length >= expectedLength + 2) {
+        clearTimeout(timeout);
+        socket.end();
+        resolve(response.subarray(2, expectedLength + 2));
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.once("end", () => {
+      clearTimeout(timeout);
+      if (expectedLength === null || response.length < expectedLength + 2) {
+        reject(new Error("Nameserver closed the TCP connection before completing its response."));
+      }
+    });
+  });
+}
+
+async function directDnsLookup(name, type, nameserver) {
+  const typeCode = dnsQuestionType(type);
+  const query = encodeDnsQuery(name, typeCode);
+  let packet = await sendDnsUdp(nameserver, query);
+  if (packet.length < 12 || packet.readUInt16BE(0) !== query.readUInt16BE(0)) {
+    throw new Error("The selected nameserver returned an invalid response.");
+  }
+  if (packet.readUInt16BE(2) & 0x0200) packet = await sendDnsTcp(nameserver, query);
+  const result = parseDnsPacket(packet);
+  return {
+    name,
+    type: dnsTypeNames[typeCode] || `TYPE${typeCode}`,
+    status: result.status,
+    statusText: dnsStatusNames[result.status] || `DNS status ${result.status}`,
+    answers: result.answers,
+    authority: result.authority,
+    additional: result.additional,
+  };
+}
+
+async function fetchPtr(address, nameserver = null) {
+  if (nameserver) return directDnsLookup(reverseName(address), "PTR", nameserver);
   const queryUrl = new URL(dohEndpoint);
   queryUrl.searchParams.set("name", reverseName(address));
   queryUrl.searchParams.set("type", "PTR");
@@ -256,14 +578,14 @@ async function fetchPtr(address) {
   };
 }
 
-async function fetchPtrLookups(addresses) {
+async function fetchPtrLookups(addresses, nameserver = null) {
   const uniqueAddresses = [...new Set(addresses.filter((address) => isIP(address)))];
   const results = [];
   for (let index = 0; index < uniqueAddresses.length; index += 8) {
     const batch = uniqueAddresses.slice(index, index + 8);
     results.push(...await Promise.all(batch.map(async (address) => {
       try {
-        return [address, await fetchPtr(address)];
+        return [address, await fetchPtr(address, nameserver)];
       } catch (error) {
         return [address, { error: error.message || "Unable to retrieve PTR record." }];
       }
@@ -294,6 +616,14 @@ async function bulkScan(url, response) {
   const domain = normalizeDomain(url.searchParams.get("name") || "");
   if (!domain) {
     sendJson(response, 400, { error: "Enter a valid domain name." });
+    return;
+  }
+
+  let nameserver;
+  try {
+    nameserver = await resolveNameserver(parseNameserver(url.searchParams.get("nameserver") || ""));
+  } catch (error) {
+    sendJson(response, 400, { error: error.message });
     return;
   }
 
@@ -351,7 +681,9 @@ async function bulkScan(url, response) {
       const task = tasks[nextTask];
       nextTask += 1;
       try {
-        const answers = await queryDnsRecords(task.name, task.type);
+        const answers = nameserver
+          ? (await directDnsLookup(task.name, task.type, nameserver)).answers
+          : await queryDnsRecords(task.name, task.type);
         if (answers.length) {
           recordsByHost.get(task.name).push({
             type: task.type,
@@ -430,7 +762,10 @@ async function bulkScan(url, response) {
       dkimRecords: dkimRecords.filter((entry) => entry.records.length),
     },
     failedQueries,
-    ptrLookups: await fetchPtrLookups(addresses),
+    ptrLookups: await fetchPtrLookups(addresses, nameserver),
+    nameserver: nameserver
+      ? `${nameserver.family === 6 ? `[${nameserver.address}]` : nameserver.address}:${nameserver.port}`
+      : null,
   });
 }
 
@@ -626,6 +961,36 @@ async function lookup(url, response) {
     }
   } catch (error) {
     sendJson(response, 400, { error: error.message });
+    return;
+  }
+
+  let nameserver;
+  try {
+    nameserver = await resolveNameserver(parseNameserver(url.searchParams.get("nameserver") || ""));
+  } catch (error) {
+    sendJson(response, 400, { error: error.message });
+    return;
+  }
+
+  if (nameserver) {
+    let data;
+    try {
+      data = await directDnsLookup(queryName, queryType, nameserver);
+    } catch (error) {
+      sendJson(response, 502, {
+        error: error.message || "Unable to query the selected nameserver.",
+      });
+      return;
+    }
+    const ptrLookups = await fetchPtrLookups(
+      [...data.answers, ...data.authority, ...data.additional].map((answer) => answer.data),
+      nameserver,
+    );
+    sendJson(response, 200, {
+      ...data,
+      ptrLookups,
+      nameserver: `${nameserver.family === 6 ? `[${nameserver.address}]` : nameserver.address}:${nameserver.port}`,
+    });
     return;
   }
 

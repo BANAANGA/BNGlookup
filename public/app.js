@@ -3,6 +3,8 @@ const input = document.querySelector("#name-input");
 const recordType = document.querySelector("#record-type");
 const customType = document.querySelector("#custom-type");
 const typeControl = document.querySelector("#type-control");
+const nameserverControl = document.querySelector("#nameserver-control");
+const nameserverInput = document.querySelector("#nameserver-input");
 const resultPanel = document.querySelector("#result");
 const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
@@ -17,6 +19,7 @@ function setMode(nextMode) {
   const details = mode === "details";
   const mac = mode === "mac";
   const scan = mode === "scan";
+  const supportsNameserver = !details && !mac;
   tabs.forEach((tab) => {
     const selected = tab.dataset.mode === mode;
     tab.classList.toggle("active", selected);
@@ -31,6 +34,7 @@ function setMode(nextMode) {
   input.autocomplete = reverse || mac ? "off" : "url";
   typeControl.hidden = reverse || details || mac || scan;
   customType.hidden = reverse || details || mac || scan || recordType.value !== "custom";
+  nameserverControl.hidden = !supportsNameserver;
   formHint.textContent = reverse
     ? "Find the PTR record associated with an IPv4 or IPv6 address."
     : details
@@ -38,7 +42,7 @@ function setMode(nextMode) {
       : mac
         ? "Find the registered hardware vendor and MAC address type."
       : scan
-        ? "Scan DNS records, cloud-provider hostnames, SPF policies, and common DKIM selectors."
+        ? "Scan DNS records, cloud-provider hostnames, SPF, and DKIM. Optionally choose the nameserver."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
   submitButton.innerHTML = `<span>${scan ? "Magic scan" : mac ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
@@ -94,6 +98,7 @@ function showResult(data) {
       </div>
       <span class="status-badge ${statusClass}">${escapeHtml(data.statusText)}</span>
     </div>
+    ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span><strong>${escapeHtml(data.nameserver)}</strong></div>` : ""}
     <div class="query-meta"><span>Record type</span><strong>${escapeHtml(data.type)}</strong></div>
     ${renderSection("Answers", data.answers, data.ptrLookups)}
     ${renderSection("Authority", data.authority, data.ptrLookups)}
@@ -194,6 +199,7 @@ function renderScanResult(data) {
       <span>${data.subdomainsChecked} subdomains checked</span>
       <span>${data.recordTypes.map(escapeHtml).join(" · ")} plus provider checks</span>
     </div>
+    ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span><strong>${escapeHtml(data.nameserver)}</strong></div>` : ""}
     ${data.failedQueries ? `<p class="detail-notice">${data.failedQueries} DNS queries could not be completed.</p>` : ""}
     <section class="email-auth">
       <h3>Domain registration <span class="email-auth-status ${registration ? "found" : "missing"}">${registration ? "WHOIS / RDAP" : "Unavailable"}</span></h3>
@@ -361,6 +367,9 @@ form.addEventListener("submit", async (event) => {
     name: input.value.trim(),
     type: recordType.value === "custom" ? customType.value.trim() : recordType.value,
     reverse: String(mode === "reverse"),
+    nameserver: mode === "forward" || mode === "reverse" || mode === "scan"
+      ? nameserverInput.value.trim()
+      : "",
   });
 
   try {

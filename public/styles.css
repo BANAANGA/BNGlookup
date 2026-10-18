@@ -210,6 +210,28 @@ h1 {
 .submit-button:disabled { cursor: wait; opacity: .8; }
 .submit-button span:last-child { font-size: 18px; font-weight: 400; }
 .hint { margin: 10px 0 0; color: #8a96a9; font-size: 11px; }
+.nameserver-control {
+  display: grid;
+  grid-template-columns: 175px minmax(180px, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 14px;
+}
+.nameserver-control label { color: #b9c7bd; font-size: 11px; font-weight: 600; }
+.nameserver-control input {
+  min-width: 0;
+  height: 38px;
+  padding: 0 11px;
+  border: 1px solid #303030;
+  border-radius: 6px;
+  outline: 0;
+  color: #ededed;
+  background: #080808;
+  font-size: 11px;
+}
+.nameserver-control input:focus { border-color: #3c8b5d; outline: 3px solid #54d88f20; }
+.nameserver-control input::placeholder { color: #737373; }
+.nameserver-control > span { grid-column: 2; color: #737373; font-size: 10px; }
 .error-message { margin: 14px 0 0; color: #bf3c48; font-size: 13px; }
 
 .result { margin-top: 25px; padding-top: 23px; border-top: 1px solid var(--line); }
@@ -396,6 +418,8 @@ footer {
   .mode-tabs { gap: 15px; flex-wrap: wrap; }
   .mode-tab { font-size: 11px; }
   .search-row { flex-wrap: wrap; }
+  .nameserver-control { grid-template-columns: 1fr; }
+  .nameserver-control > span { grid-column: 1; }
   .input-wrap { flex-basis: 100%; }
   .type-control { flex: 1; }
   .type-control select { width: 100%; }
@@ -466,6 +490,10 @@ body {
 .status-badge.success { color: #a9e5c5; background: #14251b; }
 .status-badge.warning { color: #f0cb86; background: #2a2112; }
 .query-meta, .scan-summary { color: #a0a0a0; background: #141414; }
+.nameserver-control label { color: #b9c7bd; }
+.nameserver-control input { color: #ededed; border-color: #303030; background: #080808; }
+.nameserver-control input:focus { border-color: #3c8b5d; outline-color: #54d88f20; }
+.nameserver-control input::placeholder, .nameserver-control > span { color: #737373; }
 .query-meta strong { color: #e1e1e1; }
 .record-section h3, .record-name { color: #d0d0d0; }
 .record-section h3 span, .status-list span, .record-section h3 > span {
