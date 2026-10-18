@@ -23,9 +23,9 @@
         <p class="account-description">Sign in to use features that require an account.</p>
         <form id="login-form" class="account-form">
           <label for="username">Username</label>
-          <input id="username" name="username" type="text" maxlength="32" autocomplete="username" required>
+          <input id="username" name="username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" autocomplete="username" required>
           <label for="password">Password</label>
-          <input id="password" name="password" type="password" autocomplete="current-password" required>
+          <input id="password" name="password" type="password" maxlength="128" autocomplete="current-password" required>
           <p class="error-message" id="auth-error" role="alert" hidden></p>
           <button class="submit-button" type="submit"><span>Log in</span><span aria-hidden="true">→</span></button>
         </form>

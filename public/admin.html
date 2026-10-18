@@ -30,7 +30,10 @@
         <p class="form-hint">Public features do not require login. User features require any active account. Admin features require the administrator role.</p>
         <form id="settings-form">
           <div id="feature-settings" class="feature-settings"></div>
-          <button class="submit-button" type="submit"><span>Save feature access</span><span aria-hidden="true">→</span></button>
+          <h3 class="policy-heading">Port scan policy</h3>
+          <p class="form-hint">Port scans always require an account, even when the feature is marked Public. Private/local targets are enabled for administrators by default and remain unavailable to users until enabled here. Limits apply to unique TCP ports per target.</p>
+          <div id="port-scan-settings" class="port-scan-settings"></div>
+          <button class="submit-button" type="submit"><span>Save settings</span><span aria-hidden="true">→</span></button>
         </form>
       </section>
       <section class="account-card admin-card">
