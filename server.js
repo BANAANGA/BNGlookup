@@ -120,7 +120,7 @@ const dkimSelectors = [
 const scanConcurrency = 12;
 const commonTcpPorts = [
   20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 465, 587, 993, 995,
-  1433, 1521, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017,
+  1433, 1521, 2222, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017,
 ];
 const nonPublicAddressRanges = new net.BlockList();
 [
@@ -668,12 +668,16 @@ function checkTcpPort(address, port) {
   });
 }
 
-async function scanCommonTcpPorts(addresses) {
+async function scanCommonTcpPorts(domain, addresses) {
+  return scanTcpTargets(domain, addresses, commonTcpPorts, 8);
+}
+
+async function scanTcpTargets(scanLabel, addresses, ports, addressLimit, targetForAddress = () => scanLabel) {
   const uniqueAddresses = [...new Set(addresses)];
   const publicAddresses = uniqueAddresses.filter(isPublicAddress);
-  const targets = publicAddresses.slice(0, 8);
+  const targets = publicAddresses.slice(0, addressLimit);
   const tasks = targets.flatMap((address) =>
-    commonTcpPorts.map((port) => ({ address, port })),
+    ports.map((port) => ({ address, port })),
   );
   const openPortsByAddress = new Map(targets.map((address) => [address, []]));
   let nextTask = 0;
@@ -693,14 +697,224 @@ async function scanCommonTcpPorts(addresses) {
   );
   return {
     enabled: true,
-    portsChecked: commonTcpPorts.length,
+    scanLabel,
+    portsChecked: ports.length,
     addressesScanned: targets.length,
     addressesSkipped: uniqueAddresses.length - targets.length,
     results: targets.map((address) => ({
+      target: targetForAddress(address),
       address,
       openPorts: openPortsByAddress.get(address).sort((left, right) => left - right),
     })),
   };
+}
+
+function invalidScanRequest(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+async function readJsonRequest(request) {
+  if (!/^application\/json(?:\s*;|$)/i.test(request.headers["content-type"] || "")) {
+    throw invalidScanRequest("Content-Type must be application/json.", 415);
+  }
+  const maximumBodySize = 65536;
+  const contentLength = Number(request.headers["content-length"] || 0);
+  if (contentLength > maximumBodySize) {
+    throw invalidScanRequest("Request body must not exceed 64 KB.", 413);
+  }
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
+    request.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maximumBodySize) {
+        tooLarge = true;
+      } else if (!tooLarge) {
+        chunks.push(chunk);
+      }
+    });
+    request.once("error", reject);
+    request.once("aborted", () => reject(invalidScanRequest("Request body was interrupted.")));
+    request.once("end", () => {
+      if (tooLarge) {
+        reject(invalidScanRequest("Request body must not exceed 64 KB.", 413));
+        return;
+      }
+      try {
+        const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          throw invalidScanRequest("Request body must be a JSON object.");
+        }
+        resolve(value);
+      } catch (error) {
+        reject(error.statusCode
+          ? error
+          : invalidScanRequest("Request body contains invalid JSON."));
+      }
+    });
+  });
+}
+
+function parseCustomPortList(input) {
+  const segments = input.split(",");
+  if (!segments.length || segments.some((segment) => !segment.trim())) {
+    throw invalidScanRequest("Enter comma-separated TCP ports or port ranges.");
+  }
+  const ports = new Set();
+  for (const segment of segments) {
+    const match = segment.trim().match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+    if (!match) throw invalidScanRequest("Use port numbers or ranges such as 80,443,8000-8010.");
+    const start = Number(match[1]);
+    const end = Number(match[2] || match[1]);
+    if (!Number.isInteger(start) || !Number.isInteger(end) ||
+      start < 1 || end > 65535 || end < start) {
+      throw invalidScanRequest("TCP ports must be between 1 and 65535, with ranges in ascending order.");
+    }
+    for (let port = start; port <= end; port += 1) {
+      ports.add(port);
+      if (ports.size > 100) {
+        throw invalidScanRequest("A custom scan may include at most 100 unique ports.");
+      }
+    }
+  }
+  return [...ports].sort((left, right) => left - right);
+}
+
+function ipv6ToBigInt(address) {
+  const sections = address.toLowerCase().split("::");
+  if (sections.length > 2 || address.includes(".")) {
+    throw invalidScanRequest("Enter valid IPv6 CIDR blocks without embedded IPv4 addresses.");
+  }
+  const left = sections[0] ? sections[0].split(":") : [];
+  const right = sections.length === 2 && sections[1] ? sections[1].split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if ((sections.length === 1 && missing !== 0) || (sections.length === 2 && missing < 1)) {
+    throw invalidScanRequest("Enter a valid IPv6 CIDR block.");
+  }
+  const groups = sections.length === 2
+    ? [...left, ...Array(missing).fill("0"), ...right]
+    : left;
+  if (groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) {
+    throw invalidScanRequest("Enter a valid IPv6 CIDR block.");
+  }
+  return BigInt(`0x${groups.map((group) => group.padStart(4, "0")).join("")}`);
+}
+
+function addressFromBigInt(value, family) {
+  if (family === 4) {
+    return [24n, 16n, 8n, 0n]
+      .map((shift) => Number((value >> shift) & 255n))
+      .join(".");
+  }
+  const hex = value.toString(16).padStart(32, "0");
+  return Array.from({ length: 8 }, (_, index) =>
+    Number.parseInt(hex.slice(index * 4, index * 4 + 4), 16).toString(16),
+  ).join(":");
+}
+
+function parseBulkScanTargets(input) {
+  const tokens = input.split(/[\s,]+/).filter(Boolean);
+  if (!tokens.length) throw invalidScanRequest("Enter at least one IP address or CIDR block.");
+  if (tokens.length > 256) {
+    throw invalidScanRequest("Enter no more than 256 IP addresses or CIDR blocks.");
+  }
+  const targets = new Set();
+  for (const token of tokens) {
+    const slash = token.indexOf("/");
+    if (slash < 0) {
+      if (!isIP(token)) {
+        throw invalidScanRequest(`Invalid IP address or CIDR block: ${token}`);
+      }
+      targets.add(token);
+      continue;
+    }
+    const address = token.slice(0, slash);
+    const family = isIP(address);
+    const prefixText = token.slice(slash + 1);
+    if (!family || !/^\d+$/.test(prefixText)) {
+      throw invalidScanRequest(`Invalid IP address or CIDR block: ${token}`);
+    }
+    const prefix = Number(prefixText);
+    const width = family === 4 ? 32 : 128;
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > width) {
+      throw invalidScanRequest(`Invalid CIDR prefix: ${token}`);
+    }
+    const hostBits = BigInt(width - prefix);
+    const count = 1n << hostBits;
+    if (count > 256n) {
+      throw invalidScanRequest("Bulk scans are limited to 256 unique IP addresses.");
+    }
+    const rawAddress = family === 4
+      ? BigInt(address.split(".").reduce((value, octet) => (value << 8n) | BigInt(octet), 0n))
+      : ipv6ToBigInt(address);
+    const network = (rawAddress >> hostBits) << hostBits;
+    for (let offset = 0n; offset < count; offset += 1n) {
+      targets.add(addressFromBigInt(network + offset, family));
+      if (targets.size > 256) {
+        throw invalidScanRequest("Bulk scans are limited to 256 unique IP addresses.");
+      }
+    }
+  }
+  if (targets.size > 256) {
+    throw invalidScanRequest("Bulk scans are limited to 256 unique IP addresses.");
+  }
+  return [...targets];
+}
+
+async function runCustomPortScan(request, response) {
+  try {
+    const body = await readJsonRequest(request);
+    const target = typeof body.target === "string" ? body.target.trim() : "";
+    if (!target) throw invalidScanRequest("Enter a domain name or IP address.");
+    const portsInput = typeof body.ports === "string" ? body.ports : "";
+    const ports = parseCustomPortList(portsInput);
+    let addresses;
+    if (isIP(target)) {
+      addresses = [target];
+    } else {
+      const domain = normalizeDomain(target);
+      if (!domain) throw invalidScanRequest("Enter a valid domain name or IP address.");
+      try {
+        addresses = (await resolveHost(domain, { all: true, verbatim: true }))
+          .map((entry) => entry.address);
+      } catch (error) {
+        throw invalidScanRequest(`Could not resolve target domain: ${error.message}`);
+      }
+    }
+    const data = await scanTcpTargets(target, addresses, ports, 8);
+    sendJson(response, 200, data);
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    if (statusCode === 500) console.error("Custom port scan failed:", error);
+    sendJson(response, statusCode, {
+      error: statusCode === 500 ? "Unable to complete the custom port scan." : error.message,
+    });
+  }
+}
+
+async function runBulkPortScan(request, response) {
+  try {
+    const body = await readJsonRequest(request);
+    const port = typeof body.port === "string" && /^\d+$/.test(body.port)
+      ? Number(body.port)
+      : body.port;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw invalidScanRequest("Enter a TCP port between 1 and 65535.");
+    }
+    const targetsInput = typeof body.targets === "string" ? body.targets : "";
+    const addresses = parseBulkScanTargets(targetsInput);
+    const data = await scanTcpTargets("Bulk IP targets", addresses, [port], 256, (address) => address);
+    sendJson(response, 200, data);
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    if (statusCode === 500) console.error("Bulk port scan failed:", error);
+    sendJson(response, statusCode, {
+      error: statusCode === 500 ? "Unable to complete the bulk port scan." : error.message,
+    });
+  }
 }
 
 async function fetchIpGeolocation(address) {
@@ -908,7 +1122,7 @@ async function bulkScan(url, response) {
     .flatMap((record) => record.answers.map((answer) => answer.data))
     .filter((address) => isIP(address) !== 0);
   const portScan = portScanOption === "common"
-    ? await scanCommonTcpPorts(rootAddresses)
+    ? await scanCommonTcpPorts(domain, rootAddresses)
     : null;
   const registrationResult = await registrationPromise;
 
@@ -1253,6 +1467,24 @@ const server = http.createServer((request, response) => {
       return;
     }
     bulkScan(url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/custom-port-scan") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    runCustomPortScan(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/bulk-port-scan") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    runBulkPortScan(request, response);
     return;
   }
 

@@ -36,12 +36,18 @@
           <button class="mode-tab active" id="scan-tab" type="button" role="tab" aria-selected="true" data-mode="scan">
             <span aria-hidden="true">⌕</span> Magic scan
           </button>
+          <button class="mode-tab" id="custom-port-tab" type="button" role="tab" aria-selected="false" data-mode="custom-port">
+            <span aria-hidden="true">⚙</span> Custom port scan
+          </button>
+          <button class="mode-tab" id="bulk-port-tab" type="button" role="tab" aria-selected="false" data-mode="bulk-port">
+            <span aria-hidden="true">⇢</span> Bulk port scan
+          </button>
         </div>
 
         <form id="lookup-form">
           <label class="field-label" id="name-label" for="name-input">Domain name</label>
           <div class="search-row">
-            <div class="input-wrap">
+            <div class="input-wrap" id="primary-input-wrap">
               <span class="input-icon" aria-hidden="true">⌕</span>
               <input id="name-input" name="name" type="text" placeholder="e.g. example.com" autocomplete="url" spellcheck="false" required>
             </div>
@@ -77,8 +83,23 @@
             <span>Optional: enter a nameserver IP or hostname, with port if needed (for example, 1.1.1.1:53 or ns1.example.net:53).</span>
           </div>
           <div class="port-scan-control" id="port-scan-control" hidden>
-            <label><input id="port-scan-input" type="checkbox"> Also scan 25 common TCP ports on the domain's public IP addresses</label>
+            <label><input id="port-scan-input" type="checkbox"> Also scan 26 common TCP ports on the domain's public IP addresses</label>
             <span>Optional active check. Only the domain's public IPv4/IPv6 addresses are scanned, up to 8 addresses.</span>
+          </div>
+          <div class="scan-extra-control" id="custom-ports-control" hidden>
+            <label for="custom-ports-input">TCP ports</label>
+            <input id="custom-ports-input" type="text" placeholder="e.g. 22,80,443,8000-8010" autocomplete="off" spellcheck="false">
+            <span>Enter comma-separated ports and/or ranges. Public IPs only; maximum 100 unique ports and 8 resolved IPs.</span>
+          </div>
+          <div class="scan-extra-control" id="bulk-targets-control" hidden>
+            <label for="bulk-targets-input">Public IP addresses or CIDR blocks</label>
+            <textarea id="bulk-targets-input" rows="5" placeholder="e.g.&#10;8.8.8.8&#10;1.1.1.0/25" spellcheck="false"></textarea>
+            <span>Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses.</span>
+          </div>
+          <div class="scan-extra-control scan-port-control" id="bulk-port-control" hidden>
+            <label for="bulk-port-input">TCP port to scan</label>
+            <input id="bulk-port-input" type="number" min="1" max="65535" placeholder="e.g. 443" inputmode="numeric">
+            <span>Scans one port on up to 256 IPs; private and reserved addresses are skipped.</span>
           </div>
           <p class="hint" id="form-hint">Scan DNS records, cloud-provider hostnames, SPF, and DKIM. Optionally choose the nameserver.</p>
           <p class="error-message" id="error-message" role="alert" hidden></p>

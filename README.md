@@ -14,7 +14,9 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Scan a domain and common subdomains for DNS records, cloud-provider
   endpoints, WHOIS/RDAP registration data, SPF policies, and common DKIM
   selectors, with IP geolocation and country information for returned IPs.
-- Optionally scan 25 common TCP ports on the domain's public IP addresses.
+- Optionally scan 26 common TCP ports on the domain's public IP addresses.
+- Run a custom TCP port list/range against one domain or IP, or run a bounded
+  single-port scan against an explicit IP list or CIDR block.
 - Look up PTR records from IPv4 or IPv6 addresses.
 - Display PTR hostnames for IP addresses returned in DNS results and for
   resolved nameserver addresses.
@@ -153,10 +155,20 @@ service; private and reserved IP addresses are not sent. Geolocation may be
 unavailable or inaccurate.
 
 Enable **Scan common TCP ports** before starting a Magic scan to check the
-domain's public A/AAAA addresses for 25 commonly used TCP ports. The check is
+domain's public A/AAAA addresses for 26 commonly used TCP ports, including
+ports 2222 and 8443. Results identify the scanned domain and IP address. The check is
 optional, limited to eight public IP addresses, and omits private and reserved
 addresses. It reports ports that accepted a TCP connection; it is not a
 vulnerability assessment. Only scan systems you are authorized to test.
+
+The **Custom port scan** tab checks a comma-separated list of ports and/or
+ranges (for example, `22,80,443,8000-8010`) on one domain or IP address, with a
+maximum of 100 unique ports and eight resolved IPs. The **Bulk port scan** tab
+checks one TCP port across an explicit IPv4/IPv6 list or CIDR blocks, capped at
+256 unique addresses. Both tabs scan public addresses only; private and
+reserved addresses are skipped. Bulk scanning is intentionally bounded rather
+than an unrestricted internet-wide scan. Only scan systems you are authorized
+to test.
 
 Subdomain and DKIM selector checks use built-in candidate lists rather than
 enumeration. DNS cannot list every subdomain or a domain's custom DKIM
