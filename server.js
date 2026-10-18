@@ -536,6 +536,66 @@ function sendJson(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+async function macLookup(url, response) {
+  const input = (url.searchParams.get("name") || "").trim();
+  const validMac = /^(?:[0-9a-f]{12}|(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|(?:[0-9a-f]{2}-){5}[0-9a-f]{2}|(?:[0-9a-f]{4}\.){2}[0-9a-f]{4})$/i;
+  if (!validMac.test(input)) {
+    sendJson(response, 400, {
+      error: "Enter a valid MAC address in colon, hyphen, dotted, or plain hexadecimal format.",
+    });
+    return;
+  }
+
+  const hex = input.replace(/[^0-9a-f]/gi, "").toUpperCase();
+  const firstOctet = Number.parseInt(hex.slice(0, 2), 16);
+  const mac = hex.match(/.{2}/g).join(":");
+  let result;
+  try {
+    result = await fetch(`https://api.maclookup.app/v2/macs/${hex}`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (error) {
+    const timedOut = error.name === "TimeoutError";
+    sendJson(response, 502, {
+      error: timedOut
+        ? "MAC vendor lookup timed out. Please try again."
+        : "Unable to reach the MAC vendor lookup service.",
+    });
+    return;
+  }
+
+  if (!result.ok) {
+    sendJson(response, 502, { error: `MAC vendor service returned HTTP ${result.status}.` });
+    return;
+  }
+
+  let data;
+  try {
+    data = await result.json();
+  } catch {
+    sendJson(response, 502, { error: "MAC vendor service returned invalid JSON." });
+    return;
+  }
+
+  if (typeof data.success !== "boolean" || typeof data.found !== "boolean") {
+    sendJson(response, 502, { error: "MAC vendor service returned an invalid response." });
+    return;
+  }
+
+  sendJson(response, 200, {
+    mac,
+    oui: hex.slice(0, 6),
+    multicast: Boolean(firstOctet & 1),
+    locallyAdministered: Boolean(firstOctet & 2),
+    found: data.success && data.found,
+    company: data.company || null,
+    country: data.country || null,
+    address: data.address || null,
+    blockType: data.blockType || null,
+  });
+}
+
 async function lookup(url, response) {
   const input = (url.searchParams.get("name") || "").trim();
   const recordType = (url.searchParams.get("type") || "A").trim().toUpperCase();
@@ -659,6 +719,15 @@ const server = http.createServer((request, response) => {
       return;
     }
     bulkScan(url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/mac-lookup") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    macLookup(url, response);
     return;
   }
 
