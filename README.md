@@ -200,6 +200,14 @@ verification names used by AWS/SES, Azure, Google Cloud, Cloudflare, Vercel,
 Netlify, Heroku, DigitalOcean, and other providers. The scan also retrieves
 public RDAP (WHOIS) registration data for the domain. SPF is identified from
 scanned TXT records; DKIM checks common selectors for TXT and CNAME records.
+Magic scan additionally queries public Certificate Transparency logs at
+`crt.sh` for certificate names under the domain. If that service is unavailable
+or returns invalid data, it tries the SSLMate CertSpotter API. It checks up to
+25 unique discovered subdomains for A, AAAA, CNAME, and TXT records. This can
+find names outside the built-in list but is not exhaustive; certificate names
+may be historical or no longer resolve. The queried domain is sent to
+`crt.sh`; if it fails, it is also sent to CertSpotter. Either service may be
+unavailable or rate-limited.
 Returned IP addresses include PTR lookups where available and approximate
 geolocation details, including country, city, and region when available.
 Public IPs discovered in scan results are sent to the `ipwho.is` geolocation
@@ -229,9 +237,9 @@ enabled for Admins and disabled for Users. Other reserved addresses are always
 skipped. Bulk scanning is intentionally bounded rather than an unrestricted
 internet-wide scan. Only scan systems you are authorized to test.
 
-Subdomain and DKIM selector checks use built-in candidate lists rather than
-enumeration. DNS cannot list every subdomain or a domain's custom DKIM
-selectors, so scan results may not include every configured record.
+DKIM selector checks use a built-in candidate list. DNS cannot list every
+subdomain or a domain's custom DKIM selectors, so scan results may not include
+every configured record.
 
 Choose **MAC lookup** to normalize a MAC address and retrieve its registered
 vendor, OUI block, and address classification (unicast/multicast and

@@ -130,6 +130,8 @@ const dnsTypeNames = Object.fromEntries(
   Object.entries(dnsTypeCodes).map(([name, code]) => [code, name]),
 );
 const scanRecordTypes = ["A", "AAAA", "CAA", "CNAME", "HTTPS", "MX", "NS", "SOA", "SRV", "TXT"];
+const certificateTransparencyRecordTypes = ["A", "AAAA", "CNAME", "TXT"];
+const certificateTransparencyCandidateLimit = 25;
 const commonSubdomains = [
   "www", "mail", "webmail", "ftp", "api", "app", "admin", "portal",
   "blog", "shop", "dev", "staging", "test", "status", "cdn", "static",
@@ -1145,6 +1147,119 @@ async function fetchIpGeolocations(addresses) {
   return results;
 }
 
+async function fetchCertificateTransparencyJson(url) {
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json",
+      "user-agent": "BNGlookup/0.6 (+https://github.com/BANAANGA/BNGlookup)",
+    },
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!response.ok) {
+    throw new Error(`Certificate Transparency service returned HTTP ${response.status}.`);
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  const maximumResponseSize = 2 * 1024 * 1024;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > maximumResponseSize) {
+        await reader.cancel();
+        throw new Error("Certificate Transparency response exceeded 2 MB.");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function normalizeCertificateTransparencyNames(entries, domain, readEntryNames) {
+  if (!Array.isArray(entries)) {
+    throw new Error("Certificate Transparency service returned invalid data.");
+  }
+  const names = new Set();
+  for (const entry of entries) {
+    for (const rawName of readEntryNames(entry)) {
+      if (typeof rawName !== "string") continue;
+      for (const name of rawName.split(/\r?\n/)) {
+        const candidate = domainToASCII(
+          name.trim().replace(/^\*\./, "").replace(/\.$/, "").toLowerCase(),
+        );
+        if (
+          candidate &&
+          candidate !== domain &&
+          candidate.length <= 253 &&
+          candidate.endsWith(`.${domain}`) &&
+          validDnsName(candidate)
+        ) {
+          names.add(candidate);
+        }
+      }
+    }
+  }
+  return [...names].sort().slice(0, certificateTransparencyCandidateLimit);
+}
+
+async function discoverCertificateTransparencySubdomains(domain) {
+  const providers = [
+    {
+      name: "crt.sh",
+      createUrl() {
+        const url = new URL("https://crt.sh/");
+        url.searchParams.set("q", `%.${domain}`);
+        url.searchParams.set("output", "json");
+        return url;
+      },
+      readEntryNames: (entry) => {
+        if (typeof entry?.name_value !== "string") {
+          throw new Error("Certificate Transparency service returned invalid data.");
+        }
+        return [entry.name_value];
+      },
+    },
+    {
+      name: "CertSpotter",
+      createUrl() {
+        const url = new URL("https://api.certspotter.com/v1/issuances");
+        url.searchParams.set("domain", domain);
+        url.searchParams.set("include_subdomains", "true");
+        url.searchParams.set("expand", "dns_names");
+        return url;
+      },
+      readEntryNames: (entry) => {
+        if (!Array.isArray(entry?.dns_names)) {
+          throw new Error("Certificate Transparency service returned invalid data.");
+        }
+        return entry.dns_names;
+      },
+    },
+  ];
+  let lastError;
+  for (const provider of providers) {
+    try {
+      const entries = await fetchCertificateTransparencyJson(provider.createUrl());
+      return {
+        names: normalizeCertificateTransparencyNames(
+          entries,
+          domain,
+          provider.readEntryNames,
+        ),
+        source: provider.name,
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Certificate Transparency services are unavailable.");
+}
+
 async function bulkScan(request, url, response) {
   const rawDomain = queryInput(url, "name", 253, response);
   const portScanOption = queryInput(url, "ports", 10, response);
@@ -1174,6 +1289,16 @@ async function bulkScan(request, url, response) {
     (error) => ({
       registration: null,
       error: error.message || "Unable to retrieve registration details.",
+    }),
+  );
+  const certificateTransparencyPromise = discoverCertificateTransparencySubdomains(domain).then(
+    ({ names, source }) => ({ names, source, error: null }),
+    (error) => ({
+      names: [],
+      source: null,
+      error: error.name === "TimeoutError"
+        ? "Certificate Transparency lookup timed out."
+        : "Certificate Transparency lookup is temporarily unavailable.",
     }),
   );
   const hostCandidates = new Map([
@@ -1207,6 +1332,22 @@ async function bulkScan(request, url, response) {
         name,
         providers: [candidate.provider],
         types: candidate.types,
+      });
+    }
+  }
+  const certificateTransparencyResult = await certificateTransparencyPromise;
+  for (const name of certificateTransparencyResult.names) {
+    const existing = hostCandidates.get(name);
+    if (existing) {
+      if (!existing.providers.includes("Certificate Transparency")) {
+        existing.providers.push("Certificate Transparency");
+      }
+      existing.types = [...new Set([...existing.types, ...certificateTransparencyRecordTypes])];
+    } else {
+      hostCandidates.set(name, {
+        name,
+        providers: ["Certificate Transparency"],
+        types: certificateTransparencyRecordTypes,
       });
     }
   }
@@ -1304,6 +1445,9 @@ async function bulkScan(request, url, response) {
     domain,
     recordTypes: scanRecordTypes,
     subdomainsChecked: candidates.length - 1,
+    certificateTransparencySubdomains: certificateTransparencyResult.names.length,
+    certificateTransparencySource: certificateTransparencyResult.source,
+    subdomainDiscoveryError: certificateTransparencyResult.error,
     providerCandidatesChecked: providerCandidates.length,
     providerNames: [...new Set(providerCandidates.map((candidate) => candidate.provider))],
     hosts,

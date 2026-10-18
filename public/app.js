@@ -364,11 +364,13 @@ function renderScanResult(data) {
     </div>
     <div class="scan-summary">
       <span>${escapeHtml(data.subdomainsChecked)} subdomains checked</span>
+      <span>${escapeHtml(data.certificateTransparencySubdomains)} additional names from ${escapeHtml(data.certificateTransparencySource || "certificate logs")}</span>
       <span>${data.recordTypes.map(escapeHtml).join(" · ")} plus provider checks</span>
     </div>
     ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span><strong>${escapeHtml(data.nameserver)}</strong></div>` : ""}
     <p class="scan-disclaimer">IP geolocation (including country) is approximate. Public IP addresses found in scan results are sent to ipwho.is; private and reserved addresses are not sent.</p>
     ${data.failedQueries ? `<p class="detail-notice">${escapeHtml(data.failedQueries)} DNS queries could not be completed.</p>` : ""}
+    ${data.subdomainDiscoveryError ? `<p class="detail-notice">${escapeHtml(data.subdomainDiscoveryError)}</p>` : ""}
     <section class="email-auth">
       <h3>Domain registration <span class="email-auth-status ${registration ? "found" : "missing"}">${registration ? "WHOIS / RDAP" : "Unavailable"}</span></h3>
       ${registrationDetails}
@@ -390,7 +392,7 @@ function renderScanResult(data) {
     </section>
     ${portScanSection}
     ${hostCards || '<p class="empty-result">No records found for the domain or the checked subdomains.</p>'}
-    <p class="scan-disclaimer">Subdomain discovery checks a built-in list of common names; it does not enumerate every subdomain. IP geolocation is provided by ipwho.is and may be unavailable or approximate.</p>`;
+    <p class="scan-disclaimer">Subdomain discovery checks a built-in list and up to 25 names from public Certificate Transparency logs, trying crt.sh and then CertSpotter if needed, before verifying them with DNS. It does not enumerate every subdomain. The queried domain is sent to crt.sh and, if it fails, also to CertSpotter; IP geolocation is provided by ipwho.is and may be unavailable or approximate.</p>`;
   resultPanel.hidden = false;
 }
 
