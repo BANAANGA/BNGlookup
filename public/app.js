@@ -5,6 +5,8 @@ const customType = document.querySelector("#custom-type");
 const typeControl = document.querySelector("#type-control");
 const nameserverControl = document.querySelector("#nameserver-control");
 const nameserverInput = document.querySelector("#nameserver-input");
+const portScanControl = document.querySelector("#port-scan-control");
+const portScanInput = document.querySelector("#port-scan-input");
 const resultPanel = document.querySelector("#result");
 const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
@@ -35,6 +37,7 @@ function setMode(nextMode) {
   typeControl.hidden = reverse || details || mac || scan;
   customType.hidden = reverse || details || mac || scan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
+  portScanControl.hidden = !scan;
   formHint.textContent = reverse
     ? "Find the PTR record associated with an IPv4 or IPv6 address."
     : details
@@ -125,9 +128,20 @@ function renderScanResult(data) {
                 ? `PTR: ${ptr.answers.join(", ")}`
                 : `PTR: no record (${ptr.status})`
             : "";
+          const geolocation = data.ipGeolocations?.[answer.data];
+          const locationText = geolocation
+            ? geolocation.country
+              ? `Country: ${[
+                geolocation.city,
+                geolocation.region,
+                geolocation.country,
+              ].filter(Boolean).join(", ")}${geolocation.countryCode ? ` (${geolocation.countryCode})` : ""}`
+              : `Geolocation: ${geolocation.error}`
+            : "";
           return `<div class="scan-answer">
             <span>${escapeHtml(answer.data)}</span>
             ${ptrText ? `<small>${escapeHtml(ptrText)}</small>` : ""}
+            ${locationText ? `<small class="geo-result">${escapeHtml(locationText)}</small>` : ""}
           </div>`;
         }).join("")}</div>
       </div>`).join("");
@@ -146,6 +160,37 @@ function renderScanResult(data) {
       <span>${entry.records.map((record) => `${escapeHtml(record.type)}: ${escapeHtml(record.data)}`).join("<br>")}</span>
     </div>
   `).join("");
+  const portScan = data.portScan;
+  const portScanResults = portScan?.results.map((result) => {
+    const geolocation = data.ipGeolocations?.[result.address];
+    const location = geolocation?.country
+      ? `Country: ${[
+        geolocation.city,
+        geolocation.region,
+        geolocation.country,
+      ].filter(Boolean).join(", ")}${geolocation.countryCode ? ` (${geolocation.countryCode})` : ""}`
+      : geolocation?.error
+        ? `Geolocation: ${geolocation.error}`
+        : "";
+    return `
+      <div class="port-scan-address">
+        <strong>${escapeHtml(result.address)}</strong>
+        <span>${result.openPorts.length
+    ? result.openPorts.map((port) => `<span class="port-badge">${port}</span>`).join("")
+    : "No open ports found in the checked set"}
+          ${location ? `<small class="geo-result">${escapeHtml(location)}</small>` : ""}
+        </span>
+      </div>
+    `;
+  }).join("");
+  const portScanSection = portScan?.enabled
+    ? `<section class="email-auth port-scan-results">
+        <h3>TCP port scan <span class="email-auth-status ${portScan.results.some((result) => result.openPorts.length) ? "found" : "missing"}">${portScan.results.reduce((count, result) => count + result.openPorts.length, 0)} open</span></h3>
+        <p class="scan-disclaimer">Checked ${portScan.addressesScanned} public domain IP address(es) across ${portScan.portsChecked} common TCP ports.${portScan.addressesSkipped ? ` Skipped ${portScan.addressesSkipped} private, reserved, or excess address(es).` : ""}</p>
+        ${portScanResults || '<p class="empty-result">No public domain IP addresses were available to scan.</p>'}
+        <p class="scan-disclaimer">Only ports that accepted a TCP connection are listed. Scan only systems you are authorized to test.</p>
+      </section>`
+    : "";
   const registration = data.registration;
   const registrationDates = registration?.dates || {};
   const whoisDateLabels = {
@@ -200,6 +245,7 @@ function renderScanResult(data) {
       <span>${data.recordTypes.map(escapeHtml).join(" · ")} plus provider checks</span>
     </div>
     ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span><strong>${escapeHtml(data.nameserver)}</strong></div>` : ""}
+    <p class="scan-disclaimer">IP geolocation (including country) is approximate. Public IP addresses found in scan results are sent to ipwho.is; private and reserved addresses are not sent.</p>
     ${data.failedQueries ? `<p class="detail-notice">${data.failedQueries} DNS queries could not be completed.</p>` : ""}
     <section class="email-auth">
       <h3>Domain registration <span class="email-auth-status ${registration ? "found" : "missing"}">${registration ? "WHOIS / RDAP" : "Unavailable"}</span></h3>
@@ -220,8 +266,9 @@ function renderScanResult(data) {
       </div>
       <p class="scan-disclaimer">SPF is checked on the domain and scanned hosts. DKIM checks common selectors; your mail provider may use a custom selector that is not included.</p>
     </section>
+    ${portScanSection}
     ${hostCards || '<p class="empty-result">No records found for the domain or the checked subdomains.</p>'}
-    <p class="scan-disclaimer">Subdomain discovery checks a built-in list of common names; it does not enumerate every subdomain.</p>`;
+    <p class="scan-disclaimer">Subdomain discovery checks a built-in list of common names; it does not enumerate every subdomain. IP geolocation is provided by ipwho.is and may be unavailable or approximate.</p>`;
   resultPanel.hidden = false;
 }
 
@@ -371,6 +418,9 @@ form.addEventListener("submit", async (event) => {
       ? nameserverInput.value.trim()
       : "",
   });
+  if (mode === "scan" && portScanInput.checked) {
+    params.set("ports", "common");
+  }
 
   try {
     const endpoint = mode === "details"
