@@ -47,6 +47,7 @@ const portScanPolicyDefaults = {
   maxPortsByRole: { admin: 100, user: 25 },
   localScanByRole: { admin: true, user: false },
 };
+const publicLookupDailyLimit = 15;
 database.exec(`
   PRAGMA foreign_keys = ON;
   PRAGMA journal_mode = WAL;
@@ -70,7 +71,20 @@ database.exec(`
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS public_lookup_usage (
+    client_hash TEXT NOT NULL,
+    utc_date TEXT NOT NULL,
+    lookup_count INTEGER NOT NULL,
+    PRIMARY KEY (client_hash, utc_date)
+  );
 `);
+database.prepare(`
+  INSERT OR IGNORE INTO app_settings (key, value)
+  VALUES ('public_lookup_hash_key', ?)
+`).run(crypto.randomBytes(32).toString("hex"));
+const publicLookupHashKey = database.prepare(
+  "SELECT value FROM app_settings WHERE key = 'public_lookup_hash_key'",
+).get().value;
 const dnsStatusNames = {
   0: "NOERROR",
   1: "FORMERR",
@@ -687,6 +701,41 @@ async function fetchPtrLookups(addresses, nameserver = null) {
     })));
   }
   return Object.fromEntries(results);
+}
+
+function getClientAddress(request) {
+  const address = request.socket.remoteAddress || "";
+  const mappedIpv4 = address.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  if (mappedIpv4 && isIP(mappedIpv4[1]) === 4) return mappedIpv4[1];
+  return isIP(address) ? address : null;
+}
+
+async function handleClientInfo(request, response) {
+  const address = getClientAddress(request);
+  if (!address) {
+    sendJson(response, 200, { address: null, isPublic: false, ptr: [], ptrError: null });
+    return;
+  }
+  if (!isPublicAddress(address)) {
+    sendJson(response, 200, { address, isPublic: false, ptr: [], ptrError: null });
+    return;
+  }
+  try {
+    const result = await fetchPtr(address);
+    sendJson(response, 200, {
+      address,
+      isPublic: true,
+      ptr: result.answers,
+      ptrError: null,
+    });
+  } catch (error) {
+    sendJson(response, 200, {
+      address,
+      isPublic: true,
+      ptr: [],
+      ptrError: "PTR lookup is unavailable.",
+    });
+  }
 }
 
 async function queryDnsRecords(name, type) {
@@ -1868,7 +1917,15 @@ function checkFeatureAccess(request, response, feature, requireLogin = false) {
   }
   const access = getFeatureAccess()[feature] || "admin";
   const user = currentUser(request);
-  if (access === "public" && (!requireLogin || user)) return true;
+  if (access === "public" && (!requireLogin || user)) {
+    const expectedMethod = ["/api/custom-port-scan", "/api/bulk-port-scan"]
+      .includes(new URL(request.url, "http://localhost").pathname)
+      ? "POST"
+      : "GET";
+    if (!user && request.method === expectedMethod &&
+      !consumePublicLookup(request, response)) return false;
+    return true;
+  }
   if (!user) {
     sendJson(response, 401, { error: "Log in to use this feature.", loginRequired: true });
     return false;
@@ -1878,6 +1935,48 @@ function checkFeatureAccess(request, response, feature, requireLogin = false) {
     return false;
   }
   return true;
+}
+
+let lastPublicQuotaCleanupDate = "";
+function consumePublicLookup(request, response) {
+  const now = new Date();
+  const utcDate = now.toISOString().slice(0, 10);
+  if (lastPublicQuotaCleanupDate !== utcDate) {
+    database.prepare("DELETE FROM public_lookup_usage WHERE utc_date < ?").run(utcDate);
+    lastPublicQuotaCleanupDate = utcDate;
+  }
+  const clientAddress = request.socket.remoteAddress || "unknown";
+  const clientHash = crypto
+    .createHmac("sha256", publicLookupHashKey)
+    .update(clientAddress)
+    .digest("hex");
+  const result = database.prepare(`
+    INSERT INTO public_lookup_usage (client_hash, utc_date, lookup_count)
+    VALUES (?, ?, 1)
+    ON CONFLICT(client_hash, utc_date) DO UPDATE
+      SET lookup_count = lookup_count + 1
+      WHERE lookup_count < ?
+    RETURNING lookup_count
+  `).get(clientHash, utcDate, publicLookupDailyLimit);
+  const resetAt = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+  );
+  const remaining = result ? publicLookupDailyLimit - result.lookup_count : 0;
+  response.setHeader("x-ratelimit-limit", String(publicLookupDailyLimit));
+  response.setHeader("x-ratelimit-remaining", String(remaining));
+  response.setHeader("x-ratelimit-reset", String(Math.floor(resetAt / 1000)));
+  if (result) return true;
+
+  response.setHeader("retry-after", String(Math.ceil((resetAt - now.getTime()) / 1000)));
+  sendJson(response, 429, {
+    error: "Daily public lookup limit reached (15 lookups per IP). Try again after 00:00 UTC.",
+    limit: publicLookupDailyLimit,
+    remaining: 0,
+    resetAt: new Date(resetAt).toISOString(),
+  });
+  return false;
 }
 
 async function macLookup(url, response) {
@@ -2126,6 +2225,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     handleAuthStatus(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/client-info") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void handleClientInfo(request, response);
     return;
   }
 

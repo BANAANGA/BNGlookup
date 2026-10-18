@@ -19,6 +19,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Run a custom TCP port list/range against one domain or IP, or run a bounded
   single-port scan against an explicit IP list or CIDR block.
 - Look up PTR records from IPv4 or IPv6 addresses.
+- Display the connecting IP address and its PTR record on the landing page
+  when the address is public.
 - Display PTR hostnames for IP addresses returned in DNS results and for
   resolved nameserver addresses.
 - View public domain registration details from RDAP (the modern WHOIS service),
@@ -91,12 +93,19 @@ port-scan tools require an administrator. Public access can be enabled or
 changed from the admin panel. Sessions use HttpOnly, SameSite cookies and expire
 after 12 hours.
 
-SQLite stores users, feature-access settings, and sessions in the Compose
-`app_data` volume at `/data/bnglookup.sqlite`. Keep this volume to preserve
-accounts across container replacements, and back it up with your other
-application data. To enable the cookie's `Secure` attribute behind HTTPS, set
-`COOKIE_SECURE=true` in the deployment environment. Do not expose the service
-over an untrusted network without HTTPS.
+Unauthenticated requests to features marked **Public** are limited to 15 lookup
+requests per client IP address per UTC day. The counter resets at 00:00 UTC and
+is stored in SQLite so it survives application restarts. Logged-in users are
+not subject to this guest quota. When deployed behind a reverse proxy, the app
+uses the connection address it sees and does not trust forwarded-IP headers;
+clients that share a proxy connection address also share the quota.
+
+SQLite stores users, feature-access settings, sessions, and guest quota counters
+in the Compose `app_data` volume at `/data/bnglookup.sqlite`. Keep this volume to
+preserve accounts and quota state across container replacements, and back it up
+with your other application data. To enable the cookie's `Secure` attribute
+behind HTTPS, set `COOKIE_SECURE=true` in the deployment environment. Do not
+expose the service over an untrusted network without HTTPS.
 
 ## Web security and input handling
 
@@ -111,6 +120,11 @@ calling these endpoints directly.
 These safeguards do not replace HTTPS, network-level access controls, or
 scanning only systems you are authorized to test. Keep `COOKIE_SECURE=true`
 when serving the app behind an HTTPS reverse proxy.
+
+The landing page displays the IP address observed by the application and
+performs a PTR lookup when it is public. Behind a reverse proxy, this is the
+proxy's connection address unless the application is directly exposed; forwarded
+IP headers are not trusted.
 
 ## Deploy with Arcane
 
