@@ -14,7 +14,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Scan a domain and common subdomains for DNS records, cloud-provider
   endpoints, WHOIS/RDAP registration data, SPF policies, and common DKIM
   selectors, with IP geolocation and country information for returned IPs.
-- Optionally scan 26 common TCP ports on the domain's public IP addresses.
+- Optionally scan 26 common TCP ports on up to eight eligible domain IP
+  addresses, subject to the signed-in user's local-target policy.
 - Run a custom TCP port list/range against one domain or IP, or run a bounded
   single-port scan against an explicit IP list or CIDR block.
 - Look up PTR records from IPv4 or IPv6 addresses.
@@ -97,6 +98,20 @@ application data. To enable the cookie's `Secure` attribute behind HTTPS, set
 `COOKIE_SECURE=true` in the deployment environment. Do not expose the service
 over an untrusted network without HTTPS.
 
+## Web security and input handling
+
+The server validates input independently of browser-side field limits, rejects
+oversized or duplicate request parameters, and uses parameterized SQL for
+account operations. Values from DNS and registration responses are HTML-escaped
+before rendering. The interface also sends a restrictive Content Security
+Policy and browser security headers. State-changing account requests require a
+same-origin `Origin` header; use the web interface or send that header when
+calling these endpoints directly.
+
+These safeguards do not replace HTTPS, network-level access controls, or
+scanning only systems you are authorized to test. Keep `COOKIE_SECURE=true`
+when serving the app behind an HTTPS reverse proxy.
+
 ## Deploy with Arcane
 
 Arcane can deploy this repository as a Compose project. Since the Compose file
@@ -178,20 +193,27 @@ service; private and reserved IP addresses are not sent. Geolocation may be
 unavailable or inaccurate.
 
 Enable **Scan common TCP ports** before starting a Magic scan to check the
-domain's public A/AAAA addresses for 26 commonly used TCP ports, including
-ports 2222 and 8443. Results identify the scanned domain and IP address. The check is
-optional, limited to eight public IP addresses, and omits private and reserved
-addresses. It reports ports that accepted a TCP connection; it is not a
-vulnerability assessment. Only scan systems you are authorized to test.
+domain's A/AAAA addresses for 26 commonly used TCP ports, including ports 2222
+and 8443. Results identify the scanned domain and IP address. The check is
+optional and limited to eight eligible IP addresses. Private/local addresses
+are scanned only when enabled for the signed-in user's role in the admin panel;
+other reserved addresses are always skipped. It reports ports that accepted a
+TCP connection; it is not a vulnerability assessment. Only scan systems you
+are authorized to test.
 
 The **Custom port scan** tab checks a comma-separated list of ports and/or
-ranges (for example, `22,80,443,8000-8010`) on one domain or IP address, with a
-maximum of 100 unique ports and eight resolved IPs. The **Bulk port scan** tab
+ranges (for example, `22,80,443,8000-8010`) on one domain or IP address. The
+administrator configures the maximum number of unique ports per target
+separately for Admin and User roles, from 1 to 65,535. Defaults are 100 ports
+for Admins and 25 for Users. Scans resolve at most eight eligible IP addresses.
+The **Bulk port scan** tab
 checks one TCP port across an explicit IPv4/IPv6 list or CIDR blocks, capped at
-256 unique addresses. Both tabs scan public addresses only; private and
-reserved addresses are skipped. Bulk scanning is intentionally bounded rather
-than an unrestricted internet-wide scan. Only scan systems you are authorized
-to test.
+256 unique addresses. All port-scan features require a signed-in account,
+regardless of the public feature-access setting. Administrators can separately
+allow or disallow private/local targets for each role; by default this is
+enabled for Admins and disabled for Users. Other reserved addresses are always
+skipped. Bulk scanning is intentionally bounded rather than an unrestricted
+internet-wide scan. Only scan systems you are authorized to test.
 
 Subdomain and DKIM selector checks use built-in candidate lists rather than
 enumeration. DNS cannot list every subdomain or a domain's custom DKIM

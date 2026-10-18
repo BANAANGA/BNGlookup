@@ -1,6 +1,7 @@
 const errorPanel = document.querySelector("#admin-error");
 const successPanel = document.querySelector("#admin-success");
 const featureSettings = document.querySelector("#feature-settings");
+const portScanSettings = document.querySelector("#port-scan-settings");
 const userList = document.querySelector("#user-list");
 
 function escapeHtml(value) {
@@ -56,6 +57,20 @@ function renderFeatureSettings(features, access) {
   `).join("");
 }
 
+function renderPortScanSettings(policy) {
+  portScanSettings.innerHTML = ["admin", "user"].map((role) => `
+    <fieldset class="port-scan-role">
+      <legend>${role === "admin" ? "Administrators" : "Users"}</legend>
+      <label for="max-ports-${role}">Maximum unique TCP ports per target</label>
+      <input id="max-ports-${role}" name="maxPorts-${role}" type="number" min="1" max="65535" value="${policy.maxPortsByRole[role]}" required>
+      <label class="local-scan-setting" for="local-scan-${role}">
+        <input id="local-scan-${role}" name="localScan-${role}" type="checkbox" ${policy.localScanByRole[role] ? "checked" : ""}>
+        Allow private/local network targets
+      </label>
+    </fieldset>
+  `).join("");
+}
+
 function renderUsers(users) {
   userList.innerHTML = users.map((user) => `
     <form class="user-row" data-user-id="${user.id}">
@@ -102,6 +117,7 @@ async function initializeAdmin() {
       api("/api/admin/users"),
     ]);
     renderFeatureSettings(settings.features, settings.featureAccess);
+    renderPortScanSettings(settings.portScanPolicy);
     renderUsers(users.users);
   } catch (error) {
     if (!errorPanel.hidden) return;
@@ -114,12 +130,22 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
   const featureAccess = Object.fromEntries(
     [...featureSettings.querySelectorAll("select")].map((select) => [select.name, select.value]),
   );
+  const portScanPolicy = {
+    maxPortsByRole: Object.fromEntries(["admin", "user"].map((role) => [
+      role,
+      Number(portScanSettings.querySelector(`[name="maxPorts-${role}"]`).value),
+    ])),
+    localScanByRole: Object.fromEntries(["admin", "user"].map((role) => [
+      role,
+      portScanSettings.querySelector(`[name="localScan-${role}"]`).checked,
+    ])),
+  };
   try {
     await api("/api/admin/settings", {
       method: "PUT",
-      body: JSON.stringify({ featureAccess }),
+      body: JSON.stringify({ featureAccess, portScanPolicy }),
     });
-    showAdminSuccess("Feature access settings saved.");
+    showAdminSuccess("Feature access and port scan settings saved.");
   } catch (error) {
     showAdminError(error.message);
   }

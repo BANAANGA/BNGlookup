@@ -12,6 +12,9 @@ const { domainToASCII } = require("node:url");
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error("PORT must be an integer between 1 and 65535.");
+}
 const dohEndpoint = process.env.DOH_ENDPOINT || "https://cloudflare-dns.com/dns-query";
 const publicDir = path.join(__dirname, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || "/data");
@@ -39,6 +42,10 @@ const featureNames = {
   scan: "Magic scan",
   "custom-port": "Custom port scan",
   "bulk-port": "Bulk port scan",
+};
+const portScanPolicyDefaults = {
+  maxPortsByRole: { admin: 100, user: 25 },
+  localScanByRole: { admin: true, user: false },
 };
 database.exec(`
   PRAGMA foreign_keys = ON;
@@ -192,6 +199,15 @@ const nonPublicAddressRanges = new net.BlockList();
   ["ff00::", 8, "ipv6"],
 ].forEach(([address, prefix, family]) => {
   nonPublicAddressRanges.addSubnet(address, prefix, family);
+});
+const localAddressRanges = new net.BlockList();
+[
+  ["10.0.0.0", 8, "ipv4"], ["127.0.0.0", 8, "ipv4"],
+  ["169.254.0.0", 16, "ipv4"], ["172.16.0.0", 12, "ipv4"],
+  ["192.168.0.0", 16, "ipv4"], ["::1", 128, "ipv6"],
+  ["fc00::", 7, "ipv6"], ["fe80::", 10, "ipv6"],
+].forEach(([address, prefix, family]) => {
+  localAddressRanges.addSubnet(address, prefix, family);
 });
 const contentTypes = {
   ".css": "text/css; charset=utf-8",
@@ -352,6 +368,9 @@ async function fetchRdap(domain) {
 
 function parseNameserver(input) {
   if (!input) return null;
+  if (input.length > 300) {
+    throw new Error("Nameserver input must not exceed 300 characters.");
+  }
   let address = input.trim();
   let port = 53;
 
@@ -695,6 +714,17 @@ function isPublicAddress(address) {
     !nonPublicAddressRanges.check(address, family === 4 ? "ipv4" : "ipv6");
 }
 
+function isLocalAddress(address) {
+  const family = isIP(address);
+  return family !== 0 &&
+    !address.toLowerCase().startsWith("::ffff:") &&
+    localAddressRanges.check(address, family === 4 ? "ipv4" : "ipv6");
+}
+
+function isScannableAddress(address, allowLocal) {
+  return isPublicAddress(address) || (allowLocal && isLocalAddress(address));
+}
+
 function checkTcpPort(address, port) {
   return new Promise((resolve) => {
     let settled = false;
@@ -721,14 +751,15 @@ function checkTcpPort(address, port) {
   });
 }
 
-async function scanCommonTcpPorts(domain, addresses) {
-  return scanTcpTargets(domain, addresses, commonTcpPorts, 8);
+async function scanCommonTcpPorts(domain, addresses, policy) {
+  const ports = commonTcpPorts.slice(0, policy.maxPorts);
+  return scanTcpTargets(domain, addresses, ports, 8, () => domain, policy.allowLocal);
 }
 
-async function scanTcpTargets(scanLabel, addresses, ports, addressLimit, targetForAddress = () => scanLabel) {
+async function scanTcpTargets(scanLabel, addresses, ports, addressLimit, targetForAddress = () => scanLabel, allowLocal = false) {
   const uniqueAddresses = [...new Set(addresses)];
-  const publicAddresses = uniqueAddresses.filter(isPublicAddress);
-  const targets = publicAddresses.slice(0, addressLimit);
+  const eligibleAddresses = uniqueAddresses.filter((address) => isScannableAddress(address, allowLocal));
+  const targets = eligibleAddresses.slice(0, addressLimit);
   const tasks = targets.flatMap((address) =>
     ports.map((port) => ({ address, port })),
   );
@@ -773,8 +804,12 @@ async function readJsonRequest(request) {
     throw invalidScanRequest("Content-Type must be application/json.", 415);
   }
   const maximumBodySize = 65536;
-  const contentLength = Number(request.headers["content-length"] || 0);
-  if (contentLength > maximumBodySize) {
+  const contentLengthHeader = request.headers["content-length"];
+  if (contentLengthHeader !== undefined && !/^\d+$/.test(contentLengthHeader)) {
+    throw invalidScanRequest("Content-Length must be a valid non-negative integer.");
+  }
+  const contentLength = Number(contentLengthHeader || 0);
+  if (!Number.isSafeInteger(contentLength) || contentLength > maximumBodySize) {
     throw invalidScanRequest("Request body must not exceed 64 KB.", 413);
   }
   return new Promise((resolve, reject) => {
@@ -811,7 +846,10 @@ async function readJsonRequest(request) {
   });
 }
 
-function parseCustomPortList(input) {
+function parseCustomPortList(input, maxPorts) {
+  if (input.length > 65536) {
+    throw invalidScanRequest("Port list must not exceed 65,536 characters.");
+  }
   const segments = input.split(",");
   if (!segments.length || segments.some((segment) => !segment.trim())) {
     throw invalidScanRequest("Enter comma-separated TCP ports or port ranges.");
@@ -828,8 +866,8 @@ function parseCustomPortList(input) {
     }
     for (let port = start; port <= end; port += 1) {
       ports.add(port);
-      if (ports.size > 100) {
-        throw invalidScanRequest("A custom scan may include at most 100 unique ports.");
+      if (ports.size > maxPorts) {
+        throw invalidScanRequest(`Your role is limited to ${maxPorts} unique TCP ports per target.`);
       }
     }
   }
@@ -869,6 +907,9 @@ function addressFromBigInt(value, family) {
 }
 
 function parseBulkScanTargets(input) {
+  if (input.length > 8192) {
+    throw invalidScanRequest("Target list must not exceed 8,192 characters.");
+  }
   const tokens = input.split(/[\s,]+/).filter(Boolean);
   if (!tokens.length) throw invalidScanRequest("Enter at least one IP address or CIDR block.");
   if (tokens.length > 256) {
@@ -919,11 +960,16 @@ function parseBulkScanTargets(input) {
 
 async function runCustomPortScan(request, response) {
   try {
+    const user = currentUser(request);
+    if (!user) throw invalidScanRequest("Log in to scan ports.", 401);
+    const policy = getPortScanPolicy();
     const body = await readJsonRequest(request);
     const target = typeof body.target === "string" ? body.target.trim() : "";
-    if (!target) throw invalidScanRequest("Enter a domain name or IP address.");
+    if (!target || target.length > 253) {
+      throw invalidScanRequest("Enter a domain name or IP address no longer than 253 characters.");
+    }
     const portsInput = typeof body.ports === "string" ? body.ports : "";
-    const ports = parseCustomPortList(portsInput);
+    const ports = parseCustomPortList(portsInput, policy.maxPortsByRole[user.role]);
     let addresses;
     if (isIP(target)) {
       addresses = [target];
@@ -937,7 +983,14 @@ async function runCustomPortScan(request, response) {
         throw invalidScanRequest(`Could not resolve target domain: ${error.message}`);
       }
     }
-    const data = await scanTcpTargets(target, addresses, ports, 8);
+    const data = await scanTcpTargets(
+      target,
+      addresses,
+      ports,
+      8,
+      () => target,
+      policy.localScanByRole[user.role],
+    );
     sendJson(response, 200, data);
   } catch (error) {
     const statusCode = error.statusCode || 500;
@@ -950,6 +1003,9 @@ async function runCustomPortScan(request, response) {
 
 async function runBulkPortScan(request, response) {
   try {
+    const user = currentUser(request);
+    if (!user) throw invalidScanRequest("Log in to scan ports.", 401);
+    const policy = getPortScanPolicy();
     const body = await readJsonRequest(request);
     const port = typeof body.port === "string" && /^\d+$/.test(body.port)
       ? Number(body.port)
@@ -959,7 +1015,14 @@ async function runBulkPortScan(request, response) {
     }
     const targetsInput = typeof body.targets === "string" ? body.targets : "";
     const addresses = parseBulkScanTargets(targetsInput);
-    const data = await scanTcpTargets("Bulk IP targets", addresses, [port], 256, (address) => address);
+    const data = await scanTcpTargets(
+      "Bulk IP targets",
+      addresses,
+      [port],
+      256,
+      (address) => address,
+      policy.localScanByRole[user.role],
+    );
     sendJson(response, 200, data);
   } catch (error) {
     const statusCode = error.statusCode || 500;
@@ -1033,14 +1096,17 @@ async function fetchIpGeolocations(addresses) {
   return results;
 }
 
-async function bulkScan(url, response) {
-  const domain = normalizeDomain(url.searchParams.get("name") || "");
+async function bulkScan(request, url, response) {
+  const rawDomain = queryInput(url, "name", 253, response);
+  const portScanOption = queryInput(url, "ports", 10, response);
+  const rawNameserver = queryInput(url, "nameserver", 300, response);
+  if ([rawDomain, portScanOption, rawNameserver].includes(null)) return;
+  const domain = normalizeDomain(rawDomain);
   if (!domain) {
     sendJson(response, 400, { error: "Enter a valid domain name." });
     return;
   }
 
-  const portScanOption = url.searchParams.get("ports") || "";
   if (portScanOption && portScanOption !== "common") {
     sendJson(response, 400, { error: "Unsupported port scan option." });
     return;
@@ -1048,7 +1114,7 @@ async function bulkScan(url, response) {
 
   let nameserver;
   try {
-    nameserver = await resolveNameserver(parseNameserver(url.searchParams.get("nameserver") || ""));
+    nameserver = await resolveNameserver(parseNameserver(rawNameserver));
   } catch (error) {
     sendJson(response, 400, { error: error.message });
     return;
@@ -1174,8 +1240,14 @@ async function bulkScan(url, response) {
     .filter((record) => record.type === "A" || record.type === "AAAA")
     .flatMap((record) => record.answers.map((answer) => answer.data))
     .filter((address) => isIP(address) !== 0);
+  const user = currentUser(request);
+  const portScanPolicy = getPortScanPolicy();
+  const rolePolicy = user ? {
+    maxPorts: portScanPolicy.maxPortsByRole[user.role],
+    allowLocal: portScanPolicy.localScanByRole[user.role],
+  } : { maxPorts: 0, allowLocal: false };
   const portScan = portScanOption === "common"
-    ? await scanCommonTcpPorts(domain, rootAddresses)
+    ? await scanCommonTcpPorts(domain, rootAddresses, rolePolicy)
     : null;
   const registrationResult = await registrationPromise;
 
@@ -1262,7 +1334,9 @@ async function fetchNameservers(domain) {
 }
 
 async function domainInfo(url, response) {
-  const domain = normalizeDomain(url.searchParams.get("name") || "");
+  const rawDomain = queryInput(url, "name", 253, response);
+  if (rawDomain === null) return;
+  const domain = normalizeDomain(rawDomain);
   if (!domain) {
     sendJson(response, 400, { error: "Enter a valid domain name." });
     return;
@@ -1307,6 +1381,20 @@ function sendJson(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+function queryInput(url, name, maximumLength, response) {
+  const values = url.searchParams.getAll(name);
+  if (values.length > 1) {
+    sendJson(response, 400, { error: `Provide ${name} only once.` });
+    return null;
+  }
+  const value = values[0] || "";
+  if (value.length > maximumLength) {
+    sendJson(response, 400, { error: `${name} must not exceed ${maximumLength} characters.` });
+    return null;
+  }
+  return value;
+}
+
 function sendRedirect(response, location) {
   response.writeHead(303, { location, "cache-control": "no-store" });
   response.end();
@@ -1327,6 +1415,30 @@ function getFeatureAccess() {
     ]));
   } catch {
     return { ...featureAccessDefaults };
+  }
+}
+
+function getPortScanPolicy() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'port_scan_policy'").get();
+  if (!row) return structuredClone(portScanPolicyDefaults);
+  try {
+    const saved = JSON.parse(row.value);
+    return {
+      maxPortsByRole: Object.fromEntries(["admin", "user"].map((role) => {
+        const limit = saved.maxPortsByRole?.[role];
+        return [role, Number.isInteger(limit) && limit >= 1 && limit <= 65535
+          ? limit
+          : portScanPolicyDefaults.maxPortsByRole[role]];
+      })),
+      localScanByRole: Object.fromEntries(["admin", "user"].map((role) => [
+        role,
+        typeof saved.localScanByRole?.[role] === "boolean"
+          ? saved.localScanByRole[role]
+          : portScanPolicyDefaults.localScanByRole[role],
+      ])),
+    };
+  } catch {
+    return structuredClone(portScanPolicyDefaults);
   }
 }
 
@@ -1371,9 +1483,17 @@ function clearSessionCookie(response) {
 
 function sameOrigin(request) {
   const origin = request.headers.origin;
-  if (!origin) return true;
+  if (!origin || !request.headers.host) return false;
   try {
-    return new URL(origin).host === request.headers.host;
+    const parsedOrigin = new URL(origin);
+    return ["http:", "https:"].includes(parsedOrigin.protocol) &&
+      !parsedOrigin.username &&
+      !parsedOrigin.password &&
+      parsedOrigin.pathname === "/" &&
+      !parsedOrigin.search &&
+      !parsedOrigin.hash &&
+      parsedOrigin.origin === origin.toLowerCase() &&
+      parsedOrigin.host === request.headers.host.toLowerCase();
   } catch {
     return false;
   }
@@ -1458,6 +1578,10 @@ async function handleInitialSetup(request, response) {
   const body = await readAuthBody(request, response);
   if (!body) return;
   const { username, password } = body;
+  if (typeof body.confirmPassword !== "string" || body.confirmPassword !== password) {
+    sendJson(response, 400, { error: "The passwords do not match." });
+    return;
+  }
   if (!validateUsername(username)) {
     sendJson(response, 400, { error: "Username must be 3–32 characters using letters, numbers, dot, underscore, or hyphen." });
     return;
@@ -1514,7 +1638,9 @@ async function handleLogin(request, response) {
   }
   const body = await readAuthBody(request, response);
   if (!body) return;
-  const username = typeof body.username === "string" ? body.username.trim() : "";
+  const username = typeof body.username === "string" && body.username.length <= 32
+    ? body.username.trim()
+    : "";
   const password = typeof body.password === "string" ? body.password : "";
   const user = database.prepare(`
     SELECT id, username, password_hash, password_salt, role
@@ -1522,11 +1648,11 @@ async function handleLogin(request, response) {
   `).get(username);
   const storedHash = user?.password_hash || "00".repeat(64);
   const salt = user?.password_salt || "00".repeat(16);
-  const supplied = await scrypt(password.slice(0, 128), salt, 64);
+  const supplied = await scrypt(password.length <= 128 ? password : "", salt, 64);
   const validHash = Buffer.from(storedHash, "hex");
   const valid = validHash.length === supplied.length &&
     crypto.timingSafeEqual(validHash, supplied);
-  if (!user || !valid) {
+  if (!user || !valid || password.length > 128) {
     sendJson(response, 401, { error: "Invalid username or password." });
     return;
   }
@@ -1565,7 +1691,11 @@ function handleAdminSettings(request, response) {
   const admin = requireAdmin(request, response);
   if (!admin) return;
   if (request.method === "GET") {
-    sendJson(response, 200, { featureAccess: getFeatureAccess(), features: featureNames });
+    sendJson(response, 200, {
+      featureAccess: getFeatureAccess(),
+      features: featureNames,
+      portScanPolicy: getPortScanPolicy(),
+    });
     return;
   }
   if (request.method !== "PUT") {
@@ -1576,19 +1706,41 @@ function handleAdminSettings(request, response) {
   void readAuthBody(request, response).then((body) => {
     if (!body) return;
     const access = body.featureAccess;
+    const portScanPolicy = body.portScanPolicy;
     if (!access || typeof access !== "object" || Array.isArray(access) ||
       Object.keys(access).length !== Object.keys(featureAccessDefaults).length ||
       Object.entries(featureAccessDefaults).some(([feature]) =>
         !["public", "user", "admin"].includes(access[feature]),
+      ) ||
+      !portScanPolicy || typeof portScanPolicy !== "object" ||
+      !portScanPolicy.maxPortsByRole || !portScanPolicy.localScanByRole ||
+      !["admin", "user"].every((role) =>
+        Number.isInteger(portScanPolicy.maxPortsByRole[role]) &&
+        portScanPolicy.maxPortsByRole[role] >= 1 &&
+        portScanPolicy.maxPortsByRole[role] <= 65535 &&
+        typeof portScanPolicy.localScanByRole[role] === "boolean",
       )) {
-      sendJson(response, 400, { error: "Choose Public, Logged-in users, or Administrators for every feature." });
+      sendJson(response, 400, {
+        error: "Choose an access level for every feature and set each role's port limit from 1 to 65,535 with a local-scan permission.",
+      });
       return;
     }
-    database.prepare(`
-      INSERT INTO app_settings (key, value) VALUES ('feature_access', ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(JSON.stringify(access));
-    sendJson(response, 200, { featureAccess: access });
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.prepare(`
+        INSERT INTO app_settings (key, value) VALUES ('feature_access', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(JSON.stringify(access));
+      database.prepare(`
+        INSERT INTO app_settings (key, value) VALUES ('port_scan_policy', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(JSON.stringify(portScanPolicy));
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    sendJson(response, 200, { featureAccess: access, portScanPolicy });
   }).catch((error) => {
     console.error("Feature access settings update failed:", error);
     sendJson(response, 500, { error: "Unable to save feature access settings." });
@@ -1662,7 +1814,13 @@ function handleAdminUser(request, response, userId) {
       return;
     }
     const role = body.role === undefined ? target.role : body.role;
-    const active = body.active === undefined ? target.active : Number(body.active);
+    const active = body.active === undefined
+      ? target.active
+      : body.active === true || body.active === 1
+        ? 1
+        : body.active === false || body.active === 0
+          ? 0
+          : null;
     if (!["admin", "user"].includes(role) || ![0, 1].includes(active)) {
       sendJson(response, 400, { error: "Choose a valid role and account status." });
       return;
@@ -1703,14 +1861,14 @@ function handleAdminUser(request, response, userId) {
   });
 }
 
-function checkFeatureAccess(request, response, feature) {
+function checkFeatureAccess(request, response, feature, requireLogin = false) {
   if (appSetupRequired()) {
     sendJson(response, 503, { error: "Complete initial administrator setup before using the app.", setupRequired: true });
     return false;
   }
   const access = getFeatureAccess()[feature] || "admin";
-  if (access === "public") return true;
   const user = currentUser(request);
+  if (access === "public" && (!requireLogin || user)) return true;
   if (!user) {
     sendJson(response, 401, { error: "Log in to use this feature.", loginRequired: true });
     return false;
@@ -1723,7 +1881,9 @@ function checkFeatureAccess(request, response, feature) {
 }
 
 async function macLookup(url, response) {
-  const input = (url.searchParams.get("name") || "").trim();
+  const rawInput = queryInput(url, "name", 32, response);
+  if (rawInput === null) return;
+  const input = rawInput.trim();
   const validMac = /^(?:[0-9a-f]{12}|(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|(?:[0-9a-f]{2}-){5}[0-9a-f]{2}|(?:[0-9a-f]{4}\.){2}[0-9a-f]{4})$/i;
   if (!validMac.test(input)) {
     sendJson(response, 400, {
@@ -1783,10 +1943,19 @@ async function macLookup(url, response) {
 }
 
 async function lookup(url, response) {
-  const input = (url.searchParams.get("name") || "").trim();
-  const recordType = (url.searchParams.get("type") || "A").trim().toUpperCase();
-  const reverse = url.searchParams.get("reverse") === "true";
+  const rawInput = queryInput(url, "name", 253, response);
+  const rawType = queryInput(url, "type", 32, response);
+  const rawNameserver = queryInput(url, "nameserver", 300, response);
+  const rawReverse = queryInput(url, "reverse", 5, response);
+  if ([rawInput, rawType, rawNameserver, rawReverse].includes(null)) return;
+  const input = rawInput.trim();
+  const recordType = (rawType || "A").trim().toUpperCase();
+  const reverse = rawReverse === "true";
 
+  if (rawReverse && rawReverse !== "true" && rawReverse !== "false") {
+    sendJson(response, 400, { error: "Reverse must be true or false." });
+    return;
+  }
   if (!input || input.length > 253) {
     sendJson(response, 400, { error: "Enter a DNS name or IP address." });
     return;
@@ -1817,7 +1986,7 @@ async function lookup(url, response) {
 
   let nameserver;
   try {
-    nameserver = await resolveNameserver(parseNameserver(url.searchParams.get("nameserver") || ""));
+    nameserver = await resolveNameserver(parseNameserver(rawNameserver));
   } catch (error) {
     sendJson(response, 400, { error: error.message });
     return;
@@ -1908,8 +2077,48 @@ async function lookup(url, response) {
   });
 }
 
-const server = http.createServer((request, response) => {
-  const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) => {
+  response.setHeader("content-security-policy", [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+  ].join("; "));
+  response.setHeader("x-frame-options", "DENY");
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("cross-origin-opener-policy", "same-origin");
+  response.setHeader("referrer-policy", "no-referrer");
+  response.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
+  response.setHeader("cross-origin-resource-policy", "same-origin");
+  response.setHeader("cache-control", "no-store");
+  if (process.env.COOKIE_SECURE === "true") {
+    response.setHeader("strict-transport-security", "max-age=31536000");
+  }
+
+  if (request.url.length > 4096) {
+    sendJson(response, 414, { error: "Request URL must not exceed 4,096 characters." });
+    return;
+  }
+  let url;
+  try {
+    url = new URL(request.url, "http://localhost");
+  } catch {
+    sendJson(response, 400, { error: "Malformed request URL." });
+    return;
+  }
+  const queryKeys = new Set();
+  for (const key of url.searchParams.keys()) {
+    if (queryKeys.has(key)) {
+      sendJson(response, 400, { error: "Each query parameter may only be provided once." });
+      return;
+    }
+    queryKeys.add(key);
+  }
 
   if (url.pathname === "/api/auth/status") {
     if (request.method !== "GET") {
@@ -1966,7 +2175,12 @@ const server = http.createServer((request, response) => {
 
   const adminUserMatch = url.pathname.match(/^\/api\/admin\/users\/(\d+)$/);
   if (adminUserMatch) {
-    handleAdminUser(request, response, Number(adminUserMatch[1]));
+    const userId = Number(adminUserMatch[1]);
+    if (!Number.isSafeInteger(userId) || userId < 1) {
+      sendJson(response, 400, { error: "Invalid user ID." });
+      return;
+    }
+    handleAdminUser(request, response, userId);
     return;
   }
 
@@ -1979,7 +2193,10 @@ const server = http.createServer((request, response) => {
     "/api/mac-lookup": "mac",
   };
   const feature = protectedFeatures[url.pathname];
-  if (feature && !checkFeatureAccess(request, response, feature)) return;
+  const requiresPortScanLogin =
+    ["/api/custom-port-scan", "/api/bulk-port-scan"].includes(url.pathname) ||
+    (url.pathname === "/api/scan" && url.searchParams.get("ports") === "common");
+  if (feature && !checkFeatureAccess(request, response, feature, requiresPortScanLogin)) return;
 
   if (url.pathname === "/api/lookup") {
     if (request.method !== "GET") {
@@ -2004,7 +2221,7 @@ const server = http.createServer((request, response) => {
       sendJson(response, 405, { error: "Method not allowed." });
       return;
     }
-    bulkScan(url, response);
+    bulkScan(request, url, response);
     return;
   }
 
@@ -2100,6 +2317,8 @@ const server = http.createServer((request, response) => {
   });
 });
 
+server.headersTimeout = 10_000;
+server.requestTimeout = 30_000;
 server.listen(port, host, () => {
   console.log(`DNS lookup listening on ${host}:${port}`);
 });

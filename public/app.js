@@ -76,7 +76,7 @@ function setMode(nextMode) {
       : customPortScan
         ? "Scan a custom list or range of TCP ports on one domain or IP address."
       : bulkPortScan
-        ? "Check one TCP port across an explicit list or CIDR block of public IP addresses."
+        ? "Check one TCP port across an explicit list or CIDR block of IP addresses."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
   submitButton.innerHTML = `<span>${scan ? "Magic scan" : customPortScan ? "Custom port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
@@ -157,7 +157,7 @@ function renderRecords(records, ptrLookups = {}) {
 
 function renderSection(title, records, ptrLookups) {
   if (!records.length) return "";
-  return `<section class="record-section"><h3>${title}<span>${records.length}</span></h3>${renderRecords(records, ptrLookups)}</section>`;
+  return `<section class="record-section"><h3>${escapeHtml(title)}<span>${escapeHtml(records.length)}</span></h3>${renderRecords(records, ptrLookups)}</section>`;
 }
 
 function showResult(data) {
@@ -248,7 +248,7 @@ function renderScanResult(data) {
           <small>${escapeHtml(result.address)}</small>
         </div>
         <span>${result.openPorts.length
-    ? result.openPorts.map((port) => `<span class="port-badge">${port}</span>`).join("")
+    ? result.openPorts.map((port) => `<span class="port-badge">${escapeHtml(port)}</span>`).join("")
     : "No open ports found in the checked set"}
           ${location ? `<small class="geo-result">${escapeHtml(location)}</small>` : ""}
         </span>
@@ -257,8 +257,8 @@ function renderScanResult(data) {
   }).join("");
   const portScanSection = portScan?.enabled
     ? `<section class="email-auth port-scan-results">
-        <h3>TCP port scan <span class="email-auth-status ${portScan.results.some((result) => result.openPorts.length) ? "found" : "missing"}">${portScan.results.reduce((count, result) => count + result.openPorts.length, 0)} open</span></h3>
-        <p class="scan-disclaimer">Checked ${portScan.addressesScanned} public domain IP address(es) across ${portScan.portsChecked} common TCP ports.${portScan.addressesSkipped ? ` Skipped ${portScan.addressesSkipped} private, reserved, or excess address(es).` : ""}</p>
+        <h3>TCP port scan <span class="email-auth-status ${portScan.results.some((result) => result.openPorts.length) ? "found" : "missing"}">${escapeHtml(portScan.results.reduce((count, result) => count + result.openPorts.length, 0))} open</span></h3>
+        <p class="scan-disclaimer">Checked ${escapeHtml(portScan.addressesScanned)} eligible domain IP address(es) across ${escapeHtml(portScan.portsChecked)} common TCP ports.${portScan.addressesSkipped ? ` Skipped ${escapeHtml(portScan.addressesSkipped)} disallowed, reserved, or excess address(es).` : ""}</p>
         ${portScanResults || '<p class="empty-result">No public domain IP addresses were available to scan.</p>'}
         <p class="scan-disclaimer">Only ports that accepted a TCP connection are listed. Scan only systems you are authorized to test.</p>
       </section>`
@@ -310,15 +310,15 @@ function renderScanResult(data) {
   resultPanel.innerHTML = `
     <div class="result-heading">
       <div><p class="eyebrow">MAGIC SCAN</p><h2>${escapeHtml(data.domain)}</h2></div>
-      <span class="status-badge success">${data.hostsWithRecords} hosts found</span>
+      <span class="status-badge success">${escapeHtml(data.hostsWithRecords)} hosts found</span>
     </div>
     <div class="scan-summary">
-      <span>${data.subdomainsChecked} subdomains checked</span>
+      <span>${escapeHtml(data.subdomainsChecked)} subdomains checked</span>
       <span>${data.recordTypes.map(escapeHtml).join(" · ")} plus provider checks</span>
     </div>
     ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span><strong>${escapeHtml(data.nameserver)}</strong></div>` : ""}
     <p class="scan-disclaimer">IP geolocation (including country) is approximate. Public IP addresses found in scan results are sent to ipwho.is; private and reserved addresses are not sent.</p>
-    ${data.failedQueries ? `<p class="detail-notice">${data.failedQueries} DNS queries could not be completed.</p>` : ""}
+    ${data.failedQueries ? `<p class="detail-notice">${escapeHtml(data.failedQueries)} DNS queries could not be completed.</p>` : ""}
     <section class="email-auth">
       <h3>Domain registration <span class="email-auth-status ${registration ? "found" : "missing"}">${registration ? "WHOIS / RDAP" : "Unavailable"}</span></h3>
       ${registrationDetails}
@@ -332,8 +332,8 @@ function renderScanResult(data) {
           ${spfRecords || '<p class="empty-result">No SPF policy found in scanned TXT records.</p>'}
         </div>
         <div>
-          <h4>DKIM <span class="email-auth-status ${emailSecurity.dkimRecords.length ? "found" : "missing"}">${emailSecurity.dkimRecords.length ? `${emailSecurity.dkimRecords.length} found` : "No records found"}</span></h4>
-          ${dkimRecords || `<p class="empty-result">No DKIM records found for ${emailSecurity.dkimSelectorsChecked} common selectors.</p>`}
+          <h4>DKIM <span class="email-auth-status ${emailSecurity.dkimRecords.length ? "found" : "missing"}">${emailSecurity.dkimRecords.length ? `${escapeHtml(emailSecurity.dkimRecords.length)} found` : "No records found"}</span></h4>
+          ${dkimRecords || `          <p class="empty-result">No DKIM records found for ${escapeHtml(emailSecurity.dkimSelectorsChecked)} common selectors.</p>`}
         </div>
       </div>
       <p class="scan-disclaimer">SPF is checked on the domain and scanned hosts. DKIM checks common selectors; your mail provider may use a custom selector that is not included.</p>
@@ -352,7 +352,7 @@ function renderPortScanResult(data, title) {
         ${result.target !== result.address ? `<small>${escapeHtml(result.address)}</small>` : ""}
       </div>
       <span>${result.openPorts.length
-    ? result.openPorts.map((port) => `<span class="port-badge">${port}</span>`).join("")
+    ? result.openPorts.map((port) => `<span class="port-badge">${escapeHtml(port)}</span>`).join("")
     : "No open ports found"}
       </span>
     </div>
@@ -361,14 +361,14 @@ function renderPortScanResult(data, title) {
   resultPanel.innerHTML = `
     <div class="result-heading">
       <div><p class="eyebrow">${escapeHtml(title.toUpperCase())}</p><h2>${escapeHtml(data.scanLabel)}</h2></div>
-      <span class="status-badge ${openPortCount ? "success" : "warning"}">${openPortCount} open</span>
+      <span class="status-badge ${openPortCount ? "success" : "warning"}">${escapeHtml(openPortCount)} open</span>
     </div>
     <div class="scan-summary">
-      <span>${data.addressesScanned} public IP address(es) scanned</span>
-      <span>${data.portsChecked} TCP port(s) checked per address</span>
+      <span>${escapeHtml(data.addressesScanned)} eligible IP address(es) scanned</span>
+      <span>${escapeHtml(data.portsChecked)} TCP port(s) checked per address</span>
     </div>
-    ${data.addressesSkipped ? `<p class="detail-notice">${data.addressesSkipped} private, reserved, or excess IP address(es) were skipped.</p>` : ""}
-    ${results || '<p class="empty-result">No public IP addresses were available to scan.</p>'}
+    ${data.addressesSkipped ? `<p class="detail-notice">${escapeHtml(data.addressesSkipped)} disallowed, reserved, or excess IP address(es) were skipped.</p>` : ""}
+    ${results || '<p class="empty-result">No eligible IP addresses were available to scan.</p>'}
     <p class="scan-disclaimer">Only ports that accepted a TCP connection are listed. Scan only systems you are authorized to test.</p>`;
   resultPanel.hidden = false;
 }
