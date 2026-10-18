@@ -8,6 +8,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Query common DNS records: A, AAAA, ANY, CAA, CNAME, HTTPS, MX, NS, PTR, SOA,
   SRV, SSHFP, SVCB, TLSA, and TXT.
 - Query other record types by name or numeric DNS type code.
+- Scan a domain and a built-in list of common subdomains for 10 common DNS
+  record types in one operation.
 - Look up PTR records from IPv4 or IPv6 addresses.
 - Display PTR hostnames for IP addresses returned in DNS results and for
   resolved nameserver addresses.
@@ -123,3 +125,10 @@ and compare registered nameservers with the domain's live DNS NS records.
 Registration data is retrieved from RDAP using `rdap.org`, which redirects to
 the responsible registry. The domain name is sent to the RDAP service;
 contact details may be redacted or unavailable.
+
+Choose **Bulk scan** to check common record types for the domain and 24
+frequently used subdomain names (such as `www`, `mail`, `api`, and `staging`).
+It checks A, AAAA, CAA, CNAME, HTTPS, MX, NS, SOA, SRV, and TXT records and
+shows PTR hostnames for returned IP addresses. This uses a built-in candidate
+list; DNS does not provide a way to enumerate every subdomain, so results are
+not exhaustive.
