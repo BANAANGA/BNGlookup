@@ -20,13 +20,45 @@ const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
 const formHint = document.querySelector("#form-hint");
 const tabs = [...document.querySelectorAll(".mode-tab")];
+const modeTabs = document.querySelector(".mode-tabs");
+const lookupForm = document.querySelector("#lookup-form");
+const loginRequiredNotice = document.querySelector("#login-required-notice");
+const loginRequiredMessage = document.querySelector("#login-required-message");
+const toolsLoginLink = document.querySelector("#tools-login-link");
+const guestUsageNotice = document.querySelector("#guest-usage-notice");
 const accountNav = document.querySelector("#account-nav");
 const accountName = document.querySelector("#account-name");
 const adminLink = document.querySelector("#admin-link");
 const loginLink = document.querySelector("#login-link");
 const logoutButton = document.querySelector("#logout-button");
+const clientInfo = document.querySelector("#client-info");
+const clientInfoLabel = document.querySelector("#client-info-label");
+const clientIp = document.querySelector("#client-ip");
+const clientPtr = document.querySelector("#client-ptr");
 let mode = "scan";
 let authState = null;
+
+async function loadClientInfo() {
+  try {
+    const response = await fetch("/api/client-info", { credentials: "same-origin" });
+    if (!response.ok) throw new Error("Unable to load connection information.");
+    const data = await response.json();
+    if (!data.address) return;
+    clientInfoLabel.textContent = data.isPublic ? "Your public IP" : "Connection IP";
+    clientIp.textContent = data.address;
+    clientPtr.textContent = data.isPublic
+      ? data.ptr?.length
+        ? data.ptr.join(", ")
+        : data.ptrError || "No PTR record"
+      : "PTR lookup is available for public IP addresses only.";
+    clientInfo.hidden = false;
+  } catch {
+    clientInfoLabel.textContent = "Client IP";
+    clientIp.textContent = "Unable to determine";
+    clientPtr.textContent = "PTR lookup unavailable.";
+    clientInfo.hidden = false;
+  }
+}
 
 function setMode(nextMode) {
   mode = nextMode;
@@ -58,7 +90,7 @@ function setMode(nextMode) {
   typeControl.hidden = reverse || details || mac || scan || portScan;
   customType.hidden = reverse || details || mac || scan || portScan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
-  portScanControl.hidden = !scan;
+  portScanControl.hidden = !scan || !authState?.user;
   customPortsControl.hidden = !customPortScan;
   bulkTargetsControl.hidden = !bulkPortScan;
   bulkPortControl.hidden = !bulkPortScan;
@@ -99,19 +131,37 @@ async function initializeAccount() {
     accountName.textContent = authState.user
       ? `${authState.user.username} (${authState.user.role})`
       : "Guest";
+    const availableTabs = [];
     tabs.forEach((tab) => {
       const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
-      const requiredRole = authState.featureAccess[feature] || "user";
-      const locked = requiredRole === "admin" && authState.user?.role !== "admin";
-      const needsLogin = requiredRole !== "public" && !authState.user;
-      tab.classList.toggle("restricted-tab", locked || needsLogin);
-      tab.title = locked
-        ? "Administrator access required"
-        : needsLogin
-          ? "Log in to use this feature"
-          : "";
+      const access = authState.featureAccess[feature] || "user";
+      const portScanRequiresUser = ["custom-port", "bulk-port"].includes(tab.dataset.mode);
+      const canUse = Boolean(authState.user) &&
+        (access !== "admin" || authState.user.role === "admin") ||
+        access === "public" && !portScanRequiresUser;
+      tab.hidden = !canUse;
+      tab.setAttribute("aria-hidden", String(!canUse));
+      tab.classList.remove("restricted-tab");
+      tab.title = "";
+      if (canUse) availableTabs.push(tab);
     });
+    const initialTab = availableTabs.find((tab) => tab.dataset.mode === mode) || availableTabs[0];
+    modeTabs.hidden = !initialTab;
+    lookupForm.hidden = !initialTab;
+    loginRequiredNotice.hidden = Boolean(initialTab);
+    guestUsageNotice.hidden = !initialTab || Boolean(authState.user);
+    if (!initialTab && authState.user) {
+      loginRequiredMessage.textContent = "No lookup tools are available to your account. Contact an administrator.";
+      toolsLoginLink.hidden = true;
+    }
+    if (initialTab) setMode(initialTab.dataset.mode);
   } catch {
+    lookupForm.hidden = true;
+    modeTabs.hidden = true;
+    tabs.forEach((tab) => { tab.hidden = true; });
+    loginRequiredNotice.hidden = false;
+    loginRequiredMessage.textContent = "Unable to load account access. Refresh the page to try again.";
+    toolsLoginLink.hidden = true;
     errorMessage.textContent = "Unable to load account status. Refresh the page to try again.";
     errorMessage.hidden = false;
   }
@@ -594,3 +644,4 @@ form.addEventListener("submit", async (event) => {
 });
 
 initializeAccount();
+loadClientInfo();
