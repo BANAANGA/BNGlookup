@@ -15,27 +15,32 @@ function setMode(nextMode) {
   mode = nextMode;
   const reverse = mode === "reverse";
   const details = mode === "details";
+  const mac = mode === "mac";
   const scan = mode === "scan";
   tabs.forEach((tab) => {
     const selected = tab.dataset.mode === mode;
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", String(selected));
   });
-  nameLabel.textContent = reverse ? "IP address" : "Domain name";
+  nameLabel.textContent = reverse ? "IP address" : mac ? "MAC address" : "Domain name";
   input.placeholder = reverse
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
+    : mac
+      ? "e.g. 00:1A:2B:3C:4D:5E"
     : "e.g. example.com";
-  input.autocomplete = reverse ? "off" : "url";
-  typeControl.hidden = reverse || details || scan;
-  customType.hidden = reverse || details || scan || recordType.value !== "custom";
+  input.autocomplete = reverse || mac ? "off" : "url";
+  typeControl.hidden = reverse || details || mac || scan;
+  customType.hidden = reverse || details || mac || scan || recordType.value !== "custom";
   formHint.textContent = reverse
     ? "Find the PTR record associated with an IPv4 or IPv6 address."
     : details
       ? "View public domain registration (RDAP/WHOIS) and authoritative nameserver details."
+      : mac
+        ? "Find the registered hardware vendor and MAC address type."
       : scan
         ? "Scan DNS records, cloud-provider hostnames, SPF policies, and common DKIM selectors."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
-  submitButton.innerHTML = `<span>${scan ? "Magic scan" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+  submitButton.innerHTML = `<span>${scan ? "Magic scan" : mac ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   input.focus();
@@ -214,6 +219,38 @@ function renderScanResult(data) {
   resultPanel.hidden = false;
 }
 
+function renderMacResult(data) {
+  const addressType = data.multicast ? "Multicast address" : "Unicast address";
+  const administration = data.locallyAdministered
+    ? "Locally administered"
+    : "Universally administered";
+  const vendorDetails = data.found
+    ? `<section class="record-section">
+        <h3>Vendor details</h3>
+        <div class="detail-list">
+          ${renderDetail("Vendor", data.company)}
+          ${renderDetail("Country", data.country)}
+          ${renderDetail("OUI block type", data.blockType)}
+          ${renderDetail("Registered address", data.address)}
+        </div>
+      </section>`
+    : '<p class="empty-result">No registered vendor was found for this MAC prefix. The address may be locally assigned or unregistered.</p>';
+
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">MAC ADDRESS LOOKUP</p><h2>${escapeHtml(data.mac)}</h2></div>
+      <span class="status-badge ${data.found ? "success" : "warning"}">${data.found ? "Vendor found" : "Vendor unknown"}</span>
+    </div>
+    <div class="detail-list mac-address-details">
+      ${renderDetail("Address type", addressType)}
+      ${renderDetail("Administration", administration)}
+      ${renderDetail("OUI prefix", data.oui)}
+    </div>
+    ${vendorDetails}
+    <p class="scan-disclaimer">Vendor information is retrieved from maclookup.app. The submitted MAC address is sent to that service.</p>`;
+  resultPanel.hidden = false;
+}
+
 function renderDetail(label, value) {
   if (!value) return "";
   return `<div class="detail-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
@@ -329,6 +366,8 @@ form.addEventListener("submit", async (event) => {
   try {
     const endpoint = mode === "details"
       ? "/api/domain-info"
+      : mode === "mac"
+        ? "/api/mac-lookup"
       : mode === "scan"
         ? "/api/scan"
         : "/api/lookup";
@@ -336,6 +375,7 @@ form.addEventListener("submit", async (event) => {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "DNS lookup failed.");
     if (mode === "details") renderDomainInfo(data);
+    else if (mode === "mac") renderMacResult(data);
     else if (mode === "scan") renderScanResult(data);
     else showResult(data);
   } catch (error) {
@@ -343,6 +383,6 @@ form.addEventListener("submit", async (event) => {
     errorMessage.hidden = false;
   } finally {
     submitButton.disabled = false;
-    submitButton.innerHTML = `<span>${mode === "scan" ? "Magic scan" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+    submitButton.innerHTML = `<span>${mode === "scan" ? "Magic scan" : mode === "mac" ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   }
 });

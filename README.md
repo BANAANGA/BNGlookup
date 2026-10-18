@@ -8,6 +8,7 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Query common DNS records: A, AAAA, ANY, CAA, CNAME, HTTPS, MX, NS, PTR, SOA,
   SRV, SSHFP, SVCB, TLSA, and TXT.
 - Query other record types by name or numeric DNS type code.
+- Look up the registered vendor and address attributes for a MAC address.
 - Scan a domain and common subdomains for DNS records, cloud-provider
   endpoints, WHOIS/RDAP registration data, SPF policies, and common DKIM
   selectors.
@@ -139,3 +140,8 @@ Returned IP addresses include PTR lookups where available.
 Subdomain and DKIM selector checks use built-in candidate lists rather than
 enumeration. DNS cannot list every subdomain or a domain's custom DKIM
 selectors, so scan results may not include every configured record.
+
+Choose **MAC lookup** to normalize a MAC address and retrieve its registered
+vendor, OUI block, and address classification (unicast/multicast and
+universally/locally administered). Vendor data is provided by `maclookup.app`;
+the submitted MAC address is sent to that external service.
