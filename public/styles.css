@@ -467,6 +467,28 @@ h1 {
 .record-ttl { color: #8c98aa; }
 .record-data { overflow-wrap: anywhere; color: #253954; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .ptr-result { display: block; margin-top: 5px; color: #4773d9; font-family: "DM Sans", sans-serif; font-size: 10px; }
+.copy-result { cursor: copy; border-radius: 3px; transition: background-color .15s, color .15s; }
+.copy-result:hover, .copy-result:focus-visible { background: #3569e81c; outline: 2px solid #3569e840; outline-offset: 2px; }
+.copy-result.copied { color: #168343 !important; background: #dff7e8; }
+.scan-result-detail { display: block; margin-top: 3px; }
+.copy-feedback {
+  position: fixed;
+  z-index: 10;
+  right: 18px;
+  bottom: 18px;
+  padding: 9px 13px;
+  border: 1px solid #28583b;
+  border-radius: 7px;
+  color: #183e28;
+  background: #e0f8e8;
+  box-shadow: 0 5px 20px #0002;
+  font-size: 12px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(5px);
+  transition: opacity .15s, transform .15s;
+}
+.copy-feedback.visible { opacity: 1; transform: translateY(0); }
 .dns-results-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
 .dns-results-toolbar .record-section h3, .dns-results-toolbar h3 { margin: 0; }
 .dns-results-count { min-width: 18px; padding: 2px 5px; border-radius: 10px; color: #718097; background: #f0f3f8; text-align: center; font-size: 10px; }
@@ -483,6 +505,9 @@ h1 {
 .dns-results-search:focus { border-color: #3569e8; outline: 2px solid #3569e820; }
 .dns-results-table-wrap { overflow-x: auto; border: 1px solid #e9edf3; border-radius: 7px; }
 .dns-results-table { width: 100%; min-width: 700px; border-collapse: collapse; font-size: 11px; text-align: left; }
+.magic-scan-table { min-width: 1080px; }
+.magic-scan-table .record-data { min-width: 220px; }
+.magic-scan-table td:nth-child(6), .magic-scan-table td:nth-child(7) { min-width: 150px; }
 .dns-results-table th, .dns-results-table td { padding: 10px 12px; border-bottom: 1px solid #edf0f5; vertical-align: top; }
 .dns-results-table th { color: #718097; background: #f8f9fb; font-size: 10px; white-space: nowrap; }
 .dns-results-table th button { padding: 0; border: 0; color: inherit; background: transparent; font-size: inherit; font-weight: 700; }
@@ -700,6 +725,9 @@ body {
 .status-badge.success { color: #a9e5c5; background: #14251b; }
 .status-badge.warning { color: #f0cb86; background: #2a2112; }
 .query-meta, .scan-summary { color: #a0a0a0; background: #141414; }
+.copy-feedback { color: #d8f5e2; border-color: #28583b; background: #14251a; box-shadow: 0 5px 20px #0008; }
+.copy-result:hover, .copy-result:focus-visible { background: #54d88f20; outline-color: #54d88f60; }
+.copy-result.copied { color: #a9e5c5 !important; background: #14251b; }
 .nameserver-control label { color: #b9c7bd; }
 .nameserver-control input { color: #ededed; border-color: #303030; background: #080808; }
 .nameserver-control input:focus { border-color: #3c8b5d; outline-color: #54d88f20; }

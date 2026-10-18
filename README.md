@@ -8,6 +8,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Query common DNS records: A, AAAA, ANY, CAA, CNAME, HTTPS, MX, NS, PTR, SOA,
   SRV, SSHFP, SVCB, TLSA, and TXT.
 - Query other record types by name or numeric DNS type code.
+- Use the unified search bar to detect domains/URLs, IPv4/IPv6 addresses, and
+  MAC addresses and automatically select DNS, reverse DNS, or vendor lookup.
 - Send DNS and reverse lookups to a specific nameserver IP, with optional
   non-standard port selection.
 - Look up the registered vendor and address attributes for a MAC address.
@@ -28,6 +30,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Compare nameservers from registration data with live DNS NS answers, including
   available IP addresses and TTLs.
 - View DNS response status and answer, authority, and additional records.
+- Search and sort DNS and Magic scan result tables, and click result values to
+  copy them to the clipboard.
 - Run as a small Docker container, with no application dependencies to install.
 - Configure the DNS-over-HTTPS (DoH) JSON provider; Cloudflare is the default.
 
@@ -213,6 +217,13 @@ geolocation details, including country, city, and region when available.
 Public IPs discovered in scan results are sent to the `ipwho.is` geolocation
 service; private and reserved IP addresses are not sent. Geolocation may be
 unavailable or inaccurate.
+
+Magic scan DNS answers are shown in a searchable, sortable table with host,
+record type, TTL, data, PTR, geolocation, and candidate source columns. Click a
+result value to copy it. Standard DNS lookup answers, authority, and additional
+records use the same table controls. The unified search bar automatically
+recognizes domains and URLs, IP addresses for reverse DNS, and MAC addresses
+for vendor lookup; the mode tabs remain available for manual lookups.
 
 Enable **Scan common TCP ports** before starting a Magic scan to check the
 domain's A/AAAA addresses for 26 commonly used TCP ports, including ports 2222

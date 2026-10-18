@@ -48,11 +48,27 @@ async function loadClientInfo() {
     if (!data.address) return;
     clientInfoLabel.textContent = data.isPublic ? "Your public IP" : "Connection IP";
     clientIp.textContent = data.address;
+    clientIp.classList.add("copy-result");
+    clientIp.dataset.copyValue = data.address;
+    clientIp.setAttribute("role", "button");
+    clientIp.setAttribute("tabindex", "0");
+    clientIp.setAttribute("aria-label", "Copy result");
+    clientIp.title = "Click to copy";
     clientPtr.textContent = data.isPublic
       ? data.ptr?.length
         ? data.ptr.join(", ")
         : data.ptrError || "No PTR record"
       : "PTR lookup is available for public IP addresses only.";
+    if (data.isPublic) {
+      clientPtr.classList.add("copy-result");
+      clientPtr.dataset.copyValue = data.ptr?.length
+        ? data.ptr.join(", ")
+        : clientPtr.textContent;
+      clientPtr.setAttribute("role", "button");
+      clientPtr.setAttribute("tabindex", "0");
+      clientPtr.setAttribute("aria-label", "Copy result");
+      clientPtr.title = "Click to copy";
+    }
     clientInfo.hidden = false;
   } catch {
     clientInfoLabel.textContent = "Client IP";
@@ -195,6 +211,63 @@ function escapeHtml(value) {
   })[character]);
 }
 
+function copyableResult(value, className = "") {
+  const text = String(value);
+  return `<span class="copy-result ${className}" data-copy-value="${escapeHtml(text)}" role="button" tabindex="0" aria-label="Copy result" title="Click to copy">${escapeHtml(text)}</span>`;
+}
+
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Use the legacy clipboard path when browser permissions block Clipboard API access.
+    }
+  }
+  const temporaryInput = document.createElement("textarea");
+  temporaryInput.value = value;
+  temporaryInput.setAttribute("readonly", "");
+  temporaryInput.style.position = "fixed";
+  temporaryInput.style.opacity = "0";
+  document.body.append(temporaryInput);
+  temporaryInput.select();
+  const copied = document.execCommand("copy");
+  temporaryInput.remove();
+  if (!copied) throw new Error("Clipboard access is unavailable.");
+}
+
+async function copyResult(element) {
+  try {
+    await copyText(element.dataset.copyValue);
+    element.classList.add("copied");
+    element.title = "Copied!";
+    element.setAttribute("aria-label", "Copied to clipboard");
+    let feedback = document.querySelector("#copy-feedback");
+    if (!feedback) {
+      feedback = document.createElement("div");
+      feedback.id = "copy-feedback";
+      feedback.className = "copy-feedback";
+      feedback.setAttribute("role", "status");
+      feedback.setAttribute("aria-live", "polite");
+      document.body.append(feedback);
+    }
+    feedback.textContent = "Copied to clipboard";
+    feedback.classList.add("visible");
+    window.clearTimeout(feedback.hideTimeout);
+    feedback.hideTimeout = window.setTimeout(() => feedback.classList.remove("visible"), 1400);
+    window.setTimeout(() => {
+      if (!element.isConnected) return;
+      element.classList.remove("copied");
+      element.title = "Click to copy";
+      element.setAttribute("aria-label", "Copy result");
+    }, 1400);
+  } catch {
+    errorMessage.textContent = "Unable to copy this result. Check clipboard permissions and try again.";
+    errorMessage.hidden = false;
+  }
+}
+
 const dnsRecordTypeNames = {
   1: "A",
   2: "NS",
@@ -228,20 +301,20 @@ function renderDnsResults(sections, ptrLookups = {}) {
     const reverse = ptrLookups[record.data];
     const ptrContent = reverse
       ? reverse.error
-        ? `<span class="ptr-result">PTR lookup: ${escapeHtml(reverse.error)}</span>`
+        ? copyableResult(`PTR lookup: ${reverse.error}`, "ptr-result")
         : reverse.answers.length
-          ? `<span class="ptr-result">PTR: ${reverse.answers.map(escapeHtml).join(", ")}</span>`
-          : `<span class="ptr-result">PTR: no record (${escapeHtml(reverse.status)})</span>`
+          ? copyableResult(`PTR: ${reverse.answers.join(", ")}`, "ptr-result")
+          : copyableResult(`PTR: no record (${reverse.status})`, "ptr-result")
       : "";
     const type = dnsRecordTypeNames[record.type] || `TYPE${record.type}`;
     return `
     <tr>
       <td class="dns-row-number">${index + 1}</td>
-      <td>${escapeHtml(record.section)}</td>
-      <td class="record-name">${escapeHtml(record.name)}</td>
-      <td>${escapeHtml(type)}</td>
-      <td data-sort-value="${escapeHtml(record.TTL)}">${escapeHtml(record.TTL)}s</td>
-      <td class="record-data">${escapeHtml(record.data)}${ptrContent}</td>
+      <td>${copyableResult(record.section)}</td>
+      <td class="record-name">${copyableResult(record.name)}</td>
+      <td>${copyableResult(type)}</td>
+      <td data-sort-value="${escapeHtml(record.TTL)}">${copyableResult(`${record.TTL}s`)}</td>
+      <td class="record-data">${copyableResult(record.data)}${ptrContent}</td>
     </tr>`;
   }).join("");
   return `
@@ -276,12 +349,12 @@ function showResult(data) {
     <div class="result-heading">
       <div>
         <p class="eyebrow">LOOKUP RESULT</p>
-        <h2>${escapeHtml(data.name)}</h2>
+        <h2>${copyableResult(data.name)}</h2>
       </div>
-      <span class="status-badge ${statusClass}">${escapeHtml(data.statusText)}</span>
+      <span class="status-badge ${statusClass}">${copyableResult(data.statusText)}</span>
     </div>
-    ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span><strong>${escapeHtml(data.nameserver)}</strong></div>` : ""}
-    <div class="query-meta"><span>Record type</span><strong>${escapeHtml(data.type)}</strong></div>
+    ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span>${copyableResult(data.nameserver)}</div>` : ""}
+    <div class="query-meta"><span>Record type</span>${copyableResult(data.type)}</div>
     ${renderDnsResults([
       { title: "Answers", records: data.answers },
       { title: "Authority", records: data.authority },
@@ -305,6 +378,19 @@ resultPanel.addEventListener("input", (event) => {
   }
   resultPanel.querySelector(".dns-results-empty").hidden = visibleCount !== 0;
   resultPanel.querySelector(".dns-results-count").textContent = visibleCount;
+});
+
+document.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-copy-value]");
+  if (target) void copyResult(target);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const target = event.target.closest("[data-copy-value]");
+  if (!target) return;
+  event.preventDefault();
+  void copyResult(target);
 });
 
 resultPanel.addEventListener("click", (event) => {
@@ -340,52 +426,84 @@ resultPanel.addEventListener("click", (event) => {
 
 function renderScanResult(data) {
   const foundHosts = data.hosts.filter((host) => host.records.length);
-  const hostCards = foundHosts.map((host) => {
-    const providerBadges = host.providers.map((provider) =>
-      `<span class="scan-provider-tag">${escapeHtml(provider)}</span>`,
-    ).join("");
-    const recordGroups = host.records.map((record) => `
-      <div class="scan-record">
-        <span class="scan-record-type">${escapeHtml(record.type)}</span>
-        <div class="scan-record-answers">${record.answers.map((answer) => {
-          const ptr = data.ptrLookups?.[answer.data];
-          const ptrText = ptr
-            ? ptr.error
-              ? `PTR lookup: ${ptr.error}`
-              : ptr.answers.length
-                ? `PTR: ${ptr.answers.join(", ")}`
-                : `PTR: no record (${ptr.status})`
-            : "";
-          const geolocation = data.ipGeolocations?.[answer.data];
-          const locationText = geolocation
-            ? geolocation.country
-              ? `Country: ${[
-                geolocation.city,
-                geolocation.region,
-                geolocation.country,
-              ].filter(Boolean).join(", ")}${geolocation.countryCode ? ` (${geolocation.countryCode})` : ""}`
-              : `Geolocation: ${geolocation.error}`
-            : "";
-          return `<div class="scan-answer">
-            <span>${escapeHtml(answer.data)}</span>
-            ${ptrText ? `<small>${escapeHtml(ptrText)}</small>` : ""}
-            ${locationText ? `<small class="geo-result">${escapeHtml(locationText)}</small>` : ""}
-          </div>`;
-        }).join("")}</div>
-      </div>`).join("");
-    return `<article class="scan-host">
-      <h3>${escapeHtml(host.name)}${host.name === data.domain ? '<span class="scan-root-tag">domain</span>' : ""}${providerBadges}</h3>
-      <div class="scan-records">${recordGroups}</div>
-    </article>`;
-  }).join("");
+  const scanRecordCount = foundHosts.reduce(
+    (count, host) => count + host.records.reduce(
+      (recordCount, record) => recordCount + record.answers.length,
+      0,
+    ),
+    0,
+  );
+  let rowNumber = 0;
+  const scanRows = foundHosts.flatMap((host) =>
+    host.records.flatMap((record) => record.answers.map((answer) => {
+      const ptr = data.ptrLookups?.[answer.data];
+      const ptrText = ptr
+        ? ptr.error
+          ? `PTR lookup: ${ptr.error}`
+          : ptr.answers.length
+            ? ptr.answers.join(", ")
+            : `No PTR record (${ptr.status})`
+        : "";
+      const geolocation = data.ipGeolocations?.[answer.data];
+      const locationText = geolocation
+        ? geolocation.country
+          ? [
+            geolocation.city,
+            geolocation.region,
+            geolocation.country,
+          ].filter(Boolean).join(", ") +
+            (geolocation.countryCode ? ` (${geolocation.countryCode})` : "")
+          : geolocation.error
+        : "";
+      const ttl = answer.TTL ?? answer.ttl;
+      const sources = host.providers.length ? host.providers.join(", ") : "Built-in";
+      return `<tr>
+        <td class="dns-row-number">${++rowNumber}</td>
+        <td class="record-name">${copyableResult(host.name)}</td>
+        <td>${copyableResult(record.type)}</td>
+        <td data-sort-value="${escapeHtml(ttl ?? "")}">${ttl === undefined ? "—" : copyableResult(`${ttl}s`)}</td>
+        <td class="record-data">${copyableResult(answer.data)}</td>
+        <td>${ptrText ? copyableResult(ptrText, "ptr-result") : "—"}</td>
+        <td>${locationText ? copyableResult(locationText, "geo-result") : "—"}</td>
+        <td>${copyableResult(sources)}</td>
+      </tr>`;
+    })),
+  ).join("");
+  const hostResults = scanRows
+    ? `<section class="record-section dns-results">
+        <div class="dns-results-toolbar">
+          <h3>Discovered DNS records <span class="dns-results-count">${scanRecordCount}</span></h3>
+          <label class="dns-results-search-label">
+            <span class="sr-only">Search Magic scan results</span>
+            <input class="dns-results-search" type="search" placeholder="Search results…" autocomplete="off">
+          </label>
+        </div>
+        <div class="dns-results-table-wrap">
+          <table class="dns-results-table magic-scan-table">
+            <thead><tr>
+              <th scope="col">#</th>
+              <th scope="col"><button type="button" data-sort-column="1" data-sort-type="text">Host</button></th>
+              <th scope="col"><button type="button" data-sort-column="2" data-sort-type="text">Type</button></th>
+              <th scope="col"><button type="button" data-sort-column="3" data-sort-type="number">TTL</button></th>
+              <th scope="col"><button type="button" data-sort-column="4" data-sort-type="text">Record data</button></th>
+              <th scope="col"><button type="button" data-sort-column="5" data-sort-type="text">PTR</button></th>
+              <th scope="col"><button type="button" data-sort-column="6" data-sort-type="text">Geolocation</button></th>
+              <th scope="col"><button type="button" data-sort-column="7" data-sort-type="text">Source</button></th>
+            </tr></thead>
+            <tbody>${scanRows}</tbody>
+          </table>
+        </div>
+        <p class="empty-result dns-results-empty" hidden>No records match your search.</p>
+      </section>`
+    : '<p class="empty-result">No DNS records found for the domain or checked subdomains.</p>';
   const emailSecurity = data.emailSecurity;
   const spfRecords = emailSecurity.spfRecords.map((record) => `
-    <div class="email-auth-record"><strong>${escapeHtml(record.name)}</strong><span>${escapeHtml(record.data)}</span></div>
+    <div class="email-auth-record"><strong>${copyableResult(record.name)}</strong>${copyableResult(record.data)}</div>
   `).join("");
   const dkimRecords = emailSecurity.dkimRecords.map((entry) => `
     <div class="email-auth-record">
-      <strong>${escapeHtml(entry.name)}</strong>
-      <span>${entry.records.map((record) => `${escapeHtml(record.type)}: ${escapeHtml(record.data)}`).join("<br>")}</span>
+      <strong>${copyableResult(entry.name)}</strong>
+      ${copyableResult(entry.records.map((record) => `${record.type}: ${record.data}`).join("\n"))}
     </div>
   `).join("");
   const portScan = data.portScan;
@@ -403,14 +521,14 @@ function renderScanResult(data) {
     return `
       <div class="port-scan-address">
         <div class="port-scan-target">
-          <strong>${escapeHtml(result.domain)}</strong>
-          <small>${escapeHtml(result.address)}</small>
+          ${copyableResult(result.domain, "port-target-domain")}
+          ${copyableResult(result.address, "port-target-address")}
         </div>
-        <span>${result.openPorts.length
-    ? result.openPorts.map((port) => `<span class="port-badge">${escapeHtml(port)}</span>`).join("")
+        <div class="port-scan-open-ports">${result.openPorts.length
+    ? result.openPorts.map((port) => copyableResult(port, "port-badge")).join("")
     : "No open ports found in the checked set"}
-          ${location ? `<small class="geo-result">${escapeHtml(location)}</small>` : ""}
-        </span>
+          ${location ? copyableResult(location, "geo-result scan-result-detail") : ""}
+        </div>
       </div>
     `;
   }).join("");
@@ -440,15 +558,17 @@ function renderScanResult(data) {
       contact.address,
     ].filter(Boolean);
     return values.length
-      ? `<div class="contact-row"><span>${escapeHtml(role)}</span><strong>${values.map(escapeHtml).join(" · ")}</strong></div>`
+      ? `<div class="contact-row"><span>${escapeHtml(role)}</span><strong>${copyableResult(values.join(" · "))}</strong></div>`
       : "";
   }).join("");
   const registrationNameservers = (registration?.nameservers || []).map((nameserver) => `
     <div class="detail-row">
       <span>Nameserver</span>
-      <strong>${escapeHtml(nameserver.name)}${[...nameserver.ipv4, ...nameserver.ipv6].length
-    ? ` · ${[...nameserver.ipv4, ...nameserver.ipv6].map(escapeHtml).join(", ")}`
-    : ""}</strong>
+      <strong>${copyableResult(
+    `${nameserver.name}${[...nameserver.ipv4, ...nameserver.ipv6].length
+      ? ` · ${[...nameserver.ipv4, ...nameserver.ipv6].join(", ")}`
+      : ""}`,
+  )}
     </div>
   `).join("");
   const registrationDetails = registration
@@ -461,22 +581,22 @@ function renderScanResult(data) {
         ${registrationNameservers}
       </div>
       ${registration.statuses.length
-    ? `<div class="status-list">${registration.statuses.map((status) => `<span>${escapeHtml(status)}</span>`).join("")}</div>`
+    ? `<div class="status-list">${registration.statuses.map((status) => copyableResult(status)).join("")}</div>`
     : ""}
       ${registrationContacts ? `<div class="contact-list">${registrationContacts}</div>` : ""}`
     : `<p class="detail-notice">${escapeHtml(data.registrationError || "No registration details were returned.")}</p>`;
 
   resultPanel.innerHTML = `
     <div class="result-heading">
-      <div><p class="eyebrow">MAGIC SCAN</p><h2>${escapeHtml(data.domain)}</h2></div>
-      <span class="status-badge success">${escapeHtml(data.hostsWithRecords)} hosts found</span>
+      <div><p class="eyebrow">MAGIC SCAN</p><h2>${copyableResult(data.domain)}</h2></div>
+      <span class="status-badge success">${copyableResult(`${data.hostsWithRecords} hosts found`)}</span>
     </div>
     <div class="scan-summary">
-      <span>${escapeHtml(data.subdomainsChecked)} subdomains checked</span>
-      <span>${escapeHtml(data.certificateTransparencySubdomains)} additional names from ${escapeHtml(data.certificateTransparencySource || "certificate logs")}</span>
-      <span>${data.recordTypes.map(escapeHtml).join(" · ")} plus provider checks</span>
+      ${copyableResult(`${data.subdomainsChecked} subdomains checked`)}
+      ${copyableResult(`${data.certificateTransparencySubdomains} additional names from ${data.certificateTransparencySource || "certificate logs"}`)}
+      ${copyableResult(`${data.recordTypes.join(" · ")} plus provider checks`)}
     </div>
-    ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span><strong>${escapeHtml(data.nameserver)}</strong></div>` : ""}
+    ${data.nameserver ? `<div class="query-meta"><span>Queried nameserver</span>${copyableResult(data.nameserver)}</div>` : ""}
     <p class="scan-disclaimer">IP geolocation (including country) is approximate. Public IP addresses found in scan results are sent to ipwho.is; private and reserved addresses are not sent.</p>
     ${data.failedQueries ? `<p class="detail-notice">${escapeHtml(data.failedQueries)} DNS queries could not be completed.</p>` : ""}
     ${data.subdomainDiscoveryError ? `<p class="detail-notice">${escapeHtml(data.subdomainDiscoveryError)}</p>` : ""}
@@ -500,7 +620,7 @@ function renderScanResult(data) {
       <p class="scan-disclaimer">SPF is checked on the domain and scanned hosts. DKIM checks common selectors; your mail provider may use a custom selector that is not included.</p>
     </section>
     ${portScanSection}
-    ${hostCards || '<p class="empty-result">No records found for the domain or the checked subdomains.</p>'}
+    ${hostResults}
     <p class="scan-disclaimer">Subdomain discovery checks a built-in list and up to 25 names from public Certificate Transparency logs, trying crt.sh and then CertSpotter if needed, before verifying them with DNS. It does not enumerate every subdomain. The queried domain is sent to crt.sh and, if it fails, also to CertSpotter; IP geolocation is provided by ipwho.is and may be unavailable or approximate.</p>`;
   resultPanel.hidden = false;
 }
@@ -509,24 +629,24 @@ function renderPortScanResult(data, title) {
   const results = data.results.map((result) => `
     <div class="port-scan-address">
       <div class="port-scan-target">
-        <strong>${escapeHtml(result.target)}</strong>
-        ${result.target !== result.address ? `<small>${escapeHtml(result.address)}</small>` : ""}
+        ${copyableResult(result.target)}
+        ${result.target !== result.address ? copyableResult(result.address, "port-target-address") : ""}
       </div>
-      <span>${result.openPorts.length
-    ? result.openPorts.map((port) => `<span class="port-badge">${escapeHtml(port)}</span>`).join("")
+      <div class="port-scan-open-ports">${result.openPorts.length
+    ? result.openPorts.map((port) => copyableResult(port, "port-badge")).join("")
     : "No open ports found"}
-      </span>
+      </div>
     </div>
   `).join("");
   const openPortCount = data.results.reduce((count, result) => count + result.openPorts.length, 0);
   resultPanel.innerHTML = `
     <div class="result-heading">
-      <div><p class="eyebrow">${escapeHtml(title.toUpperCase())}</p><h2>${escapeHtml(data.scanLabel)}</h2></div>
-      <span class="status-badge ${openPortCount ? "success" : "warning"}">${escapeHtml(openPortCount)} open</span>
+      <div><p class="eyebrow">${escapeHtml(title.toUpperCase())}</p><h2>${copyableResult(data.scanLabel)}</h2></div>
+      <span class="status-badge ${openPortCount ? "success" : "warning"}">${copyableResult(`${openPortCount} open`)}</span>
     </div>
     <div class="scan-summary">
-      <span>${escapeHtml(data.addressesScanned)} eligible IP address(es) scanned</span>
-      <span>${escapeHtml(data.portsChecked)} TCP port(s) checked per address</span>
+      <span>${copyableResult(`${data.addressesScanned} eligible IP address(es) scanned`)}</span>
+      <span>${copyableResult(`${data.portsChecked} TCP port(s) checked per address`)}</span>
     </div>
     ${data.addressesSkipped ? `<p class="detail-notice">${escapeHtml(data.addressesSkipped)} disallowed, reserved, or excess IP address(es) were skipped.</p>` : ""}
     ${results || '<p class="empty-result">No eligible IP addresses were available to scan.</p>'}
@@ -553,8 +673,8 @@ function renderMacResult(data) {
 
   resultPanel.innerHTML = `
     <div class="result-heading">
-      <div><p class="eyebrow">MAC ADDRESS LOOKUP</p><h2>${escapeHtml(data.mac)}</h2></div>
-      <span class="status-badge ${data.found ? "success" : "warning"}">${data.found ? "Vendor found" : "Vendor unknown"}</span>
+      <div><p class="eyebrow">MAC ADDRESS LOOKUP</p><h2>${copyableResult(data.mac)}</h2></div>
+      <span class="status-badge ${data.found ? "success" : "warning"}">${copyableResult(data.found ? "Vendor found" : "Vendor unknown")}</span>
     </div>
     <div class="detail-list mac-address-details">
       ${renderDetail("Address type", addressType)}
@@ -568,7 +688,7 @@ function renderMacResult(data) {
 
 function renderDetail(label, value) {
   if (!value) return "";
-  return `<div class="detail-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+  return `<div class="detail-row"><span>${escapeHtml(label)}</span><strong>${copyableResult(value)}</strong></div>`;
 }
 
 function renderDomainInfo(data) {
@@ -610,12 +730,12 @@ function renderDomainInfo(data) {
         : result.answers.length
           ? `PTR: ${result.answers.join(", ")}`
           : `PTR: no record (${result.status})`;
-      return `<span class="nameserver-ptr">${escapeHtml(address)} — ${escapeHtml(value)}</span>`;
+      return copyableResult(`${address} — ${value}`, "nameserver-ptr");
     }).join("");
     return `<div class="nameserver-row">
-      <strong>${escapeHtml(name)}</strong>
-      ${dnsEntry ? `<span class="record-ttl">TTL ${escapeHtml(dnsEntry.ttl)}s</span>` : ""}
-      ${ptrMarkup || (addresses.length ? `<span class="nameserver-addresses">${addresses.map(escapeHtml).join(" · ")}</span>` : "")}
+      ${copyableResult(name, "nameserver-name")}
+      ${dnsEntry ? copyableResult(`TTL ${dnsEntry.ttl}s`, "record-ttl") : ""}
+      ${ptrMarkup || (addresses.length ? copyableResult(addresses.join(" · "), "nameserver-addresses") : "")}
     </div>`;
   }).join("");
   const contactRows = contacts.map((contact) => {
@@ -627,7 +747,7 @@ function renderDomainInfo(data) {
       contact.phone,
       contact.address,
     ].filter(Boolean);
-    return `<div class="contact-row"><span>${escapeHtml(label)}</span><strong>${values.map(escapeHtml).join(" · ")}</strong></div>`;
+    return `<div class="contact-row"><span>${escapeHtml(label)}</span><strong>${copyableResult(values.join(" · "))}</strong></div>`;
   }).join("");
   const formattedDates = Object.entries(dates).map(([action, date]) =>
     renderDetail(dateLabels[action] || action, new Date(date).toLocaleDateString()),
@@ -635,7 +755,7 @@ function renderDomainInfo(data) {
 
   resultPanel.innerHTML = `
     <div class="result-heading">
-      <div><p class="eyebrow">DOMAIN DETAILS</p><h2>${escapeHtml(data.domain)}</h2></div>
+      <div><p class="eyebrow">DOMAIN DETAILS</p><h2>${copyableResult(data.domain)}</h2></div>
     </div>
     ${data.registrationError ? `<p class="detail-notice">${escapeHtml(data.registrationError)}</p>` : ""}
     ${registration ? `<section class="record-section">
