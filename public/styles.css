@@ -276,7 +276,39 @@ h1 {
 .record-name { overflow-wrap: anywhere; color: #40516c; font-weight: 600; }
 .record-ttl { color: #8c98aa; }
 .record-data { overflow-wrap: anywhere; color: #253954; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ptr-result { display: block; margin-top: 5px; color: #4773d9; font-family: "DM Sans", sans-serif; font-size: 10px; }
 .empty-result { margin: 18px 0 0; color: #79869a; font-size: 12px; }
+.detail-list, .nameserver-list, .contact-list {
+  overflow: hidden;
+  border: 1px solid #e9edf3;
+  border-radius: 7px;
+}
+.detail-row, .nameserver-row, .contact-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 12px;
+  border-bottom: 1px solid #edf0f5;
+  font-size: 11px;
+}
+.detail-row:last-child, .nameserver-row:last-child, .contact-row:last-child { border-bottom: 0; }
+.detail-row > span, .contact-row > span { flex: 0 0 130px; color: #79869a; }
+.detail-row strong, .contact-row strong { min-width: 0; overflow-wrap: anywhere; color: #34445e; text-align: right; }
+.nameserver-row { align-items: center; flex-wrap: wrap; }
+.nameserver-row > strong { color: #34445e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.nameserver-addresses { width: 100%; color: #718097; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.nameserver-ptr { display: block; width: 100%; color: #4773d9; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; overflow-wrap: anywhere; }
+.status-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.status-list span, .record-section h3 > span {
+  padding: 4px 7px;
+  border-radius: 12px;
+  color: #637189;
+  background: #f0f3f8;
+  font-size: 10px;
+}
+.contact-list { margin-top: 10px; }
+.detail-notice { margin: 12px 0; color: #9b6a20; font-size: 11px; }
 
 footer {
   display: flex;
@@ -319,5 +351,8 @@ footer {
   .submit-button { flex: 1; }
   .record-row { grid-template-columns: minmax(0, 1fr) 46px; gap: 6px 10px; }
   .record-data { grid-column: 1 / -1; }
+  .detail-row, .contact-row { flex-direction: column; gap: 5px; }
+  .detail-row > span, .contact-row > span { flex-basis: auto; }
+  .detail-row strong, .contact-row strong { text-align: left; }
   footer { flex-direction: column; gap: 7px; }
 }

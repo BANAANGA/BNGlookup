@@ -9,6 +9,12 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
   SRV, SSHFP, SVCB, TLSA, and TXT.
 - Query other record types by name or numeric DNS type code.
 - Look up PTR records from IPv4 or IPv6 addresses.
+- Display PTR hostnames for IP addresses returned in DNS results and for
+  resolved nameserver addresses.
+- View public domain registration details from RDAP (the modern WHOIS service),
+  including registrar, registration dates, status, and published contacts.
+- Compare nameservers from registration data with live DNS NS answers, including
+  available IP addresses and TTLs.
 - View DNS response status and answer, authority, and additional records.
 - Run as a small Docker container, with no application dependencies to install.
 - Configure the DNS-over-HTTPS (DoH) JSON provider; Cloudflare is the default.
@@ -111,3 +117,9 @@ Select **Custom…** to enter another record type by name (such as `NAPTR`) or
 numeric type code. `ANY` queries do not necessarily return every record; DNS
 servers commonly limit their responses. The available records depend on the
 queried domain and provider.
+
+Choose **Domain details** to view publicly available registration information
+and compare registered nameservers with the domain's live DNS NS records.
+Registration data is retrieved from RDAP using `rdap.org`, which redirects to
+the responsible registry. The domain name is sent to the RDAP service;
+contact details may be redacted or unavailable.

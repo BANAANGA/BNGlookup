@@ -2,6 +2,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { isIP } = require("node:net");
+const { domainToASCII } = require("node:url");
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
@@ -75,6 +76,230 @@ function validDnsName(name) {
       label.length <= 63 &&
       /^[a-zA-Z0-9_-]+$/.test(label),
   );
+}
+
+function normalizeDomain(name) {
+  const normalized = domainToASCII(name.trim().replace(/\.$/, "").toLowerCase());
+  if (
+    !normalized ||
+    normalized.length > 253 ||
+    !normalized.includes(".") ||
+    !normalized.split(".").every(
+      (label) =>
+        label.length > 0 &&
+        label.length <= 63 &&
+        /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    )
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function entityContact(entity) {
+  const vcard = entity.vcardArray;
+  if (!Array.isArray(vcard) || !Array.isArray(vcard[1])) return null;
+
+  const fields = Object.fromEntries(
+    vcard[1]
+      .filter((field) => Array.isArray(field) && typeof field[0] === "string")
+      .map((field) => [
+        field[0].toLowerCase(),
+        Array.isArray(field[3]) ? field[3].join(", ") : field[3],
+      ]),
+  );
+  const contact = {
+    name: fields.fn || fields["org"] || null,
+    organization: fields.org || null,
+    email: fields.email || null,
+    phone: fields.tel || null,
+    address: fields.adr || null,
+  };
+  return Object.values(contact).some(Boolean) ? contact : null;
+}
+
+async function fetchRdap(domain) {
+  const response = await fetch(`https://rdap.org/domain/${encodeURIComponent(domain)}`, {
+    headers: {
+      accept: "application/rdap+json, application/json",
+      "user-agent": "BNGlookup/0.1 (+https://github.com/BANAANGA/BNGlookup)",
+    },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (response.status === 404) {
+    throw new Error("No registration record was found for this domain.");
+  }
+  if (!response.ok) {
+    throw new Error(`RDAP provider returned HTTP ${response.status}.`);
+  }
+
+  const data = await response.json();
+  if (data.objectClassName !== "domain") {
+    throw new Error("RDAP provider returned an invalid domain record.");
+  }
+
+  const entities = Array.isArray(data.entities) ? data.entities : [];
+  const registrar = entities.find((entity) =>
+    Array.isArray(entity.roles) && entity.roles.includes("registrar"),
+  );
+  const contacts = entities.flatMap((entity) => {
+    const contact = entityContact(entity);
+    return contact
+      ? [{ roles: Array.isArray(entity.roles) ? entity.roles : [], ...contact }]
+      : [];
+  });
+  const dates = {};
+  for (const event of Array.isArray(data.events) ? data.events : []) {
+    if (event.eventAction && event.eventDate) {
+      dates[event.eventAction] = event.eventDate;
+    }
+  }
+
+  return {
+    name: data.ldhName || domain,
+    handle: data.handle || null,
+    registrar: registrar ? entityContact(registrar) : null,
+    dates,
+    statuses: Array.isArray(data.status) ? data.status : [],
+    contacts,
+    nameservers: Array.isArray(data.nameservers)
+      ? data.nameservers.map((nameserver) => ({
+        name: nameserver.ldhName || nameserver.unicodeName || "",
+        ipv4: Array.isArray(nameserver.ipAddresses?.v4) ? nameserver.ipAddresses.v4 : [],
+        ipv6: Array.isArray(nameserver.ipAddresses?.v6) ? nameserver.ipAddresses.v6 : [],
+      }))
+      : [],
+  };
+}
+
+async function fetchPtr(address) {
+  const queryUrl = new URL(dohEndpoint);
+  queryUrl.searchParams.set("name", reverseName(address));
+  queryUrl.searchParams.set("type", "PTR");
+  const response = await fetch(queryUrl, {
+    headers: { accept: "application/dns-json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) {
+    throw new Error(`DNS provider returned HTTP ${response.status}.`);
+  }
+  const data = await response.json();
+  if (typeof data.Status !== "number" || !Array.isArray(data.Answer || [])) {
+    throw new Error("DNS provider returned an invalid response.");
+  }
+  return {
+    status: dnsStatusNames[data.Status] || `DNS status ${data.Status}`,
+    answers: (data.Answer || []).map((answer) => answer.data),
+  };
+}
+
+async function fetchPtrLookups(addresses) {
+  const uniqueAddresses = [...new Set(addresses.filter((address) => isIP(address)))];
+  const results = [];
+  for (let index = 0; index < uniqueAddresses.length; index += 8) {
+    const batch = uniqueAddresses.slice(index, index + 8);
+    results.push(...await Promise.all(batch.map(async (address) => {
+      try {
+        return [address, await fetchPtr(address)];
+      } catch (error) {
+        return [address, { error: error.message || "Unable to retrieve PTR record." }];
+      }
+    })));
+  }
+  return Object.fromEntries(results);
+}
+
+async function fetchNameservers(domain) {
+  const queryUrl = new URL(dohEndpoint);
+  queryUrl.searchParams.set("name", domain);
+  queryUrl.searchParams.set("type", "NS");
+  const response = await fetch(queryUrl, {
+    headers: { accept: "application/dns-json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) {
+    throw new Error(`DNS provider returned HTTP ${response.status}.`);
+  }
+  const data = await response.json();
+  if (typeof data.Status !== "number" || !Array.isArray(data.Answer || [])) {
+    throw new Error("DNS provider returned an invalid response.");
+  }
+
+  const records = (data.Answer || []).map((answer) => ({
+    name: answer.data,
+    ttl: answer.TTL,
+  }));
+  const addressResults = await Promise.allSettled(
+    records.map(async (nameserver) => {
+      const [ipv4, ipv6] = await Promise.all(["A", "AAAA"].map(async (type) => {
+        const addressUrl = new URL(dohEndpoint);
+        addressUrl.searchParams.set("name", nameserver.name);
+        addressUrl.searchParams.set("type", type);
+        const addressResponse = await fetch(addressUrl, {
+          headers: { accept: "application/dns-json" },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!addressResponse.ok) return [];
+        const addressData = await addressResponse.json();
+        return Array.isArray(addressData.Answer)
+          ? addressData.Answer.map((answer) => answer.data)
+          : [];
+      }));
+      return { ipv4, ipv6 };
+    }),
+  );
+
+  const enrichedRecords = records.map((record, index) => {
+    const result = addressResults[index];
+    return {
+      ...record,
+      ipv4: result?.status === "fulfilled" ? result.value.ipv4 : [],
+      ipv6: result?.status === "fulfilled" ? result.value.ipv6 : [],
+    };
+  });
+
+  return {
+    status: dnsStatusNames[data.Status] || `DNS status ${data.Status}`,
+    records: enrichedRecords,
+    addressesIncomplete: addressResults.some((result) => result.status === "rejected"),
+  };
+}
+
+async function domainInfo(url, response) {
+  const domain = normalizeDomain(url.searchParams.get("name") || "");
+  if (!domain) {
+    sendJson(response, 400, { error: "Enter a valid domain name." });
+    return;
+  }
+
+  const [rdapResult, nameserverResult] = await Promise.allSettled([
+    fetchRdap(domain),
+    fetchNameservers(domain),
+  ]);
+  const nameserverRecords = nameserverResult.status === "fulfilled"
+    ? nameserverResult.value.records
+    : [];
+  const registrationNameservers = rdapResult.status === "fulfilled"
+    ? rdapResult.value.nameservers
+    : [];
+  const ptrLookups = await fetchPtrLookups(
+    [
+      ...nameserverRecords.flatMap((nameserver) => [...nameserver.ipv4, ...nameserver.ipv6]),
+      ...registrationNameservers.flatMap((nameserver) => [...nameserver.ipv4, ...nameserver.ipv6]),
+    ],
+  );
+  sendJson(response, 200, {
+    domain,
+    registration: rdapResult.status === "fulfilled" ? rdapResult.value : null,
+    registrationError: rdapResult.status === "rejected"
+      ? rdapResult.reason.message || "Unable to retrieve registration details."
+      : null,
+    dnsNameservers: nameserverResult.status === "fulfilled" ? nameserverResult.value : null,
+    dnsNameserversError: nameserverResult.status === "rejected"
+      ? nameserverResult.reason.message || "Unable to retrieve DNS nameservers."
+      : null,
+    ptrLookups,
+  });
 }
 
 function sendJson(response, statusCode, body) {
@@ -166,6 +391,10 @@ async function lookup(url, response) {
     return;
   }
 
+  const ptrLookups = await fetchPtrLookups(
+    [...(data.Answer || []), ...(data.Authority || []), ...(data.Additional || [])]
+      .map((answer) => answer.data),
+  );
   sendJson(response, 200, {
     name: queryName,
     type: queryType,
@@ -174,6 +403,7 @@ async function lookup(url, response) {
     answers: data.Answer || [],
     authority: data.Authority || [],
     additional: data.Additional || [],
+    ptrLookups,
   });
 }
 
@@ -186,6 +416,15 @@ const server = http.createServer((request, response) => {
       return;
     }
     lookup(url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/domain-info") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    domainInfo(url, response);
     return;
   }
 
