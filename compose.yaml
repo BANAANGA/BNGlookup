@@ -1,0 +1,9 @@
+services:
+  dnslookup:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      DOH_ENDPOINT: "${DOH_ENDPOINT:-https://cloudflare-dns.com/dns-query}"
+    restart: unless-stopped
