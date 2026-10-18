@@ -21,7 +21,7 @@
       <section class="intro">
         <p class="eyebrow">DNS TOOLKIT</p>
         <h1>Find what the internet knows.</h1>
-        <p class="subtitle">Explore DNS records, domain details, and MAC address vendors.</p>
+        <p class="subtitle">Explore DNS records, choose a nameserver, and look up domains and MAC vendors.</p>
       </section>
 
       <section class="lookup-card" aria-label="DNS lookup">
@@ -76,7 +76,12 @@
               <span>Magic scan</span><span aria-hidden="true">→</span>
             </button>
           </div>
-          <p class="hint" id="form-hint">Scan DNS records, cloud-provider hostnames, SPF policies, and common DKIM selectors.</p>
+          <div class="nameserver-control" id="nameserver-control" hidden>
+            <label for="nameserver-input">Query nameserver (optional)</label>
+            <input id="nameserver-input" name="nameserver" type="text" placeholder="Default DNS-over-HTTPS provider, or e.g. 1.1.1.1" autocomplete="off" spellcheck="false">
+            <span>Optional: enter a nameserver IP or hostname, with port if needed (for example, 1.1.1.1:53 or ns1.example.net:53).</span>
+          </div>
+          <p class="hint" id="form-hint">Scan DNS records, cloud-provider hostnames, SPF, and DKIM. Optionally choose the nameserver.</p>
           <p class="error-message" id="error-message" role="alert" hidden></p>
         </form>
 

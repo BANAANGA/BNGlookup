@@ -8,6 +8,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Query common DNS records: A, AAAA, ANY, CAA, CNAME, HTTPS, MX, NS, PTR, SOA,
   SRV, SSHFP, SVCB, TLSA, and TXT.
 - Query other record types by name or numeric DNS type code.
+- Send DNS and reverse lookups to a specific nameserver IP, with optional
+  non-standard port selection.
 - Look up the registered vendor and address attributes for a MAC address.
 - Scan a domain and common subdomains for DNS records, cloud-provider
   endpoints, WHOIS/RDAP registration data, SPF policies, and common DKIM
@@ -121,6 +123,14 @@ Select **Custom…** to enter another record type by name (such as `NAPTR`) or
 numeric type code. `ANY` queries do not necessarily return every record; DNS
 servers commonly limit their responses. The available records depend on the
 queried domain and provider.
+
+In **DNS lookup**, **Reverse lookup**, or **Magic scan**, enter a nameserver IP
+or hostname to send DNS queries directly to that server over UDP (with TCP
+fallback for truncated responses). Leave the field empty to use the configured
+DNS-over-HTTPS provider. A custom port can be provided after the IPv4 address
+(`1.1.1.1:53`) or after a bracketed IPv6 address
+(`[2606:4700:4700::1111]:53`). Hostnames are resolved using the container's
+configured system resolver before querying the selected server.
 
 Choose **Domain details** to view publicly available registration information
 and compare registered nameservers with the domain's live DNS NS records.
