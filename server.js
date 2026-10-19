@@ -61,11 +61,13 @@ const staticFiles = new Set([
   "/login.html",
   "/admin.html",
   "/admin-logs.html",
+  "/admin-stats.html",
   "/styles.css",
   "/app.js",
   "/account.js",
   "/admin.js",
   "/admin-logs.js",
+  "/admin-stats.js",
   "/favicon.svg",
   "/logo.svg",
 ]);
@@ -2465,6 +2467,97 @@ function handleAdminLogs(request, url, response) {
   sendJson(response, 200, { logs });
 }
 
+function handleAdminStats(request, url, response) {
+  if (!requireAdmin(request, response)) return;
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  const rawDays = url.searchParams.get("days") || "30";
+  if (!["7", "30", "90"].includes(rawDays)) {
+    sendJson(response, 400, { error: "Choose a stats range of 7, 30, or 90 days." });
+    return;
+  }
+  const days = Number(rawDays);
+  const startDate = new Date();
+  startDate.setUTCHours(0, 0, 0, 0);
+  startDate.setUTCDate(startDate.getUTCDate() - days + 1);
+  const cutoff = startDate.toISOString().slice(0, 10);
+  const entries = database.prepare(`
+    SELECT substr(created_at, 1, 10) AS date, username, client_ip AS clientIp,
+      action, details, status_code AS statusCode
+    FROM admin_logs
+    WHERE category = 'query' AND created_at >= ?
+    ORDER BY id DESC
+  `).all(cutoff);
+  const timelineMap = new Map();
+  for (let offset = 0; offset < days; offset += 1) {
+    const date = new Date(startDate);
+    date.setUTCDate(startDate.getUTCDate() + offset);
+    timelineMap.set(date.toISOString().slice(0, 10), {
+      date: date.toISOString().slice(0, 10),
+      visitors: new Set(),
+      queries: 0,
+    });
+  }
+  const queryTypes = new Map();
+  const queryTargets = new Map();
+  const visitors = new Set();
+  const authenticatedVisitors = new Set();
+  let failedQueries = 0;
+  for (const entry of entries) {
+    const timeline = timelineMap.get(entry.date);
+    if (timeline) {
+      timeline.queries += 1;
+      if (entry.clientIp) timeline.visitors.add(entry.clientIp);
+    }
+    if (entry.clientIp) visitors.add(entry.clientIp);
+    if (entry.username) authenticatedVisitors.add(entry.username);
+    if (entry.statusCode >= 400) failedQueries += 1;
+
+    let details = {};
+    try {
+      details = JSON.parse(entry.details);
+    } catch {
+      // Older or malformed log details do not prevent aggregate statistics.
+    }
+    const type = entry.action === "DNS lookup"
+      ? details.reverse === "true" ? "PTR" : String(details.type || "DNS").toUpperCase()
+      : entry.action;
+    queryTypes.set(type, (queryTypes.get(type) || 0) + 1);
+    const target = typeof details.name === "string"
+      ? details.name
+      : typeof details.target === "string"
+        ? details.target
+        : null;
+    if (target) queryTargets.set(target, (queryTargets.get(target) || 0) + 1);
+  }
+
+  sendJson(response, 200, {
+    days,
+    startDate: cutoff,
+    endDate: new Date().toISOString().slice(0, 10),
+    totals: {
+      queries: entries.length,
+      visitors: visitors.size,
+      signedInUsers: authenticatedVisitors.size,
+      failedQueries,
+    },
+    timeline: [...timelineMap.values()].map((day) => ({
+      date: day.date,
+      visitors: day.visitors.size,
+      queries: day.queries,
+    })),
+    queryTypes: [...queryTypes.entries()]
+      .map(([label, count]) => ({ label, count }))
+      .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label)),
+    topQueries: [...queryTargets.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name))
+      .slice(0, 10),
+  });
+}
+
 function checkFeatureAccess(request, response, feature, requireLogin = false) {
   if (appSetupRequired()) {
     sendJson(response, 503, { error: "Complete initial administrator setup before using the app.", setupRequired: true });
@@ -2826,6 +2919,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/admin/stats") {
+    handleAdminStats(request, url, response);
+    return;
+  }
+
   if (url.pathname === "/api/admin/users") {
     handleAdminUsers(request, response);
     return;
@@ -2937,7 +3035,9 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
   }
-  if (url.pathname === "/admin.html" || url.pathname === "/admin-logs.html") {
+  if (url.pathname === "/admin.html" ||
+    url.pathname === "/admin-logs.html" ||
+    url.pathname === "/admin-stats.html") {
     if (appSetupRequired()) {
       sendRedirect(response, "/setup.html");
       return;

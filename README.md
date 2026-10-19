@@ -36,6 +36,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
   copy them to the clipboard.
 - Review login attempts, administrator actions, and DNS/scan lookup activity in
   the administrator's tabbed logs page.
+- View visitor and query statistics with daily activity charts, query-type pie
+  charts, and most-queried names in the administrator dashboard.
 - Run as a small Docker container, with no application dependencies to install.
 - Configure the default DNS-over-HTTPS resolver from the administrator panel;
   Cloudflare is selected by default.
@@ -108,6 +110,13 @@ entries; up to 20,000 total log records are retained in the SQLite database on
 the `app_data` volume. Query logs include the client IP,
 account when signed in, submitted query details, and HTTP status. Treat the
 database and its backups as sensitive operational data.
+
+The **Stats** page summarizes query-log data for the last 7, 30, or 90 days. It
+shows estimated unique visitors (based on client IP), signed-in accounts with
+query activity, request failures, daily visitor/query charts, query-type
+distribution, and frequently queried names. Statistics reflect the retained
+query logs, so older activity may not be included after the 20,000-entry limit
+is reached.
 
 Unauthenticated requests to features marked **Public** are limited to 15 lookup
 requests per client IP address per UTC day. The counter resets at 00:00 UTC and

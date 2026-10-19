@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101810">
+    <title>Statistics · BNGlookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/admin-stats.js" defer></script>
+  </head>
+  <body>
+    <main class="page account-page admin-page stats-page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="DNS Lookup home">
+          <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
+          <span>DNS<span class="brand-light">Lookup</span></span>
+        </a>
+        <nav class="account-nav"><a href="/admin.html">Settings</a><a href="/admin-logs.html">Logs</a><a href="/">DNS</a><button id="admin-logout" type="button">Log out</button></nav>
+      </header>
+      <section class="admin-heading">
+        <p class="eyebrow">ADMINISTRATION</p>
+        <h1>Usage statistics</h1>
+        <p class="account-description">Explore visitor activity and how the lookup tools are being used.</p>
+      </section>
+      <div class="stats-toolbar">
+        <label for="stats-range">Date range</label>
+        <select id="stats-range">
+          <option value="7">Last 7 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+        <span id="stats-period" class="stats-period"></span>
+      </div>
+      <p class="error-message" id="stats-error" role="alert" hidden></p>
+      <p class="logs-status" id="stats-status" role="status">Loading statistics…</p>
+      <section class="stats-cards" aria-label="Summary statistics">
+        <article class="stats-card"><span>Estimated visitors</span><strong id="stat-visitors">—</strong><small>Unique client IPs</small></article>
+        <article class="stats-card"><span>Lookup requests</span><strong id="stat-queries">—</strong><small>DNS, scans, registration, and MAC</small></article>
+        <article class="stats-card"><span>Signed-in users</span><strong id="stat-users">—</strong><small>Accounts with query activity</small></article>
+        <article class="stats-card"><span>Failed requests</span><strong id="stat-failures">—</strong><small>HTTP errors and denied requests</small></article>
+      </section>
+      <section class="stats-grid">
+        <article class="account-card admin-card stats-panel stats-timeline-panel">
+          <h2>Visitors and queries over time</h2>
+          <p class="form-hint">Daily unique client IPs and lookup requests, UTC.</p>
+          <div id="stats-timeline" class="stats-chart"></div>
+          <div class="stats-legend"><span><i class="legend-visitors"></i>Visitors</span><span><i class="legend-queries"></i>Queries</span></div>
+        </article>
+        <article class="account-card admin-card stats-panel stats-types-panel">
+          <h2>Query mix</h2>
+          <p class="form-hint">Requests grouped by lookup type.</p>
+          <div id="stats-query-mix" class="stats-pie-layout" role="group" aria-label="Query type distribution"></div>
+        </article>
+        <article class="account-card admin-card stats-panel stats-top-panel">
+          <h2>Most queried names</h2>
+          <p class="form-hint">Top 10 names and targets in the selected period.</p>
+          <div id="stats-top-queries" class="stats-top-queries"></div>
+        </article>
+      </section>
+      <p class="stats-footnote">Statistics are calculated from retained query logs (up to 20,000 entries). Visitor totals are estimates based on unique client IP addresses; shared networks and changing IPs can affect the count.</p>
+    </main>
+  </body>
+</html>
