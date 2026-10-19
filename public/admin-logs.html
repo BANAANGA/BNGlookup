@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101810">
+    <title>Logs · BNGlookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/admin-logs.js" defer></script>
+  </head>
+  <body>
+    <main class="page account-page admin-page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="DNS Lookup home">
+          <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
+          <span>DNS<span class="brand-light">Lookup</span></span>
+        </a>
+        <nav class="account-nav"><a href="/admin.html">Settings &amp; users</a><a href="/">DNS lookup</a><button id="admin-logout" type="button">Log out</button></nav>
+      </header>
+      <section class="admin-heading">
+        <p class="eyebrow">ADMINISTRATION</p>
+        <h1>Application logs</h1>
+        <p class="account-description">Review recent login attempts, administrator changes, and lookup activity.</p>
+      </section>
+      <p class="error-message" id="logs-error" role="alert" hidden></p>
+      <p class="form-hint logs-retention">Showing the latest 200 entries in each tab. Logs are stored in the application database; query entries include the client IP and submitted lookup details.</p>
+      <section class="account-card admin-card logs-card">
+        <div class="logs-tabs" role="tablist" aria-label="Log categories">
+          <button class="logs-tab active" id="login-tab" type="button" role="tab" aria-selected="true" aria-controls="login-panel" data-category="login">Login logs</button>
+          <button class="logs-tab" id="audit-tab" type="button" role="tab" aria-selected="false" aria-controls="audit-panel" data-category="audit" tabindex="-1">Audit logs</button>
+          <button class="logs-tab" id="query-tab" type="button" role="tab" aria-selected="false" aria-controls="query-panel" data-category="query" tabindex="-1">Query logs</button>
+        </div>
+        <p class="logs-status" id="logs-status" role="status">Loading logs…</p>
+        <section class="logs-panel" id="login-panel" role="tabpanel" aria-labelledby="login-tab">
+          <div class="logs-table-wrap">
+            <table class="dns-results-table logs-table">
+              <thead><tr><th scope="col">Time (UTC)</th><th scope="col">User</th><th scope="col">Client IP</th><th scope="col">Action</th><th scope="col">Details</th><th scope="col">Status</th></tr></thead>
+              <tbody id="login-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="logs-panel" id="audit-panel" role="tabpanel" aria-labelledby="audit-tab" hidden>
+          <div class="logs-table-wrap">
+            <table class="dns-results-table logs-table">
+              <thead><tr><th scope="col">Time (UTC)</th><th scope="col">User</th><th scope="col">Client IP</th><th scope="col">Action</th><th scope="col">Details</th><th scope="col">Status</th></tr></thead>
+              <tbody id="audit-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="logs-panel" id="query-panel" role="tabpanel" aria-labelledby="query-tab" hidden>
+          <div class="logs-table-wrap">
+            <table class="dns-results-table logs-table">
+              <thead><tr><th scope="col">Time (UTC)</th><th scope="col">User</th><th scope="col">Client IP</th><th scope="col">Action</th><th scope="col">Details</th><th scope="col">Status</th></tr></thead>
+              <tbody id="query-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>
