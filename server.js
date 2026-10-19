@@ -55,6 +55,20 @@ const customResolverOption = customDohEndpoint &&
   ? [{ id: "custom", label: "Custom (DOH_ENDPOINT)" }]
   : [];
 const publicDir = path.join(__dirname, "public");
+const staticFiles = new Set([
+  "/index.html",
+  "/setup.html",
+  "/login.html",
+  "/admin.html",
+  "/admin-logs.html",
+  "/styles.css",
+  "/app.js",
+  "/account.js",
+  "/admin.js",
+  "/admin-logs.js",
+  "/favicon.svg",
+  "/logo.svg",
+]);
 const dataDir = path.resolve(process.env.DATA_DIR || "/data");
 fs.mkdirSync(dataDir, { recursive: true });
 process.umask(0o077);
@@ -115,6 +129,23 @@ database.exec(`
     lookup_count INTEGER NOT NULL,
     PRIMARY KEY (client_hash, utc_date)
   );
+  CREATE TABLE IF NOT EXISTS admin_logs (
+    id INTEGER PRIMARY KEY,
+    category TEXT NOT NULL CHECK (category IN ('login', 'audit', 'query')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    username TEXT,
+    client_ip TEXT,
+    action TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    status_code INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS admin_logs_category_id ON admin_logs(category, id DESC);
+  CREATE TRIGGER IF NOT EXISTS admin_logs_retention
+  AFTER INSERT ON admin_logs
+  BEGIN
+    DELETE FROM admin_logs
+    WHERE id NOT IN (SELECT id FROM admin_logs ORDER BY id DESC LIMIT 20000);
+  END;
 `);
 database.prepare(`
   INSERT OR IGNORE INTO app_settings (key, value) VALUES ('trusted_proxies', ?)
@@ -142,6 +173,28 @@ database.prepare(`
 const publicLookupHashKey = database.prepare(
   "SELECT value FROM app_settings WHERE key = 'public_lookup_hash_key'",
 ).get().value;
+
+function recordAdminLog(category, request, action, details, statusCode, username) {
+  try {
+    const actor = username === undefined
+      ? request.logUsername || currentUser(request)?.username || null
+      : username;
+    database.prepare(`
+      INSERT INTO admin_logs (category, username, client_ip, action, details, status_code)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      category,
+      actor,
+      request.logClientAddress ?? getClientAddress(request),
+      action,
+      String(details || "").slice(0, 2000),
+      statusCode,
+    );
+  } catch (error) {
+    console.error("Unable to write admin log entry:", error);
+  }
+}
+
 const dnsStatusNames = {
   0: "NOERROR",
   1: "FORMERR",
@@ -1120,7 +1173,8 @@ async function readJsonRequest(request) {
         return;
       }
       try {
-        const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const decoded = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+        const value = JSON.parse(decoded);
         if (!value || typeof value !== "object" || Array.isArray(value)) {
           throw invalidScanRequest("Request body must be a JSON object.");
         }
@@ -1258,6 +1312,7 @@ async function runCustomPortScan(request, response) {
     }
     const portsInput = typeof body.ports === "string" ? body.ports : "";
     const ports = parseCustomPortList(portsInput, policy.maxPortsByRole[user.role]);
+    request.logDetails = JSON.stringify({ target, ports: portsInput });
     let addresses;
     if (isIP(target)) {
       addresses = [target];
@@ -1303,6 +1358,7 @@ async function runBulkPortScan(request, response) {
     }
     const targetsInput = typeof body.targets === "string" ? body.targets : "";
     const addresses = parseBulkScanTargets(targetsInput);
+    request.logDetails = JSON.stringify({ targets: addresses, port });
     const data = await scanTcpTargets(
       "Bulk IP targets",
       addresses,
@@ -1802,6 +1858,10 @@ function queryInput(url, name, maximumLength, response) {
     sendJson(response, 400, { error: `${name} must not exceed ${maximumLength} characters.` });
     return null;
   }
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) {
+    sendJson(response, 400, { error: `${name} contains unsupported control characters.` });
+    return null;
+  }
   return value;
 }
 
@@ -2038,6 +2098,15 @@ async function handleInitialSetup(request, response) {
     database.exec("COMMIT");
     await establishSession(Number(result.lastInsertRowid), response);
     resetAuthAttempts(request);
+    recordAdminLog(
+      "audit",
+      request,
+      "Initial administrator created",
+      username,
+      201,
+      username,
+    );
+    recordAdminLog("login", request, "Initial setup successful", "", 201, username);
     sendJson(response, 201, {
       user: { username, role: "admin" },
       featureAccess: getFeatureAccess(),
@@ -2064,13 +2133,20 @@ async function establishSession(userId, response) {
 }
 
 async function handleLogin(request, response) {
-  if (!enforceSameOrigin(request, response)) return;
+  if (!enforceSameOrigin(request, response)) {
+    recordAdminLog("login", request, "Login request rejected", "", response.statusCode, null);
+    return;
+  }
   if (!allowAuthAttempt(request)) {
+    recordAdminLog("login", request, "Login rate limited", "", 429, null);
     sendJson(response, 429, { error: "Too many login attempts. Try again in 15 minutes." });
     return;
   }
   const body = await readAuthBody(request, response);
-  if (!body) return;
+  if (!body) {
+    recordAdminLog("login", request, "Login request rejected", "", response.statusCode, null);
+    return;
+  }
   const username = typeof body.username === "string" && body.username.length <= 32
     ? body.username.trim()
     : "";
@@ -2086,11 +2162,13 @@ async function handleLogin(request, response) {
   const valid = validHash.length === supplied.length &&
     crypto.timingSafeEqual(validHash, supplied);
   if (!user || !valid || password.length > 128) {
+    recordAdminLog("login", request, "Login failed", "", 401, username || null);
     sendJson(response, 401, { error: "Invalid username or password." });
     return;
   }
   resetAuthAttempts(request);
   await establishSession(user.id, response);
+  recordAdminLog("login", request, "Login successful", "", 200, user.username);
   sendJson(response, 200, {
     user: { username: user.username, role: user.role },
     featureAccess: getFeatureAccess(),
@@ -2098,12 +2176,14 @@ async function handleLogin(request, response) {
 }
 
 function handleLogout(request, response) {
+  const user = currentUser(request);
   const token = readCookie(request, sessionCookieName);
   if (token) {
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     database.prepare("DELETE FROM user_sessions WHERE token_hash = ?").run(tokenHash);
   }
   clearSessionCookie(response);
+  if (user) recordAdminLog("login", request, "Logout", "", 200, user.username);
   sendJson(response, 200, { loggedOut: true });
 }
 
@@ -2123,6 +2203,7 @@ function requireAdmin(request, response) {
 function handleAdminSettings(request, response) {
   const admin = requireAdmin(request, response);
   if (!admin) return;
+  request.logClientAddress = getClientAddress(request);
   if (request.method === "GET") {
     sendJson(response, 200, {
       featureAccess: getFeatureAccess(),
@@ -2200,6 +2281,14 @@ function handleAdminSettings(request, response) {
     }
     trustedProxyEntries = trustedProxyConfig.entries;
     trustedProxyRanges = trustedProxyConfig.ranges;
+    recordAdminLog(
+      "audit",
+      request,
+      "Settings updated",
+      "Feature access, port scan policy, DNS resolver, and trusted proxies updated.",
+      200,
+      admin.username,
+    );
     sendJson(response, 200, {
       featureAccess: access,
       portScanPolicy,
@@ -2248,6 +2337,14 @@ function handleAdminUsers(request, response) {
         INSERT INTO users (username, password_hash, password_salt, role)
         VALUES (?, ?, ?, ?)
       `).run(body.username, credentials.hash, credentials.salt, body.role);
+      recordAdminLog(
+        "audit",
+        request,
+        "User account created",
+        `${body.username} (${body.role})`,
+        201,
+        admin.username,
+      );
       sendJson(response, 201, { created: true });
     } catch (error) {
       if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
@@ -2273,7 +2370,9 @@ function handleAdminUser(request, response, userId) {
   if (!enforceSameOrigin(request, response)) return;
   void readAuthBody(request, response).then(async (body) => {
     if (!body) return;
-    const target = database.prepare("SELECT id, role, active FROM users WHERE id = ?").get(userId);
+    const target = database.prepare(
+      "SELECT id, username, role, active FROM users WHERE id = ?",
+    ).get(userId);
     if (!target) {
       sendJson(response, 404, { error: "User not found." });
       return;
@@ -2319,11 +2418,51 @@ function handleAdminUser(request, response, userId) {
     if (!active || hasPassword) {
       database.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
     }
+    const changes = [
+      target.role !== role ? `role ${target.role} → ${role}` : "",
+      target.active !== active ? `active ${target.active ? "yes" : "no"} → ${active ? "yes" : "no"}` : "",
+      hasPassword ? "password reset" : "",
+    ].filter(Boolean);
+    recordAdminLog(
+      "audit",
+      request,
+      "User account updated",
+      `${target.username}${changes.length ? `: ${changes.join(", ")}` : ": no changes"}`,
+      200,
+      admin.username,
+    );
     sendJson(response, 200, { updated: true });
   }).catch((error) => {
     console.error("User update failed:", error);
     sendJson(response, 500, { error: "Unable to update user." });
   });
+}
+
+function handleAdminLogs(request, url, response) {
+  if (!requireAdmin(request, response)) return;
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  const category = url.searchParams.get("category");
+  if (!["login", "audit", "query"].includes(category)) {
+    sendJson(response, 400, { error: "Choose login, audit, or query logs." });
+    return;
+  }
+  const rawLimit = url.searchParams.get("limit") || "200";
+  if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 500) {
+    sendJson(response, 400, { error: "Log limit must be between 1 and 500." });
+    return;
+  }
+  const logs = database.prepare(`
+    SELECT id, created_at AS timestamp, username, client_ip AS clientIp,
+      action, details, status_code AS statusCode
+    FROM admin_logs
+    WHERE category = ?
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(category, Number(rawLimit));
+  sendJson(response, 200, { logs });
 }
 
 function checkFeatureAccess(request, response, feature, requireLogin = false) {
@@ -2598,6 +2737,33 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     queryKeys.add(key);
   }
 
+  const queryLogRoutes = {
+    "/api/lookup": { method: "GET", action: "DNS lookup", keys: ["name", "type", "reverse"] },
+    "/api/domain-info": { method: "GET", action: "Domain registration lookup", keys: ["name"] },
+    "/api/scan": { method: "GET", action: "Magic scan", keys: ["name", "ports"] },
+    "/api/custom-port-scan": { method: "POST", action: "Custom port scan" },
+    "/api/bulk-port-scan": { method: "POST", action: "Bulk port scan" },
+    "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
+  };
+  const queryLogRoute = queryLogRoutes[url.pathname];
+  if (queryLogRoute && request.method === queryLogRoute.method) {
+    request.logUsername = currentUser(request)?.username || null;
+    request.logClientAddress = getClientAddress(request);
+    request.logDetails = JSON.stringify(Object.fromEntries(
+      (queryLogRoute.keys || [])
+        .filter((key) => url.searchParams.has(key))
+        .map((key) => [key, url.searchParams.get(key)]),
+    ));
+    response.once("finish", () => recordAdminLog(
+      "query",
+      request,
+      queryLogRoute.action,
+      request.logDetails,
+      response.statusCode,
+      request.logUsername,
+    ));
+  }
+
   if (url.pathname === "/api/auth/status") {
     if (request.method !== "GET") {
       sendJson(response, 405, { error: "Method not allowed." });
@@ -2652,6 +2818,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
 
   if (url.pathname === "/api/admin/settings") {
     handleAdminSettings(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/logs") {
+    handleAdminLogs(request, url, response);
     return;
   }
 
@@ -2766,14 +2937,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
   }
-  if (url.pathname === "/admin.html") {
+  if (url.pathname === "/admin.html" || url.pathname === "/admin-logs.html") {
     if (appSetupRequired()) {
       sendRedirect(response, "/setup.html");
       return;
     }
     const user = currentUser(request);
     if (!user) {
-      sendRedirect(response, "/login.html?next=%2Fadmin.html");
+      const nextPath = encodeURIComponent(url.pathname);
+      sendRedirect(response, `/login.html?next=${nextPath}`);
       return;
     }
     if (user.role !== "admin") {
@@ -2782,25 +2954,32 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     }
   }
   const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname;
-  const filePath = path.resolve(publicDir, `.${requestedPath}`);
-  if (!filePath.startsWith(`${publicDir}${path.sep}`)) {
+  if (!staticFiles.has(requestedPath)) {
     response.writeHead(404);
     response.end();
     return;
   }
+  const filePath = path.join(publicDir, requestedPath.slice(1));
 
-  fs.readFile(filePath, (error, content) => {
-    if (error) {
+  fs.lstat(filePath, (statError, stats) => {
+    if (statError || !stats.isFile()) {
       response.writeHead(404);
       response.end("Not found");
       return;
     }
-    response.writeHead(200, {
-      "content-type": contentTypes[path.extname(filePath)] || "application/octet-stream",
-      "x-content-type-options": "nosniff",
+    fs.readFile(filePath, (readError, content) => {
+      if (readError) {
+        response.writeHead(404);
+        response.end("Not found");
+        return;
+      }
+      response.writeHead(200, {
+        "content-type": contentTypes[path.extname(filePath)] || "application/octet-stream",
+        "x-content-type-options": "nosniff",
+      });
+      if (request.method === "HEAD") response.end();
+      else response.end(content);
     });
-    if (request.method === "HEAD") response.end();
-    else response.end(content);
   });
 });
 

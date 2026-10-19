@@ -362,6 +362,30 @@ h1 {
 .admin-heading h1 { margin-bottom: 8px; }
 .admin-heading .account-description { margin-bottom: 0; }
 .admin-card { width: 100%; margin: 20px auto; }
+.logs-retention { margin: 20px 2px 0; }
+.logs-card { margin-top: 12px; }
+.logs-tabs { display: flex; gap: 8px; margin: -2px 0 17px; border-bottom: 1px solid #292929; }
+.logs-tab {
+  padding: 11px 13px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: #929292;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+}
+.logs-tab:hover, .logs-tab:focus-visible { color: #d8e8dd; }
+.logs-tab.active { border-bottom-color: #54d88f; color: #8aeab1; }
+.logs-status { min-height: 18px; margin: 0 0 10px; color: #929292; font-size: 11px; }
+.logs-table-wrap { overflow-x: auto; border: 1px solid #292929; border-radius: 7px; }
+.logs-table { min-width: 940px; table-layout: auto; }
+.logs-table td { color: #dedede; }
+.logs-table .logs-time, .logs-table .logs-ip { white-space: nowrap; }
+.logs-table .logs-details { min-width: 220px; max-width: 420px; overflow-wrap: anywhere; white-space: normal; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.logs-table td:nth-child(3) { font-weight: 400; }
+.logs-status-code { display: inline-block; min-width: 35px; padding: 3px 6px; border-radius: 999px; text-align: center; font-size: 10px; font-weight: 700; }
+.logs-status-code.success { color: #8aeab1; background: #14251a; }
+.logs-status-code.failure { color: #ff9b9b; background: #301919; }
 .feature-settings { margin: 18px 0; border-top: 1px solid #292929; }
 .feature-setting {
   display: flex;
@@ -784,6 +808,9 @@ body {
 .magic-scan-table .magic-type-badge { color: #a8c5f4; border-color: #303b4d; background: #1a2433; }
 .magic-scan-table .magic-source-badge { color: #b0b0b0; border-color: #303030; background: #202020; }
 .magic-scan-table td.magic-data { color: #dedede; }
+.dns-results-table.logs-table td { color: #dedede; }
+.dns-results-table.logs-table td:nth-child(3) { font-weight: 400; }
+.dns-results-table.logs-table .logs-details { white-space: normal; }
 .record-row, .detail-row, .nameserver-row, .contact-row, .scan-host > h3, .scan-record {
   border-bottom-color: #242424;
 }

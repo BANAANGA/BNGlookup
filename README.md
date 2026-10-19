@@ -34,6 +34,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - View DNS response status and answer, authority, and additional records.
 - Search and sort DNS and Magic scan result tables, and click result values to
   copy them to the clipboard.
+- Review login attempts, administrator actions, and DNS/scan lookup activity in
+  the administrator's tabbed logs page.
 - Run as a small Docker container, with no application dependencies to install.
 - Configure the default DNS-over-HTTPS resolver from the administrator panel;
   Cloudflare is selected by default.
@@ -99,6 +101,14 @@ port-scan tools require an administrator. Public access can be enabled or
 changed from the admin panel. Sessions use HttpOnly, SameSite cookies and expire
 after 12 hours.
 
+Administrators can open **Logs** from **Settings & users** to view login
+attempts (including failures and sign-outs), successful administrator changes,
+and lookup/scan requests in separate tables. Each tab shows the latest 200
+entries; up to 20,000 total log records are retained in the SQLite database on
+the `app_data` volume. Query logs include the client IP,
+account when signed in, submitted query details, and HTTP status. Treat the
+database and its backups as sensitive operational data.
+
 Unauthenticated requests to features marked **Public** are limited to 15 lookup
 requests per client IP address per UTC day. The counter resets at 00:00 UTC and
 is stored in SQLite so it survives application restarts. Logged-in users are
@@ -138,12 +148,15 @@ expose the service over an untrusted network without HTTPS.
 ## Web security and input handling
 
 The server validates input independently of browser-side field limits, rejects
-oversized or duplicate request parameters, and uses parameterized SQL for
-account operations. Values from DNS and registration responses are HTML-escaped
-before rendering. The interface also sends a restrictive Content Security
-Policy and browser security headers. State-changing account requests require a
-same-origin `Origin` header; use the web interface or send that header when
-calling these endpoints directly.
+oversized, duplicate, and control-character request parameters, uses strict
+UTF-8 decoding for JSON requests, and uses parameterized SQL for account
+operations. Static requests can access only an explicit list of required
+one-level files; directory paths, file listing, and application files outside
+that list are not served. Values from DNS, registration, and log responses are
+HTML-escaped before rendering. The interface also sends a restrictive Content
+Security Policy and browser security headers. State-changing account requests
+require a same-origin `Origin` header; use the web interface or send that header
+when calling these endpoints directly.
 
 These safeguards do not replace HTTPS, network-level access controls, or
 scanning only systems you are authorized to test. Keep `COOKIE_SECURE=true`
