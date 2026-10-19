@@ -40,6 +40,21 @@ const clientPtr = document.querySelector("#client-ptr");
 let mode = "auto";
 let authState = null;
 
+async function readApiResponse(response) {
+  const body = await response.text();
+  try {
+    return JSON.parse(body);
+  } catch {
+    if (/^\s*</.test(body)) {
+      throw new Error(
+        `The lookup API returned a web page instead of JSON (HTTP ${response.status}). ` +
+        "Check that the Cloudflare Tunnel routes /api/* requests to BNGlookup and that Cloudflare Access allows them.",
+      );
+    }
+    throw new Error(`The lookup API returned an invalid response (HTTP ${response.status}).`);
+  }
+}
+
 async function loadClientInfo() {
   try {
     const response = await fetch("/api/client-info", { credentials: "same-origin" });
@@ -965,7 +980,7 @@ form.addEventListener("submit", async (event) => {
         }
         : {};
     const response = await fetch(isPortScan ? endpoint : `${endpoint}?${params}`, requestOptions);
-    const data = await response.json();
+    const data = await readApiResponse(response);
     if (response.status === 401) {
       const next = `${window.location.pathname}${window.location.search}`;
       window.location.assign(`/login.html?next=${encodeURIComponent(next)}`);
