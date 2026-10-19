@@ -8,6 +8,7 @@ services:
       DOH_ENDPOINT: "${DOH_ENDPOINT:-https://cloudflare-dns.com/dns-query}"
       DATA_DIR: /data
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
     volumes:
       - app_data:/data
     restart: unless-stopped
