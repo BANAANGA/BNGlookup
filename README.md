@@ -12,6 +12,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
   MAC addresses and automatically select DNS, reverse DNS, or vendor lookup.
 - Send DNS and reverse lookups to a specific nameserver IP, with optional
   non-standard port selection.
+- Let administrators choose the default encrypted DNS-over-HTTPS resolver:
+  Google Public DNS, Cloudflare, Quad9, or DNS4EU (EU).
 - Look up the registered vendor and address attributes for a MAC address.
 - Scan a domain and common subdomains for DNS records, cloud-provider
   endpoints, WHOIS/RDAP registration data, SPF policies, and common DKIM
@@ -33,7 +35,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Search and sort DNS and Magic scan result tables, and click result values to
   copy them to the clipboard.
 - Run as a small Docker container, with no application dependencies to install.
-- Configure the DNS-over-HTTPS (DoH) JSON provider; Cloudflare is the default.
+- Configure the default DNS-over-HTTPS resolver from the administrator panel;
+  Cloudflare is selected by default.
 
 ## Screenshot
 
@@ -70,16 +73,15 @@ docker compose logs -f
 docker compose down
 ```
 
-### Configure the DNS provider
+### Configure the DNS resolver
 
-Queries use Cloudflare's DNS-over-HTTPS JSON endpoint by default. To select a
-different compatible endpoint, set `DOH_ENDPOINT` when starting the container:
-
-```sh
-DOH_ENDPOINT=https://cloudflare-dns.com/dns-query docker compose up --build -d
-```
-
-The DNS provider receives the names and record types you query.
+After creating the administrator account, open **Settings & users** and choose
+the default resolver: Google Public DNS, Cloudflare, Quad9, or DNS4EU (EU). The
+setting is stored in SQLite and applies to DNS, reverse DNS, Magic scan, and
+nameserver lookups unless an individual query specifies a nameserver. DNS query
+names and record types are sent to the selected provider.
+The DNS4EU option uses its [protective resolver](https://joindns4.eu/for-public),
+which may filter domains classified as malicious.
 
 ## Accounts, roles, and feature access
 
@@ -103,6 +105,10 @@ is stored in SQLite so it survives application restarts. Logged-in users are
 not subject to this guest quota. When deployed behind a reverse proxy, the app
 uses the connection address it sees and does not trust forwarded-IP headers;
 clients that share a proxy connection address also share the quota.
+
+The administrator can select Google Public DNS, Cloudflare, Quad9, or DNS4EU
+(EU) as the default encrypted DNS-over-HTTPS resolver. The choice is persisted
+with the other application settings.
 
 SQLite stores users, feature-access settings, sessions, and guest quota counters
 in the Compose `app_data` volume at `/data/bnglookup.sqlite`. Keep this volume to
@@ -156,8 +162,7 @@ well as the Compose file:
 
 The Compose file publishes port 3000 by default. To use a different host port,
 set `PORT` in the project's environment configuration (for example, `PORT=8080`)
-and redeploy. To change the DNS provider, set `DOH_ENDPOINT` in the same
-environment configuration.
+and redeploy.
 
 ## Run without Docker
 
@@ -169,11 +174,12 @@ node server.js
 ```
 
 The interface is available at [http://localhost:3000](http://localhost:3000).
-Set `PORT` to change the listening port, or `DOH_ENDPOINT` to select another
-DNS-over-HTTPS JSON provider:
+Set `PORT` to change the listening port. To retain support for a custom
+DNS-over-HTTPS JSON endpoint, set `DOH_ENDPOINT`; it will appear as an
+additional resolver choice in the administrator panel:
 
 ```sh
-PORT=8080 DOH_ENDPOINT=https://cloudflare-dns.com/dns-query node server.js
+PORT=8080 DOH_ENDPOINT=https://example.net/dns-query node server.js
 ```
 
 ## DNS record notes

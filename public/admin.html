@@ -29,6 +29,9 @@
         <h2>Feature access</h2>
         <p class="form-hint">Public features do not require login. User features require any active account. Admin features require the administrator role.</p>
         <form id="settings-form">
+          <h3 class="policy-heading">Default DNS resolver</h3>
+          <p class="form-hint">This encrypted DNS-over-HTTPS resolver is used for lookups unless a query specifies a nameserver. DNS4EU uses its protective service, which filters domains classified as malicious.</p>
+          <div id="dns-resolver-setting" class="feature-settings"></div>
           <div id="feature-settings" class="feature-settings"></div>
           <h3 class="policy-heading">Port scan policy</h3>
           <p class="form-hint">Port scans always require an account, even when the feature is marked Public. Private/local targets are enabled for administrators by default and remain unavailable to users until enabled here. Limits apply to unique TCP ports per target.</p>

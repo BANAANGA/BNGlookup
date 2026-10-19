@@ -1,6 +1,7 @@
 const errorPanel = document.querySelector("#admin-error");
 const successPanel = document.querySelector("#admin-success");
 const featureSettings = document.querySelector("#feature-settings");
+const dnsResolverSetting = document.querySelector("#dns-resolver-setting");
 const portScanSettings = document.querySelector("#port-scan-settings");
 const userList = document.querySelector("#user-list");
 
@@ -55,6 +56,21 @@ function renderFeatureSettings(features, access) {
       </select>
     </label>
   `).join("");
+}
+
+function renderDnsResolverSetting(resolvers, selectedResolver) {
+  dnsResolverSetting.innerHTML = `
+    <label class="feature-setting" for="default-dns-resolver">
+      <span>Default DNS resolver</span>
+      <select id="default-dns-resolver" name="defaultDnsResolver">
+        ${resolvers.map((resolver) => `
+          <option value="${escapeHtml(resolver.id)}" ${selectedResolver === resolver.id ? "selected" : ""}>
+            ${escapeHtml(resolver.label)}
+          </option>
+        `).join("")}
+      </select>
+    </label>
+  `;
 }
 
 function renderPortScanSettings(policy) {
@@ -117,6 +133,7 @@ async function initializeAdmin() {
       api("/api/admin/users"),
     ]);
     renderFeatureSettings(settings.features, settings.featureAccess);
+    renderDnsResolverSetting(settings.dnsResolvers, settings.defaultDnsResolver);
     renderPortScanSettings(settings.portScanPolicy);
     renderUsers(users.users);
   } catch (error) {
@@ -130,6 +147,7 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
   const featureAccess = Object.fromEntries(
     [...featureSettings.querySelectorAll("select")].map((select) => [select.name, select.value]),
   );
+  const defaultDnsResolver = dnsResolverSetting.querySelector("select").value;
   const portScanPolicy = {
     maxPortsByRole: Object.fromEntries(["admin", "user"].map((role) => [
       role,
@@ -143,9 +161,9 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
   try {
     await api("/api/admin/settings", {
       method: "PUT",
-      body: JSON.stringify({ featureAccess, portScanPolicy }),
+      body: JSON.stringify({ featureAccess, portScanPolicy, defaultDnsResolver }),
     });
-    showAdminSuccess("Feature access and port scan settings saved.");
+    showAdminSuccess("Feature access, DNS resolver, and port scan settings saved.");
   } catch (error) {
     showAdminError(error.message);
   }

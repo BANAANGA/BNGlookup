@@ -4,6 +4,7 @@ const path = require("node:path");
 const { isIP } = require("node:net");
 const dgram = require("node:dgram");
 const net = require("node:net");
+const http2 = require("node:http2");
 const crypto = require("node:crypto");
 const { promisify } = require("node:util");
 const { DatabaseSync } = require("node:sqlite");
@@ -15,7 +16,17 @@ const host = process.env.HOST || "0.0.0.0";
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be an integer between 1 and 65535.");
 }
-const dohEndpoint = process.env.DOH_ENDPOINT || "https://cloudflare-dns.com/dns-query";
+const customDohEndpoint = process.env.DOH_ENDPOINT || "";
+const dnsResolvers = {
+  google: { label: "Google Public DNS", endpoint: "https://dns.google/dns-query" },
+  cloudflare: { label: "Cloudflare", endpoint: "https://cloudflare-dns.com/dns-query" },
+  quad9: { label: "Quad9", endpoint: "https://dns.quad9.net/dns-query" },
+  dns4eu: { label: "DNS4EU (EU)", endpoint: "https://protective.joindns4.eu/dns-query" },
+};
+const customResolverOption = customDohEndpoint &&
+  !Object.values(dnsResolvers).some(({ endpoint }) => endpoint === customDohEndpoint)
+  ? [{ id: "custom", label: "Custom (DOH_ENDPOINT)" }]
+  : [];
 const publicDir = path.join(__dirname, "public");
 const dataDir = path.resolve(process.env.DATA_DIR || "/data");
 fs.mkdirSync(dataDir, { recursive: true });
@@ -103,28 +114,93 @@ const dnsStatusNames = {
 const dnsTypeCodes = {
   A: 1,
   NS: 2,
+  MD: 3,
+  MF: 4,
   CNAME: 5,
   SOA: 6,
+  MB: 7,
+  MG: 8,
+  MR: 9,
+  NULL: 10,
+  WKS: 11,
   PTR: 12,
+  HINFO: 13,
+  MINFO: 14,
   MX: 15,
   TXT: 16,
+  RP: 17,
+  AFSDB: 18,
+  X25: 19,
+  ISDN: 20,
+  RT: 21,
+  NSAP: 22,
+  "NSAP-PTR": 23,
+  SIG: 24,
+  KEY: 25,
+  PX: 26,
+  GPOS: 27,
   AAAA: 28,
+  LOC: 29,
+  NXT: 30,
+  EID: 31,
+  NIMLOC: 32,
   SRV: 33,
+  ATMA: 34,
+  NAPTR: 35,
+  KX: 36,
+  CERT: 37,
+  A6: 38,
   DNAME: 39,
+  SINK: 40,
   OPT: 41,
+  APL: 42,
   DS: 43,
   SSHFP: 44,
+  IPSECKEY: 45,
   RRSIG: 46,
   NSEC: 47,
   DNSKEY: 48,
+  DHCID: 49,
   NSEC3: 50,
+  NSEC3PARAM: 51,
   TLSA: 52,
+  SMIMEA: 53,
+  HIP: 55,
+  NINFO: 56,
+  RKEY: 57,
+  TALINK: 58,
   CDS: 59,
   CDNSKEY: 60,
+  OPENPGPKEY: 61,
+  CSYNC: 62,
+  ZONEMD: 63,
   SVCB: 64,
   HTTPS: 65,
-  CAA: 257,
+  SPF: 99,
+  UINFO: 100,
+  UID: 101,
+  GID: 102,
+  UNSPEC: 103,
+  NID: 104,
+  L32: 105,
+  L64: 106,
+  LP: 107,
+  EUI48: 108,
+  EUI64: 109,
+  TKEY: 249,
+  TSIG: 250,
+  IXFR: 251,
+  AXFR: 252,
+  MAILB: 253,
+  MAILA: 254,
   ANY: 255,
+  URI: 256,
+  CAA: 257,
+  AVC: 258,
+  DOA: 259,
+  AMTRELAY: 260,
+  TA: 32768,
+  DLV: 32769,
 };
 const dnsTypeNames = Object.fromEntries(
   Object.entries(dnsTypeCodes).map(([name, code]) => [code, name]),
@@ -497,6 +573,22 @@ function decodeDnsRecordData(packet, typeCode, start, length) {
   if (typeCode === 33 && length >= 7) {
     return `${packet.readUInt16BE(start)} ${packet.readUInt16BE(start + 2)} ${packet.readUInt16BE(start + 4)} ${decodeDnsName(packet, start + 6).name}`;
   }
+  if (typeCode === 35 && length >= 7) {
+    const order = packet.readUInt16BE(start);
+    const preference = packet.readUInt16BE(start + 2);
+    let offset = start + 4;
+    const strings = [];
+    for (let index = 0; index < 3; index += 1) {
+      if (offset >= end) throw new Error("DNS response contains truncated NAPTR data.");
+      const stringLength = packet[offset++];
+      if (offset + stringLength > end) throw new Error("DNS response contains truncated NAPTR data.");
+      strings.push(JSON.stringify(packet.toString("utf8", offset, offset + stringLength)));
+      offset += stringLength;
+    }
+    const replacement = decodeDnsName(packet, offset);
+    if (replacement.nextOffset > end) throw new Error("DNS response contains truncated NAPTR data.");
+    return `${order} ${preference} ${strings.join(" ")} ${replacement.name}`;
+  }
   if (typeCode === 6) {
     const mname = decodeDnsName(packet, start);
     const rname = decodeDnsName(packet, mname.nextOffset);
@@ -667,25 +759,111 @@ async function directDnsLookup(name, type, nameserver) {
   };
 }
 
-async function fetchPtr(address, nameserver = null) {
-  if (nameserver) return directDnsLookup(reverseName(address), "PTR", nameserver);
-  const queryUrl = new URL(dohEndpoint);
-  queryUrl.searchParams.set("name", reverseName(address));
-  queryUrl.searchParams.set("type", "PTR");
-  const response = await fetch(queryUrl, {
-    headers: { accept: "application/dns-json" },
-    signal: AbortSignal.timeout(8000),
+function queryDohOverHttp2(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const client = http2.connect(url.origin);
+    let settled = false;
+    let status;
+    const chunks = [];
+    const timeout = setTimeout(() => finish(new Error("DNS lookup timed out. Please try again.")), timeoutMs);
+
+    function finish(error, packet) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) {
+        client.destroy();
+        reject(error);
+      } else {
+        client.close();
+        resolve({ status, packet: Buffer.concat(chunks) });
+      }
+    }
+
+    client.once("error", (error) => finish(error));
+    const request = client.request({
+      ":method": "GET",
+      ":path": `${url.pathname}${url.search}`,
+      accept: "application/dns-message",
+    });
+    request.once("response", (headers) => { status = headers[":status"]; });
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.once("end", () => {
+      if (status < 200 || status >= 300) {
+        finish(new Error(`DNS provider returned HTTP ${status}.`));
+        return;
+      }
+      finish(null);
+    });
+    request.once("error", (error) => finish(error));
+    request.end();
   });
-  if (!response.ok) {
-    throw new Error(`DNS provider returned HTTP ${response.status}.`);
+}
+
+async function queryDohDns(name, type) {
+  const resolver = getDnsResolver();
+  if (resolver.format === "json") {
+    const queryUrl = new URL(resolver.endpoint);
+    queryUrl.searchParams.set("name", name);
+    queryUrl.searchParams.set("type", type);
+    const response = await fetch(queryUrl, {
+      headers: { accept: "application/dns-json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) throw new Error(`DNS provider returned HTTP ${response.status}.`);
+    const data = await response.json();
+    if (typeof data.Status !== "number" || !Array.isArray(data.Answer || []) ||
+      !Array.isArray(data.Authority || []) || !Array.isArray(data.Additional || [])) {
+      throw new Error("DNS provider returned an invalid response.");
+    }
+    return {
+      name,
+      type,
+      status: data.Status,
+      statusText: dnsStatusNames[data.Status] || `DNS status ${data.Status}`,
+      answers: data.Answer || [],
+      authority: data.Authority || [],
+      additional: data.Additional || [],
+    };
   }
-  const data = await response.json();
-  if (typeof data.Status !== "number" || !Array.isArray(data.Answer || [])) {
+
+  const query = encodeDnsQuery(name, dnsQuestionType(type));
+  const queryUrl = new URL(resolver.endpoint);
+  queryUrl.searchParams.set("dns", query.toString("base64url"));
+  let packet;
+  if (["quad9", "dns4eu"].includes(resolver.id)) {
+    packet = (await queryDohOverHttp2(queryUrl, 8000)).packet;
+  } else {
+    const response = await fetch(queryUrl, {
+      headers: { accept: "application/dns-message" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) throw new Error(`DNS provider returned HTTP ${response.status}.`);
+    packet = Buffer.from(await response.arrayBuffer());
+  }
+  if (packet.length < 12 || packet.readUInt16BE(0) !== query.readUInt16BE(0) ||
+    !(packet.readUInt16BE(2) & 0x8000)) {
     throw new Error("DNS provider returned an invalid response.");
   }
+  const result = parseDnsPacket(packet);
+  if (result.truncated) throw new Error("DNS provider returned a truncated response.");
   return {
-    status: dnsStatusNames[data.Status] || `DNS status ${data.Status}`,
-    answers: (data.Answer || []).map((answer) => answer.data),
+    name,
+    type,
+    status: result.status,
+    statusText: dnsStatusNames[result.status] || `DNS status ${result.status}`,
+    answers: result.answers,
+    authority: result.authority,
+    additional: result.additional,
+  };
+}
+
+async function fetchPtr(address, nameserver = null) {
+  if (nameserver) return directDnsLookup(reverseName(address), "PTR", nameserver);
+  const data = await queryDohDns(reverseName(address), "PTR");
+  return {
+    status: data.statusText,
+    answers: data.answers.map((answer) => answer.data),
   };
 }
 
@@ -741,21 +919,7 @@ async function handleClientInfo(request, response) {
 }
 
 async function queryDnsRecords(name, type) {
-  const queryUrl = new URL(dohEndpoint);
-  queryUrl.searchParams.set("name", name);
-  queryUrl.searchParams.set("type", type);
-  const response = await fetch(queryUrl, {
-    headers: { accept: "application/dns-json" },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!response.ok) {
-    throw new Error(`DNS provider returned HTTP ${response.status}.`);
-  }
-  const data = await response.json();
-  if (typeof data.Status !== "number" || !Array.isArray(data.Answer || [])) {
-    throw new Error("DNS provider returned an invalid response.");
-  }
-  return data.Answer || [];
+  return (await queryDohDns(name, type)).answers;
 }
 
 function isPublicAddress(address) {
@@ -1471,40 +1635,16 @@ async function bulkScan(request, url, response) {
 }
 
 async function fetchNameservers(domain) {
-  const queryUrl = new URL(dohEndpoint);
-  queryUrl.searchParams.set("name", domain);
-  queryUrl.searchParams.set("type", "NS");
-  const response = await fetch(queryUrl, {
-    headers: { accept: "application/dns-json" },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!response.ok) {
-    throw new Error(`DNS provider returned HTTP ${response.status}.`);
-  }
-  const data = await response.json();
-  if (typeof data.Status !== "number" || !Array.isArray(data.Answer || [])) {
-    throw new Error("DNS provider returned an invalid response.");
-  }
-
-  const records = (data.Answer || []).map((answer) => ({
+  const data = await queryDohDns(domain, "NS");
+  const records = data.answers.map((answer) => ({
     name: answer.data,
     ttl: answer.TTL,
   }));
   const addressResults = await Promise.allSettled(
     records.map(async (nameserver) => {
       const [ipv4, ipv6] = await Promise.all(["A", "AAAA"].map(async (type) => {
-        const addressUrl = new URL(dohEndpoint);
-        addressUrl.searchParams.set("name", nameserver.name);
-        addressUrl.searchParams.set("type", type);
-        const addressResponse = await fetch(addressUrl, {
-          headers: { accept: "application/dns-json" },
-          signal: AbortSignal.timeout(8000),
-        });
-        if (!addressResponse.ok) return [];
-        const addressData = await addressResponse.json();
-        return Array.isArray(addressData.Answer)
-          ? addressData.Answer.map((answer) => answer.data)
-          : [];
+        const addressData = await queryDohDns(nameserver.name, type);
+        return addressData.answers.map((answer) => answer.data);
       }));
       return { ipv4, ipv6 };
     }),
@@ -1520,7 +1660,7 @@ async function fetchNameservers(domain) {
   });
 
   return {
-    status: dnsStatusNames[data.Status] || `DNS status ${data.Status}`,
+    status: data.statusText,
     records: enrichedRecords,
     addressesIncomplete: addressResults.some((result) => result.status === "rejected"),
   };
@@ -1633,6 +1773,29 @@ function getPortScanPolicy() {
   } catch {
     return structuredClone(portScanPolicyDefaults);
   }
+}
+
+function getDefaultResolverId() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'default_dns_resolver'").get();
+  if (row && (Object.hasOwn(dnsResolvers, row.value) || (row.value === "custom" && customDohEndpoint))) {
+    return row.value;
+  }
+  return customResolverOption.length ? "custom" : "cloudflare";
+}
+
+function getDnsResolver() {
+  const id = getDefaultResolverId();
+  if (id === "custom") {
+    return { id, ...dnsResolvers.cloudflare, endpoint: customDohEndpoint, format: "json" };
+  }
+  return { id, ...dnsResolvers[id], format: "wire" };
+}
+
+function getDnsResolverOptions() {
+  return [
+    ...Object.entries(dnsResolvers).map(([id, resolver]) => ({ id, label: resolver.label })),
+    ...customResolverOption,
+  ];
 }
 
 function readCookie(request, name) {
@@ -1888,6 +2051,8 @@ function handleAdminSettings(request, response) {
       featureAccess: getFeatureAccess(),
       features: featureNames,
       portScanPolicy: getPortScanPolicy(),
+      defaultDnsResolver: getDefaultResolverId(),
+      dnsResolvers: getDnsResolverOptions(),
     });
     return;
   }
@@ -1900,6 +2065,9 @@ function handleAdminSettings(request, response) {
     if (!body) return;
     const access = body.featureAccess;
     const portScanPolicy = body.portScanPolicy;
+    const defaultDnsResolver = Object.hasOwn(body, "defaultDnsResolver")
+      ? body.defaultDnsResolver
+      : getDefaultResolverId();
     if (!access || typeof access !== "object" || Array.isArray(access) ||
       Object.keys(access).length !== Object.keys(featureAccessDefaults).length ||
       Object.entries(featureAccessDefaults).some(([feature]) =>
@@ -1912,9 +2080,11 @@ function handleAdminSettings(request, response) {
         portScanPolicy.maxPortsByRole[role] >= 1 &&
         portScanPolicy.maxPortsByRole[role] <= 65535 &&
         typeof portScanPolicy.localScanByRole[role] === "boolean",
-      )) {
+      ) ||
+      (!Object.hasOwn(dnsResolvers, defaultDnsResolver) &&
+        !(defaultDnsResolver === "custom" && customDohEndpoint))) {
       sendJson(response, 400, {
-        error: "Choose an access level for every feature and set each role's port limit from 1 to 65,535 with a local-scan permission.",
+        error: "Choose a valid resolver and an access level for every feature; set each role's port limit from 1 to 65,535 with a local-scan permission.",
       });
       return;
     }
@@ -1928,12 +2098,16 @@ function handleAdminSettings(request, response) {
         INSERT INTO app_settings (key, value) VALUES ('port_scan_policy', ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
       `).run(JSON.stringify(portScanPolicy));
+      database.prepare(`
+        INSERT INTO app_settings (key, value) VALUES ('default_dns_resolver', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(defaultDnsResolver);
       database.exec("COMMIT");
     } catch (error) {
       database.exec("ROLLBACK");
       throw error;
     }
-    sendJson(response, 200, { featureAccess: access, portScanPolicy });
+    sendJson(response, 200, { featureAccess: access, portScanPolicy, defaultDnsResolver });
   }).catch((error) => {
     console.error("Feature access settings update failed:", error);
     sendJson(response, 500, { error: "Unable to save feature access settings." });
@@ -2257,65 +2431,24 @@ async function lookup(url, response) {
     return;
   }
 
-  let queryUrl;
+  let data;
   try {
-    queryUrl = new URL(dohEndpoint);
-  } catch {
-    sendJson(response, 500, { error: "The DNS-over-HTTPS endpoint is not a valid URL." });
-    return;
-  }
-  queryUrl.searchParams.set("name", queryName);
-  queryUrl.searchParams.set("type", queryType);
-
-  let result;
-  try {
-    result = await fetch(queryUrl, {
-      headers: { accept: "application/dns-json" },
-      signal: AbortSignal.timeout(8000),
-    });
+    data = await queryDohDns(queryName, queryType);
   } catch (error) {
     const timedOut = error.name === "TimeoutError";
     sendJson(response, 502, {
-      error: timedOut ? "DNS lookup timed out. Please try again." : "Unable to reach the DNS provider.",
+      error: timedOut
+        ? "DNS lookup timed out. Please try again."
+        : error.message || "Unable to reach the DNS provider.",
     });
     return;
   }
-
-  if (!result.ok) {
-    sendJson(response, 502, { error: `DNS provider returned HTTP ${result.status}.` });
-    return;
-  }
-
-  let data;
-  try {
-    data = await result.json();
-  } catch {
-    sendJson(response, 502, { error: "DNS provider returned invalid JSON." });
-    return;
-  }
-
-  if (
-    typeof data.Status !== "number" ||
-    !Array.isArray(data.Answer || []) ||
-    !Array.isArray(data.Authority || []) ||
-    !Array.isArray(data.Additional || [])
-  ) {
-    sendJson(response, 502, { error: "DNS provider returned an invalid response." });
-    return;
-  }
-
   const ptrLookups = await fetchPtrLookups(
-    [...(data.Answer || []), ...(data.Authority || []), ...(data.Additional || [])]
+    [...data.answers, ...data.authority, ...data.additional]
       .map((answer) => answer.data),
   );
   sendJson(response, 200, {
-    name: queryName,
-    type: queryType,
-    status: data.Status,
-    statusText: dnsStatusNames[data.Status] || `DNS status ${data.Status}`,
-    answers: data.Answer || [],
-    authority: data.Authority || [],
-    additional: data.Additional || [],
+    ...data,
     ptrLookups,
   });
 }
