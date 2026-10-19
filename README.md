@@ -10,8 +10,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Query other record types by name or numeric DNS type code.
 - Use the unified search bar to detect domains/URLs, IPv4/IPv6 addresses, and
   MAC addresses and automatically select DNS, reverse DNS, or vendor lookup.
-- Send DNS and reverse lookups to a specific nameserver IP, with optional
-  non-standard port selection.
+- Let administrators send DNS, reverse DNS, and Magic scan queries to a
+  specific nameserver IP or hostname, with optional non-standard port selection.
 - Let administrators choose the default encrypted DNS-over-HTTPS resolver:
   Google Public DNS, Cloudflare, Quad9, or DNS4EU (EU).
 - Look up the registered vendor and address attributes for a MAC address.
@@ -103,8 +103,26 @@ Unauthenticated requests to features marked **Public** are limited to 15 lookup
 requests per client IP address per UTC day. The counter resets at 00:00 UTC and
 is stored in SQLite so it survives application restarts. Logged-in users are
 not subject to this guest quota. When deployed behind a reverse proxy, the app
-uses the connection address it sees and does not trust forwarded-IP headers;
-clients that share a proxy connection address also share the quota.
+uses the connection address it sees unless the immediate proxy is explicitly
+trusted in **Settings & users → Trusted reverse proxies**. Enter one IP address
+or CIDR range per line. When a trusted proxy is configured, the app uses its
+`CF-Connecting-IP`, `X-Real-IP`, or `X-Forwarded-For` client address for display,
+public lookup quotas, and login-attempt limits. The setting is applied
+immediately and persisted in SQLite.
+
+For initial setup, or to pre-populate the administrator setting on a new
+database, set `TRUSTED_PROXIES` to the reverse proxy's exact IP address or CIDR
+subnet in the app's container network:
+
+```sh
+TRUSTED_PROXIES=172.18.0.3 docker compose up -d --build
+```
+
+The admin panel setting takes precedence over the environment value after it
+has been stored. Configure only proxy addresses that connect directly to
+BNGlookup; do not trust the entire Internet (`0.0.0.0/0` or `::/0`). The trusted
+proxy must overwrite or safely append the forwarding headers so clients cannot
+spoof them. With an empty trusted-proxy setting, forwarded headers are ignored.
 
 The administrator can select Google Public DNS, Cloudflare, Quad9, or DNS4EU
 (EU) as the default encrypted DNS-over-HTTPS resolver. The choice is persisted
@@ -131,10 +149,10 @@ These safeguards do not replace HTTPS, network-level access controls, or
 scanning only systems you are authorized to test. Keep `COOKIE_SECURE=true`
 when serving the app behind an HTTPS reverse proxy.
 
-The landing page displays the IP address observed by the application and
-performs a PTR lookup when it is public. Behind a reverse proxy, this is the
-proxy's connection address unless the application is directly exposed; forwarded
-IP headers are not trusted.
+The landing page displays the client IP observed by the application and
+performs a PTR lookup when it is public. Behind a reverse proxy, set
+the proxy's connection address in **Settings & users → Trusted reverse proxies**
+so the app can safely use its forwarded client-IP header.
 
 ## Deploy with Arcane
 
@@ -189,10 +207,10 @@ numeric type code. `ANY` queries do not necessarily return every record; DNS
 servers commonly limit their responses. The available records depend on the
 queried domain and provider.
 
-In **DNS lookup**, **Reverse lookup**, or **Magic scan**, enter a nameserver IP
-or hostname to send DNS queries directly to that server over UDP (with TCP
-fallback for truncated responses). Leave the field empty to use the configured
-DNS-over-HTTPS provider. A custom port can be provided after the IPv4 address
+In **DNS lookup**, **Reverse lookup**, or **Magic scan**, administrators can
+enter a nameserver IP or hostname to send DNS queries directly to that server
+over UDP (with TCP fallback for truncated responses). Other users use the
+configured default DNS-over-HTTPS provider. A custom port can be provided after the IPv4 address
 (`1.1.1.1:53`) or after a bracketed IPv6 address
 (`[2606:4700:4700::1111]:53`). Hostnames are resolved using the container's
 configured system resolver before querying the selected server.

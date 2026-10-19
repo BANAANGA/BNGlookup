@@ -2,6 +2,7 @@ const errorPanel = document.querySelector("#admin-error");
 const successPanel = document.querySelector("#admin-success");
 const featureSettings = document.querySelector("#feature-settings");
 const dnsResolverSetting = document.querySelector("#dns-resolver-setting");
+const trustedProxySetting = document.querySelector("#trusted-proxies");
 const portScanSettings = document.querySelector("#port-scan-settings");
 const userList = document.querySelector("#user-list");
 
@@ -134,6 +135,7 @@ async function initializeAdmin() {
     ]);
     renderFeatureSettings(settings.features, settings.featureAccess);
     renderDnsResolverSetting(settings.dnsResolvers, settings.defaultDnsResolver);
+    trustedProxySetting.value = settings.trustedProxies;
     renderPortScanSettings(settings.portScanPolicy);
     renderUsers(users.users);
   } catch (error) {
@@ -148,6 +150,7 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
     [...featureSettings.querySelectorAll("select")].map((select) => [select.name, select.value]),
   );
   const defaultDnsResolver = dnsResolverSetting.querySelector("select").value;
+  const trustedProxies = trustedProxySetting.value;
   const portScanPolicy = {
     maxPortsByRole: Object.fromEntries(["admin", "user"].map((role) => [
       role,
@@ -161,9 +164,9 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
   try {
     await api("/api/admin/settings", {
       method: "PUT",
-      body: JSON.stringify({ featureAccess, portScanPolicy, defaultDnsResolver }),
+      body: JSON.stringify({ featureAccess, portScanPolicy, defaultDnsResolver, trustedProxies }),
     });
-    showAdminSuccess("Feature access, DNS resolver, and port scan settings saved.");
+    showAdminSuccess("Feature access, DNS resolver, trusted proxies, and port scan settings saved.");
   } catch (error) {
     showAdminError(error.message);
   }

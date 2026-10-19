@@ -33,6 +33,10 @@
           <p class="form-hint">This encrypted DNS-over-HTTPS resolver is used for lookups unless a query specifies a nameserver. DNS4EU uses its protective service, which filters domains classified as malicious.</p>
           <div id="dns-resolver-setting" class="feature-settings"></div>
           <div id="feature-settings" class="feature-settings"></div>
+          <h3 class="policy-heading">Trusted reverse proxies</h3>
+          <p class="form-hint">Enter the IP addresses or CIDR ranges of proxies that connect directly to BNGlookup, one per line. Only these connections can supply client IP headers. Do not add a public or shared subnet unless every host in it is trusted.</p>
+          <label class="sr-only" for="trusted-proxies">Trusted proxy IP addresses and CIDRs</label>
+          <textarea id="trusted-proxies" name="trustedProxies" rows="4" maxlength="2048" placeholder="For example:&#10;172.18.0.3&#10;2001:db8::/32"></textarea>
           <h3 class="policy-heading">Port scan policy</h3>
           <p class="form-hint">Port scans always require an account, even when the feature is marked Public. Private/local targets are enabled for administrators by default and remain unavailable to users until enabled here. Limits apply to unique TCP ports per target.</p>
           <div id="port-scan-settings" class="port-scan-settings"></div>

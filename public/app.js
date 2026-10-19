@@ -103,7 +103,8 @@ function setMode(nextMode) {
   const customPortScan = mode === "custom-port";
   const bulkPortScan = mode === "bulk-port";
   const portScan = customPortScan || bulkPortScan;
-  const supportsNameserver = ["forward", "reverse", "scan"].includes(mode);
+  const isAdmin = authState?.user?.role === "admin";
+  const supportsNameserver = isAdmin && ["forward", "reverse", "scan"].includes(mode);
   tabs.forEach((tab) => {
     const selected = tab.dataset.mode === mode;
     tab.classList.toggle("active", selected);
@@ -128,6 +129,7 @@ function setMode(nextMode) {
   typeControl.hidden = automatic || reverse || details || mac || scan || portScan;
   customType.hidden = automatic || reverse || details || mac || scan || portScan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
+  if (!isAdmin) nameserverInput.value = "";
   portScanControl.hidden = !scan || !authState?.user;
   customPortsControl.hidden = !customPortScan;
   bulkTargetsControl.hidden = !bulkPortScan;
@@ -940,7 +942,8 @@ form.addEventListener("submit", async (event) => {
     name: lookupName,
     type: recordType.value === "custom" ? customType.value.trim() : recordType.value,
     reverse: String(requestMode === "reverse"),
-    nameserver: requestMode === "forward" || requestMode === "reverse" || requestMode === "scan"
+    nameserver: authState?.user?.role === "admin" &&
+      ["forward", "reverse", "scan"].includes(requestMode)
       ? nameserverInput.value.trim()
       : "",
   });

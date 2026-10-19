@@ -16,6 +16,33 @@ const host = process.env.HOST || "0.0.0.0";
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be an integer between 1 and 65535.");
 }
+function parseTrustedProxyEntries(value) {
+  if (typeof value !== "string" || value.length > 2048) {
+    throw new Error("Trusted proxies must be a list no longer than 2,048 characters.");
+  }
+  const entries = [...new Set(value.split(/[,\r\n]+/).map((entry) => entry.trim()).filter(Boolean))];
+  if (entries.length > 50) {
+    throw new Error("Trusted proxies may contain no more than 50 IP addresses or CIDRs.");
+  }
+  const ranges = new net.BlockList();
+  for (const entry of entries) {
+    const [address, prefixText, ...extra] = entry.split("/");
+    const family = isIP(address);
+    if (!family || extra.length > 0 ||
+      (prefixText !== undefined &&
+        (!/^\d+$/.test(prefixText) || Number(prefixText) > (family === 4 ? 32 : 128)))) {
+      throw new Error(`Invalid trusted proxy address or CIDR: ${entry}`);
+    }
+    if (prefixText === undefined) {
+      ranges.addAddress(address, family === 4 ? "ipv4" : "ipv6");
+    } else {
+      ranges.addSubnet(address, Number(prefixText), family === 4 ? "ipv4" : "ipv6");
+    }
+  }
+  return { entries, ranges };
+}
+let { entries: trustedProxyEntries, ranges: trustedProxyRanges } =
+  parseTrustedProxyEntries(process.env.TRUSTED_PROXIES || "");
 const customDohEndpoint = process.env.DOH_ENDPOINT || "";
 const dnsResolvers = {
   google: { label: "Google Public DNS", endpoint: "https://dns.google/dns-query" },
@@ -89,6 +116,25 @@ database.exec(`
     PRIMARY KEY (client_hash, utc_date)
   );
 `);
+database.prepare(`
+  INSERT OR IGNORE INTO app_settings (key, value) VALUES ('trusted_proxies', ?)
+`).run(JSON.stringify(trustedProxyEntries));
+const savedTrustedProxies = database.prepare(
+  "SELECT value FROM app_settings WHERE key = 'trusted_proxies'",
+).get();
+if (savedTrustedProxies) {
+  let entries;
+  try {
+    entries = JSON.parse(savedTrustedProxies.value);
+  } catch {
+    throw new Error("Stored trusted proxy settings are invalid JSON.");
+  }
+  if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string")) {
+    throw new Error("Stored trusted proxy settings must be an array of strings.");
+  }
+  ({ entries: trustedProxyEntries, ranges: trustedProxyRanges } =
+    parseTrustedProxyEntries(entries.join("\n")));
+}
 database.prepare(`
   INSERT OR IGNORE INTO app_settings (key, value)
   VALUES ('public_lookup_hash_key', ?)
@@ -883,11 +929,38 @@ async function fetchPtrLookups(addresses, nameserver = null) {
   return Object.fromEntries(results);
 }
 
-function getClientAddress(request) {
-  const address = request.socket.remoteAddress || "";
+function normalizeIpAddress(value) {
+  const address = typeof value === "string" ? value.trim() : "";
   const mappedIpv4 = address.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
   if (mappedIpv4 && isIP(mappedIpv4[1]) === 4) return mappedIpv4[1];
   return isIP(address) ? address : null;
+}
+
+function isTrustedProxy(address) {
+  const family = isIP(address);
+  return family !== 0 && trustedProxyRanges.check(address, family === 4 ? "ipv4" : "ipv6");
+}
+
+function getClientAddress(request) {
+  const socketAddress = normalizeIpAddress(request.socket.remoteAddress);
+  if (!socketAddress || !isTrustedProxy(socketAddress)) return socketAddress;
+
+  const cloudflareAddress = normalizeIpAddress(request.headers["cf-connecting-ip"]);
+  if (cloudflareAddress) return cloudflareAddress;
+  const realIpAddress = normalizeIpAddress(request.headers["x-real-ip"]);
+  if (realIpAddress) return realIpAddress;
+
+  const forwardedFor = request.headers["x-forwarded-for"];
+  if (typeof forwardedFor !== "string") return socketAddress;
+  const chain = forwardedFor.split(",").map(normalizeIpAddress);
+  if (!chain.length || chain.length > 20 || chain.some((address) => !address)) {
+    return socketAddress;
+  }
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const address = chain[index];
+    if (!isTrustedProxy(address)) return address;
+  }
+  return socketAddress;
 }
 
 async function handleClientInfo(request, response) {
@@ -1429,6 +1502,10 @@ async function bulkScan(request, url, response) {
   const portScanOption = queryInput(url, "ports", 10, response);
   const rawNameserver = queryInput(url, "nameserver", 300, response);
   if ([rawDomain, portScanOption, rawNameserver].includes(null)) return;
+  if (rawNameserver.trim() && currentUser(request)?.role !== "admin") {
+    sendJson(response, 403, { error: "Custom nameservers are available to administrators only." });
+    return;
+  }
   const domain = normalizeDomain(rawDomain);
   if (!domain) {
     sendJson(response, 400, { error: "Enter a valid domain name." });
@@ -1863,7 +1940,7 @@ function enforceSameOrigin(request, response) {
 
 const authAttempts = new Map();
 function allowAuthAttempt(request) {
-  const key = request.socket.remoteAddress || "unknown";
+  const key = getClientAddress(request) || request.socket.remoteAddress || "unknown";
   const now = Date.now();
   if (authAttempts.size > 10000) {
     for (const [address, attempt] of authAttempts) {
@@ -1888,7 +1965,7 @@ function allowAuthAttempt(request) {
 }
 
 function resetAuthAttempts(request) {
-  authAttempts.delete(request.socket.remoteAddress || "unknown");
+  authAttempts.delete(getClientAddress(request) || request.socket.remoteAddress || "unknown");
 }
 
 function validateUsername(username) {
@@ -2053,6 +2130,7 @@ function handleAdminSettings(request, response) {
       portScanPolicy: getPortScanPolicy(),
       defaultDnsResolver: getDefaultResolverId(),
       dnsResolvers: getDnsResolverOptions(),
+      trustedProxies: trustedProxyEntries.join("\n"),
     });
     return;
   }
@@ -2068,6 +2146,15 @@ function handleAdminSettings(request, response) {
     const defaultDnsResolver = Object.hasOwn(body, "defaultDnsResolver")
       ? body.defaultDnsResolver
       : getDefaultResolverId();
+    let trustedProxyConfig = { entries: trustedProxyEntries, ranges: trustedProxyRanges };
+    if (Object.hasOwn(body, "trustedProxies")) {
+      try {
+        trustedProxyConfig = parseTrustedProxyEntries(body.trustedProxies);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+        return;
+      }
+    }
     if (!access || typeof access !== "object" || Array.isArray(access) ||
       Object.keys(access).length !== Object.keys(featureAccessDefaults).length ||
       Object.entries(featureAccessDefaults).some(([feature]) =>
@@ -2102,12 +2189,23 @@ function handleAdminSettings(request, response) {
         INSERT INTO app_settings (key, value) VALUES ('default_dns_resolver', ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
       `).run(defaultDnsResolver);
+      database.prepare(`
+        INSERT INTO app_settings (key, value) VALUES ('trusted_proxies', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(JSON.stringify(trustedProxyConfig.entries));
       database.exec("COMMIT");
     } catch (error) {
       database.exec("ROLLBACK");
       throw error;
     }
-    sendJson(response, 200, { featureAccess: access, portScanPolicy, defaultDnsResolver });
+    trustedProxyEntries = trustedProxyConfig.entries;
+    trustedProxyRanges = trustedProxyConfig.ranges;
+    sendJson(response, 200, {
+      featureAccess: access,
+      portScanPolicy,
+      defaultDnsResolver,
+      trustedProxies: trustedProxyEntries.join("\n"),
+    });
   }).catch((error) => {
     console.error("Feature access settings update failed:", error);
     sendJson(response, 500, { error: "Unable to save feature access settings." });
@@ -2263,7 +2361,7 @@ function consumePublicLookup(request, response) {
     database.prepare("DELETE FROM public_lookup_usage WHERE utc_date < ?").run(utcDate);
     lastPublicQuotaCleanupDate = utcDate;
   }
-  const clientAddress = request.socket.remoteAddress || "unknown";
+  const clientAddress = getClientAddress(request) || "unknown";
   const clientHash = crypto
     .createHmac("sha256", publicLookupHashKey)
     .update(clientAddress)
@@ -2359,12 +2457,16 @@ async function macLookup(url, response) {
   });
 }
 
-async function lookup(url, response) {
+async function lookup(request, url, response) {
   const rawInput = queryInput(url, "name", 253, response);
   const rawType = queryInput(url, "type", 32, response);
   const rawNameserver = queryInput(url, "nameserver", 300, response);
   const rawReverse = queryInput(url, "reverse", 5, response);
   if ([rawInput, rawType, rawNameserver, rawReverse].includes(null)) return;
+  if (rawNameserver.trim() && currentUser(request)?.role !== "admin") {
+    sendJson(response, 403, { error: "Custom nameservers are available to administrators only." });
+    return;
+  }
   const input = rawInput.trim();
   const recordType = (rawType || "A").trim().toUpperCase();
   const reverse = rawReverse === "true";
@@ -2588,7 +2690,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       sendJson(response, 405, { error: "Method not allowed." });
       return;
     }
-    lookup(url, response);
+    lookup(request, url, response);
     return;
   }
 
