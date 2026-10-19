@@ -473,16 +473,16 @@ function renderScanResult(data) {
           : geolocation.error
         : "";
       const ttl = answer.TTL ?? answer.ttl;
-      const sources = host.providers.length ? host.providers.join(", ") : "Built-in";
+      const sources = host.providers.length ? host.providers : ["Built-in"];
       return `<tr>
         <td class="dns-row-number">${++rowNumber}</td>
-        <td class="record-name">${copyableResult(host.name)}</td>
-        <td>${copyableResult(record.type)}</td>
-        <td data-sort-value="${escapeHtml(ttl ?? "")}">${ttl === undefined ? "—" : copyableResult(`${ttl}s`)}</td>
-        <td class="record-data">${copyableResult(answer.data)}</td>
-        <td>${ptrText ? copyableResult(ptrText, "ptr-result") : "—"}</td>
-        <td>${locationText ? copyableResult(locationText, "geo-result") : "—"}</td>
-        <td>${copyableResult(sources)}</td>
+        <td class="magic-host">${copyableResult(host.name)}</td>
+        <td class="magic-type">${copyableResult(record.type, "magic-type-badge")}</td>
+        <td class="magic-ttl" data-sort-value="${escapeHtml(ttl ?? "")}">${ttl === undefined ? "—" : copyableResult(`${ttl}s`)}</td>
+        <td class="magic-data">${copyableResult(answer.data, "record-data")}</td>
+        <td class="magic-ptr">${ptrText ? copyableResult(ptrText, "ptr-result") : "—"}</td>
+        <td class="magic-location">${locationText ? copyableResult(locationText, "geo-result") : "—"}</td>
+        <td class="magic-source">${sources.map((source) => copyableResult(source, "magic-source-badge")).join(" ")}</td>
       </tr>`;
     })),
   ).join("");
@@ -498,14 +498,14 @@ function renderScanResult(data) {
         <div class="dns-results-table-wrap">
           <table class="dns-results-table magic-scan-table">
             <thead><tr>
-              <th scope="col">#</th>
-              <th scope="col"><button type="button" data-sort-column="1" data-sort-type="text">Host</button></th>
-              <th scope="col"><button type="button" data-sort-column="2" data-sort-type="text">Type</button></th>
-              <th scope="col"><button type="button" data-sort-column="3" data-sort-type="number">TTL</button></th>
-              <th scope="col"><button type="button" data-sort-column="4" data-sort-type="text">Record data</button></th>
-              <th scope="col"><button type="button" data-sort-column="5" data-sort-type="text">PTR</button></th>
-              <th scope="col"><button type="button" data-sort-column="6" data-sort-type="text">Geolocation</button></th>
-              <th scope="col"><button type="button" data-sort-column="7" data-sort-type="text">Source</button></th>
+              <th class="magic-number-heading" scope="col">#</th>
+              <th class="magic-host-heading" scope="col"><button type="button" data-sort-column="1" data-sort-type="text">Host</button></th>
+              <th class="magic-type-heading" scope="col"><button type="button" data-sort-column="2" data-sort-type="text">Type</button></th>
+              <th class="magic-ttl-heading" scope="col"><button type="button" data-sort-column="3" data-sort-type="number">TTL</button></th>
+              <th class="magic-data-heading" scope="col"><button type="button" data-sort-column="4" data-sort-type="text">Record data</button></th>
+              <th class="magic-ptr-heading" scope="col"><button type="button" data-sort-column="5" data-sort-type="text">PTR</button></th>
+              <th class="magic-location-heading" scope="col"><button type="button" data-sort-column="6" data-sort-type="text">Geolocation</button></th>
+              <th class="magic-source-heading" scope="col"><button type="button" data-sort-column="7" data-sort-type="text">Source</button></th>
             </tr></thead>
             <tbody>${scanRows}</tbody>
           </table>
