@@ -38,13 +38,35 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
   the administrator's tabbed logs page.
 - View visitor and query statistics with daily activity charts, query-type pie
   charts, and most-queried names in the administrator dashboard.
+- Create the initial administrator through first-run setup; manage user roles,
+  account status, password resets, and access to each lookup feature.
+- Configure the default DNS-over-HTTPS resolver, trusted reverse proxies, and
+  role-specific port-scan limits and local-network permissions in the admin
+  panel.
+- Apply daily per-IP limits to public lookups and use secure, expiring
+  authenticated sessions.
 - Run as a small Docker container, with no application dependencies to install.
-- Configure the default DNS-over-HTTPS resolver from the administrator panel;
-  Cloudflare is selected by default.
 
-## Screenshot
+## Screenshots
 
-![BNGlookup DNS lookup interface](assets/dns-lookup.png)
+The lookup modes share the home page; the other screenshots show each separate
+setup, account, and administrator page. Log and statistics screenshots use
+illustrative sample data.
+
+<table>
+  <tr>
+    <td align="center"><strong>Lookup tools</strong><br><img src="assets/dns-lookup.png" alt="BNGlookup home page with automatic, DNS, reverse, Whois, MAC, Magic scan, custom port scan, and bulk port scan modes" width="560"></td>
+    <td align="center"><strong>First-run administrator setup</strong><br><img src="assets/first-run-setup.png" alt="First-run setup page for creating the initial administrator account" width="560"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Login</strong><br><img src="assets/login.png" alt="BNGlookup account login page" width="560"></td>
+    <td align="center"><strong>Settings and access policies</strong><br><img src="assets/admin-settings.png" alt="Administrator settings page for feature access, DNS resolver, trusted proxies, and port-scan policy" width="560"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Application logs</strong><br><img src="assets/admin-logs.png" alt="Administrator application logs page with login, audit, and query log tabs" width="560"></td>
+    <td align="center"><strong>Usage statistics</strong><br><img src="assets/admin-stats.png" alt="Administrator usage statistics page with visitor and query charts, query mix, and most queried names" width="560"></td>
+  </tr>
+</table>
 
 ## Installation with Docker Compose
 
