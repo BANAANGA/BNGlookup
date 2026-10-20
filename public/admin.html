@@ -7,14 +7,15 @@
     <title>Administration · BNGlookup</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="stylesheet" href="/styles.css">
+    <script src="/branding.js" defer></script>
     <script src="/admin.js" defer></script>
   </head>
   <body>
     <main class="page account-page admin-page">
       <header class="topbar">
-        <a class="brand" href="/" aria-label="DNS Lookup home">
+        <a class="brand" href="/" aria-label="Home">
           <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
-          <span>DNS<span class="brand-light">Lookup</span></span>
+          <span class="brand-name">DNSLookup</span>
         </a>
         <nav class="account-nav"><a href="/admin-stats.html">Stats</a><a href="/admin-logs.html">Logs</a><a href="/">DNS lookup</a><button id="admin-logout" type="button">Log out</button></nav>
       </header>
@@ -25,39 +26,65 @@
       </section>
       <p class="error-message" id="admin-error" role="alert" hidden></p>
       <p class="success-message" id="admin-success" role="status" hidden></p>
-      <section class="account-card admin-card">
-        <h2>Feature access</h2>
-        <p class="form-hint">Public features do not require login. User features require any active account. Admin features require the administrator role.</p>
+      <section class="account-card admin-card settings-card">
+        <div class="settings-tabs" role="tablist" aria-label="Settings categories">
+          <button class="settings-tab active" id="general-tab" type="button" role="tab" aria-selected="true" aria-controls="general-panel">General</button>
+          <button class="settings-tab" id="access-tab" type="button" role="tab" aria-selected="false" aria-controls="access-panel" tabindex="-1">Access &amp; network</button>
+          <button class="settings-tab" id="port-scan-tab" type="button" role="tab" aria-selected="false" aria-controls="port-scan-panel" tabindex="-1">Port scans</button>
+          <button class="settings-tab" id="users-tab" type="button" role="tab" aria-selected="false" aria-controls="users-panel" tabindex="-1">Users</button>
+        </div>
         <form id="settings-form">
-          <h3 class="policy-heading">Default DNS resolver</h3>
-          <p class="form-hint">This encrypted DNS-over-HTTPS resolver is used for lookups unless a query specifies a nameserver. DNS4EU uses its protective service, which filters domains classified as malicious.</p>
-          <div id="dns-resolver-setting" class="feature-settings"></div>
-          <div id="feature-settings" class="feature-settings"></div>
-          <h3 class="policy-heading">Trusted reverse proxies</h3>
-          <p class="form-hint">Enter the IP addresses or CIDR ranges of proxies that connect directly to BNGlookup, one per line. Only these connections can supply client IP headers. Do not add a public or shared subnet unless every host in it is trusted.</p>
-          <label class="sr-only" for="trusted-proxies">Trusted proxy IP addresses and CIDRs</label>
-          <textarea id="trusted-proxies" name="trustedProxies" rows="4" maxlength="2048" placeholder="For example:&#10;172.18.0.3&#10;2001:db8::/32"></textarea>
-          <h3 class="policy-heading">Port scan policy</h3>
-          <p class="form-hint">Port scans always require an account, even when the feature is marked Public. Private/local targets are enabled for administrators by default and remain unavailable to users until enabled here. Limits apply to unique TCP ports per target.</p>
-          <div id="port-scan-settings" class="port-scan-settings"></div>
-          <button class="submit-button" type="submit"><span>Save settings</span><span aria-hidden="true">→</span></button>
+          <section class="settings-panel" id="general-panel" role="tabpanel" aria-labelledby="general-tab">
+            <h2>Site identity</h2>
+            <p class="form-hint">Customize the name and icon shown in the browser and application header.</p>
+            <div class="branding-fields">
+              <label for="site-title">Site title</label>
+              <input id="site-title" name="siteTitle" type="text" maxlength="60" required>
+              <label for="site-icon-url">Icon URL</label>
+              <input id="site-icon-url" name="siteIconUrl" type="url" maxlength="2048" placeholder="https://example.com/icon.png" autocomplete="url">
+              <span class="form-hint">Use an HTTPS URL. Leave the icon fields unchanged to keep the current icon, or select the default icon to reset. The icon host can see each visitor's IP address.</span>
+              <label for="site-icon-upload">Or upload an icon</label>
+              <input id="site-icon-upload" name="siteIconUpload" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/x-icon,image/vnd.microsoft.icon">
+              <span class="form-hint">PNG, JPEG, GIF, WebP, or ICO; maximum 256 KB. Uploaded icons are stored in the application database.</span>
+              <label class="branding-reset" for="reset-site-icon"><input id="reset-site-icon" type="checkbox"> Use the default icon</label>
+              <div class="branding-preview" id="branding-preview" aria-live="polite"></div>
+            </div>
+            <h2 class="policy-heading">Default DNS resolver</h2>
+            <p class="form-hint">This encrypted DNS-over-HTTPS resolver is used for lookups unless a query specifies a nameserver. DNS4EU uses its protective service, which filters domains classified as malicious.</p>
+            <div id="dns-resolver-setting" class="feature-settings"></div>
+            <button class="submit-button" type="submit"><span>Save general settings</span><span aria-hidden="true">→</span></button>
+          </section>
+          <section class="settings-panel" id="access-panel" role="tabpanel" aria-labelledby="access-tab" hidden>
+            <h2>Feature access</h2>
+            <p class="form-hint">Public features do not require login. User features require any active account. Admin features require the administrator role.</p>
+            <div id="feature-settings" class="feature-settings"></div>
+            <h2 class="policy-heading">Trusted reverse proxies</h2>
+            <p class="form-hint">Enter the IP addresses or CIDR ranges of proxies that connect directly to BNGlookup, one per line. Only these connections can supply client IP headers. Do not add a public or shared subnet unless every host in it is trusted.</p>
+            <label class="sr-only" for="trusted-proxies">Trusted proxy IP addresses and CIDRs</label>
+            <textarea id="trusted-proxies" name="trustedProxies" rows="4" maxlength="2048" placeholder="For example:&#10;172.18.0.3&#10;2001:db8::/32"></textarea>
+            <button class="submit-button" type="submit"><span>Save access settings</span><span aria-hidden="true">→</span></button>
+          </section>
+          <section class="settings-panel" id="port-scan-panel" role="tabpanel" aria-labelledby="port-scan-tab" hidden>
+            <h2>Port scan policy</h2>
+            <p class="form-hint">Port scans always require an account, even when the feature is marked Public. Private/local targets are enabled for administrators by default and remain unavailable to users until enabled here. Limits apply to unique TCP ports per target.</p>
+            <div id="port-scan-settings" class="port-scan-settings"></div>
+            <button class="submit-button" type="submit"><span>Save port scan settings</span><span aria-hidden="true">→</span></button>
+          </section>
         </form>
-      </section>
-      <section class="account-card admin-card">
-        <h2>Create user</h2>
-        <form id="create-user-form" class="admin-create-form">
-          <label for="new-username">Username</label>
-          <input id="new-username" name="username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" autocomplete="off" required>
-          <label for="new-password">Temporary password</label>
-          <input id="new-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
-          <label for="new-role">Role</label>
-          <select id="new-role" name="role"><option value="user">User</option><option value="admin">Admin</option></select>
-          <button class="submit-button" type="submit"><span>Create user</span><span aria-hidden="true">→</span></button>
-        </form>
-      </section>
-      <section class="account-card admin-card">
-        <h2>User accounts</h2>
-        <div id="user-list" class="user-list"></div>
+        <section class="settings-panel" id="users-panel" role="tabpanel" aria-labelledby="users-tab" hidden>
+          <h2>Create user</h2>
+          <form id="create-user-form" class="admin-create-form">
+            <label for="new-username">Username</label>
+            <input id="new-username" name="username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" autocomplete="off" required>
+            <label for="new-password">Temporary password</label>
+            <input id="new-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+            <label for="new-role">Role</label>
+            <select id="new-role" name="role"><option value="user">User</option><option value="admin">Admin</option></select>
+            <button class="submit-button" type="submit"><span>Create user</span><span aria-hidden="true">→</span></button>
+          </form>
+          <h2 class="policy-heading">User accounts</h2>
+          <div id="user-list" class="user-list"></div>
+        </section>
       </section>
     </main>
   </body>
