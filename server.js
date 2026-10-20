@@ -68,6 +68,7 @@ const staticFiles = new Set([
   "/admin.js",
   "/admin-logs.js",
   "/admin-stats.js",
+  "/branding.js",
   "/favicon.svg",
   "/logo.svg",
 ]);
@@ -1142,18 +1143,17 @@ function invalidScanRequest(message, statusCode = 400) {
   return error;
 }
 
-async function readJsonRequest(request) {
+async function readJsonRequest(request, maximumBodySize = 65536) {
   if (!/^application\/json(?:\s*;|$)/i.test(request.headers["content-type"] || "")) {
     throw invalidScanRequest("Content-Type must be application/json.", 415);
   }
-  const maximumBodySize = 65536;
   const contentLengthHeader = request.headers["content-length"];
   if (contentLengthHeader !== undefined && !/^\d+$/.test(contentLengthHeader)) {
     throw invalidScanRequest("Content-Length must be a valid non-negative integer.");
   }
   const contentLength = Number(contentLengthHeader || 0);
   if (!Number.isSafeInteger(contentLength) || contentLength > maximumBodySize) {
-    throw invalidScanRequest("Request body must not exceed 64 KB.", 413);
+    throw invalidScanRequest(`Request body must not exceed ${Math.floor(maximumBodySize / 1024)} KB.`, 413);
   }
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -1171,7 +1171,7 @@ async function readJsonRequest(request) {
     request.once("aborted", () => reject(invalidScanRequest("Request body was interrupted.")));
     request.once("end", () => {
       if (tooLarge) {
-        reject(invalidScanRequest("Request body must not exceed 64 KB.", 413));
+        reject(invalidScanRequest(`Request body must not exceed ${Math.floor(maximumBodySize / 1024)} KB.`, 413));
         return;
       }
       try {
@@ -1922,6 +1922,69 @@ function getDefaultResolverId() {
   return customResolverOption.length ? "custom" : "cloudflare";
 }
 
+function getSiteTitle() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'site_title'").get();
+  return row && row.value.trim() ? row.value : "DNSLookup";
+}
+
+function isValidIconDataUrl(value) {
+  const match = typeof value === "string" &&
+    value.match(/^data:(image\/(?:png|jpeg|gif|webp|x-icon|vnd\.microsoft\.icon));base64,([A-Za-z0-9+/]+=*)$/);
+  if (!match || match[2].length > 4 * Math.ceil((256 * 1024) / 3)) return false;
+  const data = Buffer.from(match[2], "base64");
+  if (!data.length || data.length > 256 * 1024 || data.toString("base64") !== match[2]) return false;
+
+  switch (match[1]) {
+    case "image/png":
+      return data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    case "image/jpeg":
+      return data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+    case "image/gif":
+      return ["GIF87a", "GIF89a"].includes(data.toString("ascii", 0, 6));
+    case "image/webp":
+      return data.toString("ascii", 0, 4) === "RIFF" &&
+        data.toString("ascii", 8, 12) === "WEBP";
+    case "image/x-icon":
+    case "image/vnd.microsoft.icon":
+      return data.subarray(0, 4).equals(Buffer.from([0, 0, 1, 0]));
+    default:
+      return false;
+  }
+}
+
+function getSiteIconUrl() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'site_icon'").get();
+  if (!row) return "/favicon.svg";
+  if (isValidIconDataUrl(row.value)) return row.value;
+  try {
+    const iconUrl = new URL(row.value);
+    if (iconUrl.protocol === "https:" && !iconUrl.username && !iconUrl.password) {
+      return iconUrl.href;
+    }
+  } catch {
+    return "/favicon.svg";
+  }
+  return "/favicon.svg";
+}
+
+function getSiteBranding() {
+  return { title: getSiteTitle(), iconUrl: getSiteIconUrl() };
+}
+
+function validateSiteIconUrl(value) {
+  if (typeof value !== "string" || value.length > 2048 || /[\u0000-\u0020\u007f]/.test(value)) {
+    return null;
+  }
+  try {
+    const iconUrl = new URL(value);
+    return iconUrl.protocol === "https:" && !iconUrl.username && !iconUrl.password
+      ? iconUrl.href
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function getDnsResolver() {
   const id = getDefaultResolverId();
   if (id === "custom") {
@@ -2044,9 +2107,9 @@ async function hashPassword(password, salt = crypto.randomBytes(16).toString("he
   return { salt, hash: hash.toString("hex") };
 }
 
-async function readAuthBody(request, response) {
+async function readAuthBody(request, response, maximumBodySize = 65536) {
   try {
-    return await readJsonRequest(request);
+    return await readJsonRequest(request, maximumBodySize);
   } catch (error) {
     sendJson(response, error.statusCode || 400, { error: error.message });
     return null;
@@ -2214,6 +2277,7 @@ function handleAdminSettings(request, response) {
       defaultDnsResolver: getDefaultResolverId(),
       dnsResolvers: getDnsResolverOptions(),
       trustedProxies: trustedProxyEntries.join("\n"),
+      branding: getSiteBranding(),
     });
     return;
   }
@@ -2222,19 +2286,44 @@ function handleAdminSettings(request, response) {
     return;
   }
   if (!enforceSameOrigin(request, response)) return;
-  void readAuthBody(request, response).then((body) => {
+  void readAuthBody(request, response, 384 * 1024).then((body) => {
     if (!body) return;
-    const access = body.featureAccess;
-    const portScanPolicy = body.portScanPolicy;
+    const access = Object.hasOwn(body, "featureAccess") ? body.featureAccess : getFeatureAccess();
+    const portScanPolicy = Object.hasOwn(body, "portScanPolicy")
+      ? body.portScanPolicy
+      : getPortScanPolicy();
     const defaultDnsResolver = Object.hasOwn(body, "defaultDnsResolver")
       ? body.defaultDnsResolver
       : getDefaultResolverId();
+    const siteTitle = Object.hasOwn(body, "siteTitle") ? body.siteTitle : getSiteTitle();
     let trustedProxyConfig = { entries: trustedProxyEntries, ranges: trustedProxyRanges };
     if (Object.hasOwn(body, "trustedProxies")) {
       try {
         trustedProxyConfig = parseTrustedProxyEntries(body.trustedProxies);
       } catch (error) {
         sendJson(response, 400, { error: error.message });
+        return;
+      }
+    }
+    let siteIconUrl;
+    if (body.resetSiteIcon === true) {
+      if (Object.hasOwn(body, "siteIconUrl") || Object.hasOwn(body, "siteIconUpload")) {
+        sendJson(response, 400, { error: "Choose either the default icon or a custom icon." });
+        return;
+      }
+      siteIconUrl = "/favicon.svg";
+    } else if (Object.hasOwn(body, "siteIconUpload")) {
+      if (Object.hasOwn(body, "siteIconUrl") ||
+        typeof body.siteIconUpload !== "string" ||
+        !isValidIconDataUrl(body.siteIconUpload)) {
+        sendJson(response, 400, { error: "Upload a valid PNG, JPEG, GIF, WebP, or ICO image no larger than 256 KB." });
+        return;
+      }
+      siteIconUrl = body.siteIconUpload;
+    } else if (Object.hasOwn(body, "siteIconUrl")) {
+      siteIconUrl = validateSiteIconUrl(body.siteIconUrl);
+      if (!siteIconUrl) {
+        sendJson(response, 400, { error: "Site icon URL must be a valid HTTPS URL without credentials." });
         return;
       }
     }
@@ -2252,30 +2341,43 @@ function handleAdminSettings(request, response) {
         typeof portScanPolicy.localScanByRole[role] === "boolean",
       ) ||
       (!Object.hasOwn(dnsResolvers, defaultDnsResolver) &&
-        !(defaultDnsResolver === "custom" && customDohEndpoint))) {
+        !(defaultDnsResolver === "custom" && customDohEndpoint)) ||
+      typeof siteTitle !== "string" || siteTitle !== siteTitle.trim() ||
+      siteTitle.length < 1 || siteTitle.length > 60 ||
+      /[\u0000-\u001f\u007f-\u009f]/.test(siteTitle)) {
       sendJson(response, 400, {
-        error: "Choose a valid resolver and an access level for every feature; set each role's port limit from 1 to 65,535 with a local-scan permission.",
+        error: "Choose a valid site title and resolver, an access level for every feature, and each role's port limit from 1 to 65,535 with a local-scan permission.",
       });
       return;
     }
     database.exec("BEGIN IMMEDIATE");
     try {
-      database.prepare(`
-        INSERT INTO app_settings (key, value) VALUES ('feature_access', ?)
+      const saveSetting = database.prepare(`
+        INSERT INTO app_settings (key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run(JSON.stringify(access));
-      database.prepare(`
-        INSERT INTO app_settings (key, value) VALUES ('port_scan_policy', ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run(JSON.stringify(portScanPolicy));
-      database.prepare(`
-        INSERT INTO app_settings (key, value) VALUES ('default_dns_resolver', ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run(defaultDnsResolver);
-      database.prepare(`
-        INSERT INTO app_settings (key, value) VALUES ('trusted_proxies', ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `).run(JSON.stringify(trustedProxyConfig.entries));
+      `);
+      if (Object.hasOwn(body, "featureAccess")) {
+        saveSetting.run("feature_access", JSON.stringify(access));
+      }
+      if (Object.hasOwn(body, "portScanPolicy")) {
+        saveSetting.run("port_scan_policy", JSON.stringify(portScanPolicy));
+      }
+      if (Object.hasOwn(body, "defaultDnsResolver")) {
+        saveSetting.run("default_dns_resolver", defaultDnsResolver);
+      }
+      if (Object.hasOwn(body, "trustedProxies")) {
+        saveSetting.run("trusted_proxies", JSON.stringify(trustedProxyConfig.entries));
+      }
+      if (Object.hasOwn(body, "siteTitle")) {
+        saveSetting.run("site_title", siteTitle);
+      }
+      if (siteIconUrl !== undefined) {
+        if (siteIconUrl === "/favicon.svg") {
+          database.prepare("DELETE FROM app_settings WHERE key = 'site_icon'").run();
+        } else {
+          saveSetting.run("site_icon", siteIconUrl);
+        }
+      }
       database.exec("COMMIT");
     } catch (error) {
       database.exec("ROLLBACK");
@@ -2287,7 +2389,7 @@ function handleAdminSettings(request, response) {
       "audit",
       request,
       "Settings updated",
-      "Feature access, port scan policy, DNS resolver, and trusted proxies updated.",
+      "Site branding, feature access, port scan policy, DNS resolver, and trusted proxies updated.",
       200,
       admin.username,
     );
@@ -2296,10 +2398,11 @@ function handleAdminSettings(request, response) {
       portScanPolicy,
       defaultDnsResolver,
       trustedProxies: trustedProxyEntries.join("\n"),
+      branding: getSiteBranding(),
     });
   }).catch((error) => {
-    console.error("Feature access settings update failed:", error);
-    sendJson(response, 500, { error: "Unable to save feature access settings." });
+    console.error("Application settings update failed:", error);
+    sendJson(response, 500, { error: "Unable to save application settings." });
   });
 }
 
@@ -2796,7 +2899,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "object-src 'none'",
     "script-src 'self'",
     "style-src 'self'",
-    "img-src 'self' data:",
+    "img-src 'self' data: https:",
     "connect-src 'self'",
   ].join("; "));
   response.setHeader("x-frame-options", "DENY");
@@ -2863,6 +2966,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     handleAuthStatus(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/branding") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    sendJson(response, 200, getSiteBranding());
     return;
   }
 

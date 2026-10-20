@@ -43,6 +43,9 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Configure the default DNS-over-HTTPS resolver, trusted reverse proxies, and
   role-specific port-scan limits and local-network permissions in the admin
   panel.
+- Customize the site title and browser/header icon from the administrator
+  settings. Icons can be uploaded as PNG, JPEG, GIF, WebP, or ICO (up to
+  256 KB), or loaded from an HTTPS URL.
 - Apply daily per-IP limits to public lookups and use secure, expiring
   authenticated sessions.
 - Run as a small Docker container, with no application dependencies to install.

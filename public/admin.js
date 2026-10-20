@@ -5,6 +5,52 @@ const dnsResolverSetting = document.querySelector("#dns-resolver-setting");
 const trustedProxySetting = document.querySelector("#trusted-proxies");
 const portScanSettings = document.querySelector("#port-scan-settings");
 const userList = document.querySelector("#user-list");
+const settingsTabs = [...document.querySelectorAll(".settings-tab")];
+const siteTitleSetting = document.querySelector("#site-title");
+const siteIconUrlSetting = document.querySelector("#site-icon-url");
+const siteIconUploadSetting = document.querySelector("#site-icon-upload");
+const resetSiteIconSetting = document.querySelector("#reset-site-icon");
+const brandingPreview = document.querySelector("#branding-preview");
+
+function setSettingsTab(tab) {
+  settingsTabs.forEach((item) => {
+    const selected = item === tab;
+    item.classList.toggle("active", selected);
+    item.setAttribute("aria-selected", String(selected));
+    item.tabIndex = selected ? 0 : -1;
+    document.querySelector(`#${item.getAttribute("aria-controls")}`).hidden = !selected;
+  });
+}
+
+function renderBrandingPreview(iconUrl, note = "") {
+  brandingPreview.replaceChildren();
+  if (iconUrl) {
+    const image = document.createElement("img");
+    image.src = iconUrl;
+    image.alt = "Current site icon preview";
+    image.width = 40;
+    image.height = 40;
+    brandingPreview.append(image);
+  }
+  const caption = document.createElement("span");
+  caption.textContent = note || (iconUrl ? "Current site icon" : "Using the default icon");
+  brandingPreview.append(caption);
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("The selected icon could not be read."));
+        return;
+      }
+      resolve(reader.result);
+    });
+    reader.addEventListener("error", () => reject(new Error("The selected icon could not be read.")));
+    reader.readAsDataURL(file);
+  });
+}
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({
@@ -137,6 +183,15 @@ async function initializeAdmin() {
     renderDnsResolverSetting(settings.dnsResolvers, settings.defaultDnsResolver);
     trustedProxySetting.value = settings.trustedProxies;
     renderPortScanSettings(settings.portScanPolicy);
+    siteTitleSetting.value = settings.branding.title;
+    const customIcon = settings.branding.iconUrl !== "/favicon.svg";
+    if (customIcon && !settings.branding.iconUrl.startsWith("data:image/")) {
+      siteIconUrlSetting.value = settings.branding.iconUrl;
+    }
+    renderBrandingPreview(
+      customIcon ? settings.branding.iconUrl : "/favicon.svg",
+      customIcon ? "Current custom site icon" : "Using the default icon",
+    );
     renderUsers(users.users);
   } catch (error) {
     if (!errorPanel.hidden) return;
@@ -146,29 +201,120 @@ async function initializeAdmin() {
 
 document.querySelector("#settings-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const featureAccess = Object.fromEntries(
-    [...featureSettings.querySelectorAll("select")].map((select) => [select.name, select.value]),
-  );
-  const defaultDnsResolver = dnsResolverSetting.querySelector("select").value;
-  const trustedProxies = trustedProxySetting.value;
-  const portScanPolicy = {
-    maxPortsByRole: Object.fromEntries(["admin", "user"].map((role) => [
-      role,
-      Number(portScanSettings.querySelector(`[name="maxPorts-${role}"]`).value),
-    ])),
-    localScanByRole: Object.fromEntries(["admin", "user"].map((role) => [
-      role,
-      portScanSettings.querySelector(`[name="localScan-${role}"]`).checked,
-    ])),
-  };
   try {
+    const activeTab = settingsTabs.find((tab) => tab.getAttribute("aria-selected") === "true");
+    const activePanel = activeTab?.getAttribute("aria-controls");
+    const settings = {};
+    let iconFile = null;
+    let siteIconUrl = "";
+    if (activePanel === "general-panel") {
+      iconFile = siteIconUploadSetting.files[0];
+      if (iconFile && iconFile.size > 256 * 1024) {
+        throw new Error("Choose an icon image no larger than 256 KB.");
+      }
+      siteIconUrl = siteIconUrlSetting.value.trim();
+      if (iconFile && siteIconUrl) {
+        throw new Error("Choose an icon URL or upload an icon, not both.");
+      }
+      settings.siteTitle = siteTitleSetting.value.trim();
+      settings.defaultDnsResolver = dnsResolverSetting.querySelector("select").value;
+      if (resetSiteIconSetting.checked) {
+        settings.resetSiteIcon = true;
+      } else if (iconFile) {
+        settings.siteIconUpload = await readFileAsDataUrl(iconFile);
+      } else if (siteIconUrl) {
+        settings.siteIconUrl = siteIconUrl;
+      }
+    } else if (activePanel === "access-panel") {
+      settings.featureAccess = Object.fromEntries(
+        [...featureSettings.querySelectorAll("select")].map((select) => [select.name, select.value]),
+      );
+      settings.trustedProxies = trustedProxySetting.value;
+    } else if (activePanel === "port-scan-panel") {
+      settings.portScanPolicy = {
+        maxPortsByRole: Object.fromEntries(["admin", "user"].map((role) => [
+          role,
+          Number(portScanSettings.querySelector(`[name="maxPorts-${role}"]`).value),
+        ])),
+        localScanByRole: Object.fromEntries(["admin", "user"].map((role) => [
+          role,
+          portScanSettings.querySelector(`[name="localScan-${role}"]`).checked,
+        ])),
+      };
+    } else {
+      throw new Error("Select a settings category first.");
+    }
     await api("/api/admin/settings", {
       method: "PUT",
-      body: JSON.stringify({ featureAccess, portScanPolicy, defaultDnsResolver, trustedProxies }),
+      body: JSON.stringify(settings),
     });
-    showAdminSuccess("Feature access, DNS resolver, trusted proxies, and port scan settings saved.");
+    if (activePanel === "general-panel") {
+      await window.applySiteBranding();
+      if (resetSiteIconSetting.checked) {
+        siteIconUrlSetting.value = "";
+        siteIconUploadSetting.value = "";
+        resetSiteIconSetting.checked = false;
+        renderBrandingPreview("/favicon.svg", "Using the default icon");
+      } else if (iconFile) {
+        siteIconUrlSetting.value = "";
+        siteIconUploadSetting.value = "";
+        renderBrandingPreview(await readFileAsDataUrl(iconFile), "Uploaded site icon");
+      } else if (siteIconUrl) {
+        renderBrandingPreview(siteIconUrl, "Current custom site icon");
+      }
+    }
+    showAdminSuccess(`${activeTab.textContent.trim()} settings saved.`);
   } catch (error) {
     showAdminError(error.message);
+  }
+});
+
+settingsTabs.forEach((tab, index) => {
+  tab.addEventListener("click", () => setSettingsTab(tab));
+  tab.addEventListener("keydown", (event) => {
+    const nextIndex = event.key === "ArrowRight"
+      ? (index + 1) % settingsTabs.length
+      : event.key === "ArrowLeft"
+        ? (index + settingsTabs.length - 1) % settingsTabs.length
+        : event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? settingsTabs.length - 1
+            : -1;
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    const nextTab = settingsTabs[nextIndex];
+    setSettingsTab(nextTab);
+    nextTab.focus();
+  });
+});
+
+siteIconUrlSetting.addEventListener("input", () => {
+  if (siteIconUrlSetting.value) {
+    siteIconUploadSetting.value = "";
+    resetSiteIconSetting.checked = false;
+  }
+});
+
+siteIconUploadSetting.addEventListener("change", () => {
+  const file = siteIconUploadSetting.files[0];
+  if (!file) return;
+  siteIconUrlSetting.value = "";
+  resetSiteIconSetting.checked = false;
+  if (file.size > 256 * 1024) {
+    showAdminError("Choose an icon image no larger than 256 KB.");
+    return;
+  }
+  const previewUrl = URL.createObjectURL(file);
+  renderBrandingPreview(previewUrl, file.name);
+  brandingPreview.querySelector("img").addEventListener("load", () => URL.revokeObjectURL(previewUrl), { once: true });
+});
+
+resetSiteIconSetting.addEventListener("change", () => {
+  if (resetSiteIconSetting.checked) {
+    siteIconUrlSetting.value = "";
+    siteIconUploadSetting.value = "";
+    renderBrandingPreview("");
   }
 });
 
