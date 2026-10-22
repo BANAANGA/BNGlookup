@@ -464,7 +464,9 @@ CIDR block (max 256 addresses) and see which hosts are up. **Traceroute** shows
 the router path to a host (up to 20 hops, 45 s limit), and **Multi traceroute**
 traces up to 10 targets at once and adds a hop-by-hop route comparison table.
 Traceroute uses `tracepath` (UDP probes, installed in the image as
-`iputils-tracepath`), so it needs no extra privileges; routers that do not
-answer appear as "no reply". Default access: Ping scan and Multi traceroute are
+`iputils-tracepath`, with `coreutils` for line-buffered output), so it needs no extra privileges; routers that do not
+answer appear as "no reply". Results stream live: hops appear in the
+interface as each router answers (the API also supports `stream=1` / `"stream": true`
+for newline-delimited JSON events). Default access: Ping scan and Multi traceroute are
 admin-only, Traceroute is user-level; change this under the admin access settings. Private
 and reserved addresses follow the same local-network policy as port scans.

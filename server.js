@@ -1,6 +1,6 @@
 const http = require("node:http");
 const https = require("node:https");
-const { execFile } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { isIP } = require("node:net");
@@ -3187,7 +3187,7 @@ async function resolveCheckTarget(rawTarget, allowLocal) {
 
 const maxTraceHops = 20;
 
-function parseTracepath(output, destination) {
+function parseTracepath(output, destination, trim = true) {
   const hops = new Map();
   let reached = false;
   for (const line of String(output || "").split("\n")) {
@@ -3212,26 +3212,89 @@ function parseTracepath(output, destination) {
     if (address === destination) reached = true;
   }
   const sorted = [...hops.values()].sort((left, right) => left.hop - right.hop);
-  while (sorted.length && !sorted.at(-1).address) sorted.pop();
+  while (trim && sorted.length && !sorted.at(-1).address) sorted.pop();
   return { hops: sorted, reached };
 }
 
-function runTraceroute(address) {
+function runTraceroute(address, { onUpdate, signal } = {}) {
   const args = ["-n", "-m", String(maxTraceHops), isIP(address) === 6 ? "-6" : "-4", address];
   return new Promise((resolve) => {
-    execFile("tracepath", args, { timeout: 45000, maxBuffer: 65536 }, (error, stdout) => {
-      if (error && error.code === "ENOENT") {
+    let output = "";
+    let timedOut = false;
+    let spawnFailed = false;
+    let child;
+    const start = (command, commandArgs) => {
+      child = spawn(command, commandArgs, { stdio: ["ignore", "pipe", "ignore"] });
+      child.stdout.on("data", (chunk) => {
+        if (output.length < 65536) output += chunk;
+        if (onUpdate) onUpdate(parseTracepath(output, address, false));
+      });
+      child.on("error", (error) => {
+        if (error.code === "ENOENT" && command === "stdbuf") {
+          start("tracepath", args);
+          return;
+        }
+        spawnFailed = error.code === "ENOENT" ? "missing" : "failed";
+        finish(null);
+      });
+      child.on("close", (code) => finish(code));
+    };
+    let finished = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child?.kill();
+    }, 45000);
+    const finish = (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (spawnFailed === "missing") {
         resolve({ error: "Traceroute is not available on this server." });
         return;
       }
-      const parsed = parseTracepath(stdout, address);
-      if (!parsed.hops.length && error) {
+      const parsed = parseTracepath(output, address);
+      if (!parsed.hops.length && (spawnFailed || code)) {
         resolve({ error: "The traceroute could not be run. The server may lack permission or network access." });
         return;
       }
-      resolve({ ...parsed, partial: Boolean(error && error.killed) });
-    });
+      resolve({ ...parsed, partial: timedOut });
+    };
+    signal?.addEventListener("abort", () => child?.kill());
+    start("stdbuf", ["-oL", "tracepath", ...args]);
   });
+}
+
+function startNdjson(request, response) {
+  response.writeHead(200, {
+    "content-type": "application/x-ndjson; charset=utf-8",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "x-accel-buffering": "no",
+  });
+  const controller = new AbortController();
+  response.on("close", () => controller.abort());
+  const send = (event) => {
+    if (!response.writableEnded && !response.destroyed) response.write(`${JSON.stringify(event)}\n`);
+  };
+  return { send, signal: controller.signal };
+}
+
+async function streamTrace(stream, index, targetInput, allowLocal) {
+  try {
+    const resolved = await resolveCheckTarget(targetInput, allowLocal);
+    if (resolved.error) {
+      stream.send({ type: "done", index, target: resolved.target, hops: [], reached: false, error: resolved.error });
+      return;
+    }
+    stream.send({ type: "start", index, target: resolved.target, address: resolved.address });
+    const result = await runTraceroute(resolved.address, {
+      signal: stream.signal,
+      onUpdate: (update) => stream.send({ type: "hops", index, hops: update.hops, reached: update.reached }),
+    });
+    stream.send({ type: "done", index, target: resolved.target, address: resolved.address, hops: [], reached: false, ...result });
+  } catch (error) {
+    stream.send({ type: "done", index, target: String(targetInput).slice(0, 80), hops: [], reached: false, error: error.message });
+  }
 }
 
 async function tracerouteHost(request, url, response) {
@@ -3240,6 +3303,12 @@ async function tracerouteHost(request, url, response) {
   try {
     const user = currentUser(request);
     const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+    if (url.searchParams.get("stream") === "1") {
+      const stream = startNdjson(request, response);
+      await streamTrace(stream, 0, rawName, allowLocal);
+      response.end();
+      return;
+    }
     const resolved = await resolveCheckTarget(rawName, allowLocal);
     if (resolved.error) {
       sendJson(response, 200, { target: resolved.target, hops: [], reached: false, error: resolved.error });
@@ -3268,6 +3337,19 @@ async function runMultiTraceroute(request, response) {
     if (targets.length > 10) throw invalidScanRequest("Enter no more than 10 targets.");
     const allowLocal = getPortScanPolicy().localScanByRole[user.role];
     request.logDetails = JSON.stringify({ targets });
+    if (body.stream === true) {
+      const stream = startNdjson(request, response);
+      let nextStream = 0;
+      await Promise.all(Array.from({ length: Math.min(4, targets.length) }, async () => {
+        while (nextStream < targets.length) {
+          const index = nextStream;
+          nextStream += 1;
+          await streamTrace(stream, index, targets[index], allowLocal);
+        }
+      }));
+      response.end();
+      return;
+    }
     const results = new Array(targets.length);
     let next = 0;
     await Promise.all(Array.from({ length: Math.min(4, targets.length) }, async () => {

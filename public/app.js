@@ -809,7 +809,9 @@ function renderTraceTable(result) {
         <h3>${copyableResult(result.target)}${result.address && result.address !== result.target ? ` ${copyableResult(result.address, "port-target-address")}` : ""}</h3>
         ${result.error
     ? ""
-    : `<span class="status-badge ${result.reached ? "success" : "warning"}">${result.reached ? "Destination reached" : "Destination not reached"}</span>`}
+    : result.running
+      ? `<span class="status-badge live">${result.address ? "Tracing…" : "Queued"}</span>`
+      : `<span class="status-badge ${result.reached ? "success" : "warning"}">${result.reached ? "Destination reached" : "Destination not reached"}</span>`}
       </div>
       ${result.error ? `<p class="detail-notice">${escapeHtml(result.error)}</p>` : ""}
       ${rows ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
@@ -841,17 +843,81 @@ function renderTraceComparison(results) {
 
 function renderTracerouteResult(data, multiple) {
   const reached = data.results.filter((result) => result.reached).length;
+  const running = data.results.some((result) => result.running);
   resultPanel.innerHTML = `
     <div class="result-heading">
       <div><p class="eyebrow">${multiple ? "MULTI TRACEROUTE" : "TRACEROUTE"}</p><h2>${multiple
-    ? escapeHtml(`${data.results.length} target(s) traced`)
+    ? escapeHtml(`${data.results.length} target(s) ${running ? "being traced" : "traced"}`)
     : copyableResult(data.results[0].target)}</h2></div>
-      <span class="status-badge ${reached ? "success" : "warning"}">${escapeHtml(multiple ? `${reached} reached` : reached ? "Destination reached" : "Not reached")}</span>
+      <span class="status-badge ${running ? "live" : reached ? "success" : "warning"}">${escapeHtml(running ? "Live" : multiple ? `${reached} reached` : reached ? "Destination reached" : "Not reached")}</span>
     </div>
     ${multiple ? renderTraceComparison(data.results) : ""}
     ${data.results.map(renderTraceTable).join("")}
     <p class="scan-disclaimer">Routers that do not answer probes appear as no reply. Paths are traced with UDP probes (tracepath), up to 20 hops.</p>`;
   resultPanel.hidden = false;
+}
+
+async function streamTraceroute(multiple) {
+  const rawTargets = multiple ? multiTraceInput.value : input.value;
+  const targets = [...new Set(rawTargets.split(multiple ? /[\s,;]+/ : /\n/).map((item) => item.trim()).filter(Boolean))].slice(0, multiple ? 10 : 1);
+  const results = targets.map((target) => ({ target, hops: [], reached: false, running: true }));
+  const response = multiple
+    ? await fetch("/api/multi-traceroute", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targets: rawTargets, stream: true }),
+    })
+    : await fetch(`/api/traceroute?${new URLSearchParams({ name: input.value.trim(), stream: "1" })}`);
+  if (response.status === 401) {
+    const next = `${window.location.pathname}${window.location.search}`;
+    window.location.assign(`/login.html?next=${encodeURIComponent(next)}`);
+    return;
+  }
+  if (!response.ok || !response.body) {
+    const data = await readApiResponse(response);
+    throw new Error(data.error || "Traceroute failed.");
+  }
+  if (!results.length) results.push({ target: input.value.trim(), hops: [], reached: false, running: true });
+  let frame = 0;
+  const draw = () => {
+    frame = 0;
+    renderTracerouteResult({ results }, multiple);
+  };
+  const apply = (event) => {
+    const entry = results[event.index] || (results[event.index] = { target: event.target || "", hops: [], reached: false, running: true });
+    if (event.target) entry.target = event.target;
+    if (event.address) entry.address = event.address;
+    if (event.type === "hops") {
+      entry.hops = event.hops;
+      entry.reached = event.reached;
+    } else if (event.type === "done") {
+      Object.assign(entry, event, { running: false });
+      if (!event.error && !event.hops.length) entry.hops = [];
+    }
+  };
+  draw();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffered += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffered.split("\n");
+    buffered = done ? "" : lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        apply(JSON.parse(line));
+      } catch {
+        continue;
+      }
+    }
+    if (!frame) frame = requestAnimationFrame(draw);
+    if (done) break;
+  }
+  results.forEach((entry) => { entry.running = false; });
+  cancelAnimationFrame(frame);
+  draw();
 }
 
 function renderMacResult(data) {
@@ -1263,6 +1329,10 @@ form.addEventListener("submit", async (event) => {
   }
 
   try {
+    if (requestMode === "traceroute" || multiTraceroute) {
+      await streamTraceroute(multiTraceroute);
+      return;
+    }
     const endpoint = customPortScan
       ? "/api/custom-port-scan"
       : bulkPortScan

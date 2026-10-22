@@ -992,3 +992,6 @@ body {
 .trace-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
 .trace-heading h3 { margin: 0; }
 .trace-silent { color: #7c7c7c; }
+.status-badge.live { background: #e8f1ff; color: #1d4ed8; border-color: transparent; animation: trace-pulse 1.2s ease-in-out infinite; }
+@keyframes trace-pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .status-badge.live { animation: none; } }
