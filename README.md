@@ -150,11 +150,43 @@ sudo docker compose logs -f
 Use either 3a or 3b, not both. Option 3b publishes host port 80 to the app
 (HTTP, and the ACME challenge) and host port 443 to the app's HTTPS listener
 (port 8443 in the container). Port 443 only answers after a certificate has been
-issued; see [SSL certificate (ACME)](#ssl-certificate-acme). To update later:
+issued; see [SSL certificate (ACME)](#ssl-certificate-acme).
+
+#### Update to a new version
+
+Your accounts, settings, logs, and certificates live in the `app_data` Docker
+volume, so they are kept when you update. Run from the `BNGlookup` directory,
+using the same compose files you started with:
 
 ```sh
-cd BNGlookup && git pull
-sudo docker compose -f compose.yaml -f compose.acme.yaml up --build -d
+cd ~/BNGlookup
+
+# Optional: back up the data volume first
+sudo docker run --rm -v bnglookup_app_data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/bnglookup-data-$(date +%F).tar.gz -C /data .
+
+# Fetch the latest code and rebuild
+git pull
+sudo docker compose -f compose.yaml -f compose.acme.yaml up --build -d   # or without -f if not using ports 80/443
+
+# Remove old, unused images and confirm the new version is running
+sudo docker image prune -f
+sudo docker compose ps
+sudo docker compose logs --tail 50
+```
+
+The volume name is `<project folder>_app_data` (lowercase), for example
+`bnglookup_app_data`; check it with `sudo docker volume ls`. To pin a specific
+release, run `git fetch --tags && git checkout v1.1` before rebuilding, and
+`git checkout main && git pull` to return to the latest code. To roll back, check
+out the previous tag or commit and rebuild.
+
+Other useful commands:
+
+```sh
+sudo docker compose restart        # restart without rebuilding
+sudo docker compose down           # stop and remove the container (keeps data)
+sudo docker compose down -v        # stop AND delete all data (irreversible)
 ```
 
 Ports 80 and 443 must be free on the host (stop any web server using them), and
