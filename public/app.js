@@ -75,11 +75,13 @@ async function loadClientInfo() {
         ? data.ptr.join(", ")
         : data.ptrError || "No PTR record"
       : "PTR lookup is available for public IP addresses only.";
-    clientWhois.textContent = data.isPublic
-      ? formatIpRegistrationSummary(data.ipRegistration) ||
-        data.ipRegistrationError ||
-        "No IP registration details were returned."
-      : "IP registration lookup is available for public IP addresses only.";
+    if (data.isPublic && data.ipRegistration) {
+      clientWhois.replaceChildren(buildIpRegistrationTable(data.ipRegistration));
+    } else {
+      clientWhois.textContent = data.isPublic
+        ? data.ipRegistrationError || "No IP registration details were returned."
+        : "IP registration lookup is available for public IP addresses only.";
+    }
     if (data.isPublic) {
       clientPtr.classList.add("copy-result");
       clientPtr.dataset.copyValue = data.ptr?.length
@@ -805,17 +807,42 @@ function renderDomainInfo(data) {
   resultPanel.hidden = false;
 }
 
-function formatIpRegistrationSummary(registration) {
-  if (!registration) return "";
-  return [
-    registration.name,
-    registration.handle,
-    registration.asNumbers?.length ? `AS ${registration.asNumbers.join(", ")}` : "",
-    registration.asnError ? `AS lookup: ${registration.asnError}` : "",
-    registration.cidrs?.length ? `CIDR ${registration.cidrs.join(", ")}` : "",
-    formatIpAddressRange(registration),
-    registration.country,
-  ].filter(Boolean).join(" · ");
+function buildIpRegistrationTable(registration) {
+  const rows = [
+    ["Network", registration.name],
+    ["Handle", registration.handle],
+    ["AS number", registration.asNumbers?.length ? registration.asNumbers.map((asn) => `AS ${String(asn).replace(/^AS/i, "")}`).join(", ") : ""],
+    ["Subnet / CIDR", registration.cidrs?.join(", ")],
+    ["Address range", formatIpAddressRange(registration)],
+    ["Country", registration.country],
+    ["Network type", registration.type],
+  ].filter(([, value]) => value);
+  const table = document.createElement("table");
+  table.className = "client-whois-table";
+  const body = table.createTBody();
+  for (const [label, value] of rows) {
+    const row = body.insertRow();
+    const th = document.createElement("th");
+    th.scope = "row";
+    th.textContent = label;
+    row.append(th);
+    const cell = row.insertCell();
+    cell.textContent = value;
+    cell.className = "copy-result";
+    cell.dataset.copyValue = value;
+    cell.setAttribute("role", "button");
+    cell.tabIndex = 0;
+    cell.title = "Click to copy";
+  }
+  if (registration.asnError && !registration.asNumbers?.length) {
+    const row = body.insertRow();
+    const th = document.createElement("th");
+    th.scope = "row";
+    th.textContent = "AS number";
+    row.append(th);
+    row.insertCell().textContent = `Unavailable (${registration.asnError})`;
+  }
+  return table;
 }
 
 function formatIpAddressRange(registration) {
