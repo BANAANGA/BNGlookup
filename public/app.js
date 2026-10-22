@@ -15,6 +15,9 @@ const bulkTargetsControl = document.querySelector("#bulk-targets-control");
 const bulkTargetsInput = document.querySelector("#bulk-targets-input");
 const bulkPortControl = document.querySelector("#bulk-port-control");
 const bulkPortInput = document.querySelector("#bulk-port-input");
+const multiTraceControl = document.querySelector("#multi-trace-control");
+const multiTraceInput = document.querySelector("#multi-trace-input");
+const bulkTargetsHint = document.querySelector("#bulk-targets-hint");
 const pingMethodControl = document.querySelector("#ping-method-control");
 const pingMethodInput = document.querySelector("#ping-method-input");
 const resultPanel = document.querySelector("#result");
@@ -104,6 +107,20 @@ async function loadClientInfo() {
   }
 }
 
+function submitLabel(currentMode) {
+  return {
+    auto: "Auto lookup",
+    scan: "Magic scan",
+    "custom-port": "Port scan",
+    "bulk-port": "Bulk port scan",
+    mac: "Lookup MAC",
+    ping: "Ping host",
+    "ping-scan": "Run ping scan",
+    traceroute: "Trace route",
+    "multi-traceroute": "Trace routes",
+  }[currentMode] || "Lookup";
+}
+
 function setMode(nextMode) {
   mode = nextMode;
   const automatic = mode === "auto";
@@ -114,7 +131,11 @@ function setMode(nextMode) {
   const scan = mode === "scan";
   const customPortScan = mode === "custom-port";
   const bulkPortScan = mode === "bulk-port";
+  const pingScan = mode === "ping-scan";
+  const traceroute = mode === "traceroute";
+  const multiTraceroute = mode === "multi-traceroute";
   const portScan = customPortScan || bulkPortScan;
+  const listMode = bulkPortScan || pingScan || multiTraceroute;
   const isAdmin = authState?.user?.role === "admin";
   const supportsNameserver = isAdmin && ["forward", "reverse", "scan"].includes(mode);
   tabs.forEach((tab) => {
@@ -122,9 +143,9 @@ function setMode(nextMode) {
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", String(selected));
   });
-  nameLabel.hidden = bulkPortScan;
-  primaryInputWrap.hidden = bulkPortScan;
-  input.required = !bulkPortScan;
+  nameLabel.hidden = listMode;
+  primaryInputWrap.hidden = listMode;
+  input.required = !listMode;
   nameLabel.textContent = automatic
     ? "Search"
     : reverse ? "IP address" : mac ? "MAC address" : "Domain name or IP address";
@@ -132,7 +153,7 @@ function setMode(nextMode) {
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
       ? "e.g. 00:1A:2B:3C:4D:5E"
-    : details || ping
+    : details || ping || traceroute
       ? "e.g. example.com or 8.8.8.8"
     : automatic
       ? "Domain, IP address, or MAC address"
@@ -140,17 +161,22 @@ function setMode(nextMode) {
       ? "e.g. example.com or 8.8.8.8"
       : "e.g. example.com";
   input.autocomplete = reverse || mac || portScan ? "off" : "url";
-  typeControl.hidden = automatic || reverse || details || mac || ping || scan || portScan;
-  customType.hidden = automatic || reverse || details || mac || ping || scan || portScan || recordType.value !== "custom";
+  typeControl.hidden = automatic || reverse || details || mac || ping || traceroute || listMode || scan || portScan;
+  customType.hidden = automatic || reverse || details || mac || ping || traceroute || listMode || scan || portScan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
   if (!isAdmin) nameserverInput.value = "";
   pingMethodControl.hidden = !ping;
   portScanControl.hidden = !scan || !authState?.user;
   customPortsControl.hidden = !customPortScan;
-  bulkTargetsControl.hidden = !bulkPortScan;
+  bulkTargetsControl.hidden = !(bulkPortScan || pingScan);
   bulkPortControl.hidden = !bulkPortScan;
+  multiTraceControl.hidden = !multiTraceroute;
+  bulkTargetsHint.textContent = pingScan
+    ? "Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses."
+    : "Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses.";
   customPortsInput.required = customPortScan;
-  bulkTargetsInput.required = bulkPortScan;
+  bulkTargetsInput.required = bulkPortScan || pingScan;
+  multiTraceInput.required = multiTraceroute;
   bulkPortInput.required = bulkPortScan;
   autoDetectHint.hidden = !automatic;
   formHint.hidden = automatic;
@@ -170,8 +196,14 @@ function setMode(nextMode) {
         ? "Scan a custom list or range of TCP ports on one domain or IP address."
       : bulkPortScan
         ? "Check one TCP port across an explicit list or CIDR block of IP addresses."
+      : pingScan
+        ? "Send a single ICMP echo request to every address in a list or CIDR block to find which hosts are up."
+      : traceroute
+        ? "Show the network path (each router hop and its response time) to a host."
+      : multiTraceroute
+        ? "Trace the path to several hosts at once and compare the routes."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
-  submitButton.innerHTML = `<span>${automatic ? "Auto lookup" : scan ? "Magic scan" : customPortScan ? "Port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : ping ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+  submitButton.innerHTML = `<span>${submitLabel(mode)}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   if (automatic) updateAutoDetectHint();
@@ -197,7 +229,7 @@ async function initializeAccount() {
     tabs.filter((tab) => tab !== autoTab).forEach((tab) => {
       const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
       const access = authState.featureAccess[feature] || "user";
-      const portScanRequiresUser = ["custom-port", "bulk-port"].includes(tab.dataset.mode);
+      const portScanRequiresUser = ["custom-port", "bulk-port", "ping-scan", "multi-traceroute"].includes(tab.dataset.mode);
       const canUse = Boolean(authState.user) &&
         (access !== "admin" || authState.user.role === "admin") ||
         access === "public" && !portScanRequiresUser;
@@ -744,6 +776,84 @@ function renderPingResult(data) {
   resultPanel.hidden = false;
 }
 
+function renderPingScanResult(data) {
+  const rows = data.results.map((result) => `
+    <tr>
+      <td>${copyableResult(result.address)}</td>
+      <td><span class="status-badge ${result.up ? "success" : "warning"}">${result.up ? "Up" : "No reply"}</span></td>
+      <td>${result.rttMs === null ? "" : escapeHtml(`${result.rttMs} ms`)}</td>
+    </tr>`).join("");
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">PING SCAN</p><h2>${escapeHtml(`${data.up} of ${data.scanned} hosts up`)}</h2></div>
+      <span class="status-badge ${data.up ? "success" : "warning"}">${escapeHtml(`${data.up} up`)}</span>
+    </div>
+    ${data.skipped ? `<p class="detail-notice">${escapeHtml(data.skipped)} disallowed or reserved IP address(es) were skipped.</p>` : ""}
+    ${rows ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
+      <thead><tr><th>Address</th><th>Status</th><th>Round trip</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    : '<p class="empty-result">No eligible IP addresses were available to scan.</p>'}
+    <p class="scan-disclaimer">One ICMP echo request was sent per address. Hosts that block ICMP appear as no reply. Scan only networks you are authorized to test.</p>`;
+  resultPanel.hidden = false;
+}
+
+function renderTraceTable(result) {
+  const rows = result.hops.map((hop) => `
+    <tr>
+      <td>${hop.hop}</td>
+      <td>${hop.address ? copyableResult(hop.address) : '<span class="trace-silent">* no reply</span>'}</td>
+      <td>${hop.rttMs === null ? "" : escapeHtml(`${hop.rttMs} ms`)}</td>
+    </tr>`).join("");
+  return `
+    <section class="record-section trace-section">
+      <div class="trace-heading">
+        <h3>${copyableResult(result.target)}${result.address && result.address !== result.target ? ` ${copyableResult(result.address, "port-target-address")}` : ""}</h3>
+        ${result.error
+    ? ""
+    : `<span class="status-badge ${result.reached ? "success" : "warning"}">${result.reached ? "Destination reached" : "Destination not reached"}</span>`}
+      </div>
+      ${result.error ? `<p class="detail-notice">${escapeHtml(result.error)}</p>` : ""}
+      ${rows ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
+        <thead><tr><th>Hop</th><th>Address</th><th>Response time</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
+      ${result.partial ? '<p class="detail-notice">The trace took too long and was stopped; the path shown is incomplete.</p>' : ""}
+    </section>`;
+}
+
+function renderTraceComparison(results) {
+  const traced = results.filter((result) => result.hops.length);
+  if (traced.length < 2) return "";
+  const hopCount = Math.max(...traced.map((result) => result.hops.at(-1).hop));
+  const rows = Array.from({ length: hopCount }, (_, index) => {
+    const hopNumber = index + 1;
+    const cells = traced.map((result) => {
+      const hop = result.hops.find((item) => item.hop === hopNumber);
+      return `<td>${hop?.address ? copyableResult(hop.address) : hop ? '<span class="trace-silent">*</span>' : ""}</td>`;
+    }).join("");
+    return `<tr><td>${hopNumber}</td>${cells}</tr>`;
+  }).join("");
+  return `
+    <section class="record-section trace-section">
+      <h3>Route comparison</h3>
+      <div class="dns-results-table-wrap"><table class="dns-results-table net-table">
+        <thead><tr><th>Hop</th>${traced.map((result) => `<th>${escapeHtml(result.target)}</th>`).join("")}</tr></thead>
+        <tbody>${rows}</tbody></table></div>
+    </section>`;
+}
+
+function renderTracerouteResult(data, multiple) {
+  const reached = data.results.filter((result) => result.reached).length;
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">${multiple ? "MULTI TRACEROUTE" : "TRACEROUTE"}</p><h2>${multiple
+    ? escapeHtml(`${data.results.length} target(s) traced`)
+    : copyableResult(data.results[0].target)}</h2></div>
+      <span class="status-badge ${reached ? "success" : "warning"}">${escapeHtml(multiple ? `${reached} reached` : reached ? "Destination reached" : "Not reached")}</span>
+    </div>
+    ${multiple ? renderTraceComparison(data.results) : ""}
+    ${data.results.map(renderTraceTable).join("")}
+    <p class="scan-disclaimer">Routers that do not answer probes appear as no reply. Paths are traced with UDP probes (tracepath), up to 20 hops.</p>`;
+  resultPanel.hidden = false;
+}
+
 function renderMacResult(data) {
   const addressType = data.multicast ? "Multicast address" : "Unicast address";
   const administration = data.locallyAdministered
@@ -1132,8 +1242,11 @@ form.addEventListener("submit", async (event) => {
   submitButton.disabled = true;
   const customPortScan = requestMode === "custom-port";
   const bulkPortScan = requestMode === "bulk-port";
+  const pingScan = requestMode === "ping-scan";
+  const multiTraceroute = requestMode === "multi-traceroute";
   const isPortScan = customPortScan || bulkPortScan;
-  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${requestMode === "scan" ? "Scanning" : isPortScan ? "Scanning ports" : "Looking up"}</span>`;
+  const postsJson = isPortScan || pingScan || multiTraceroute;
+  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${requestMode === "scan" ? "Scanning" : isPortScan ? "Scanning ports" : pingScan ? "Pinging" : requestMode === "traceroute" || multiTraceroute ? "Tracing" : "Looking up"}</span>`;
 
   const params = new URLSearchParams({
     name: lookupName,
@@ -1156,6 +1269,12 @@ form.addEventListener("submit", async (event) => {
         ? "/api/bulk-port-scan"
         : requestMode === "details"
       ? "/api/domain-info"
+        : pingScan
+        ? "/api/ping-scan"
+        : requestMode === "traceroute"
+        ? "/api/traceroute"
+        : multiTraceroute
+        ? "/api/multi-traceroute"
         : requestMode === "ping"
         ? "/api/ping"
         : requestMode === "mac"
@@ -1181,8 +1300,14 @@ form.addEventListener("submit", async (event) => {
             port: bulkPortInput.value,
           }),
         }
-        : {};
-    const response = await fetch(isPortScan ? endpoint : `${endpoint}?${params}`, requestOptions);
+        : pingScan || multiTraceroute
+          ? {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ targets: pingScan ? bulkTargetsInput.value : multiTraceInput.value }),
+          }
+          : {};
+    const response = await fetch(postsJson ? endpoint : `${endpoint}?${params}`, requestOptions);
     const data = await readApiResponse(response);
     if (response.status === 401) {
       const next = `${window.location.pathname}${window.location.search}`;
@@ -1193,6 +1318,9 @@ form.addEventListener("submit", async (event) => {
     if (requestMode === "details" && data.ip) renderIpInfo(data);
     else if (requestMode === "details") renderDomainInfo(data);
     else if (requestMode === "ping") renderPingResult(data);
+    else if (pingScan) renderPingScanResult(data);
+    else if (requestMode === "traceroute") renderTracerouteResult({ results: [data] }, false);
+    else if (multiTraceroute) renderTracerouteResult(data, true);
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "scan") renderScanResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Port scan" : "Bulk port scan");
@@ -1205,7 +1333,7 @@ form.addEventListener("submit", async (event) => {
     errorMessage.hidden = false;
   } finally {
     submitButton.disabled = false;
-    submitButton.innerHTML = `<span>${mode === "auto" ? "Auto lookup" : mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : mode === "ping" ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+    submitButton.innerHTML = `<span>${submitLabel(mode)}</span><span aria-hidden="true">→</span>`;
   }
 });
 
