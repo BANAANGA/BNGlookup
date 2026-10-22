@@ -3,10 +3,8 @@ services:
     build: .
     ports:
       - "${PORT:-3000}:3000"
-      # To obtain an SSL certificate with the built-in ACME client, publish
-      # port 80 (HTTP-01 validation) and the HTTPS listener (port 8443):
-      # - "80:3000"
-      # - "443:8443"
+      # For the built-in ACME client, also publish ports 80/443 using
+      # compose.acme.yaml (HTTP-01 validation and the HTTPS listener).
     environment:
       PORT: 3000
       HTTPS_PORT: 8443

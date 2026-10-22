@@ -111,6 +111,88 @@ docker compose logs -f
 docker compose down
 ```
 
+### Deploy on a clean Ubuntu 24.04 minimal install
+
+Run these commands as a user with `sudo` rights. They install Docker from the
+official repository, fetch the project, and start it.
+
+```sh
+# 1. Install prerequisites and Docker Engine with the Compose plugin
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl git
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+
+# 2. Get the project
+git clone https://github.com/BANAANGA/BNGlookup.git
+cd BNGlookup
+
+# 3a. Start on port 3000 only (HTTP, no certificate)
+sudo docker compose up --build -d
+
+# 3b. OR start with ports 80 and 443 mapped (needed for the ACME certificate)
+sudo docker compose -f compose.yaml -f compose.acme.yaml up --build -d
+
+# 4. (Optional) open the firewall if ufw is enabled
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+
+# 5. Check that it is running
+sudo docker compose ps
+sudo docker compose logs -f
+```
+
+Use either 3a or 3b, not both. Option 3b publishes host port 80 to the app
+(HTTP, and the ACME challenge) and host port 443 to the app's HTTPS listener
+(port 8443 in the container). Port 443 only answers after a certificate has been
+issued; see [SSL certificate (ACME)](#ssl-certificate-acme).
+
+#### Update to a new version
+
+Your accounts, settings, logs, and certificates live in the `app_data` Docker
+volume, so they are kept when you update. Run from the `BNGlookup` directory,
+using the same compose files you started with:
+
+```sh
+cd ~/BNGlookup
+
+# Optional: back up the data volume first
+sudo docker run --rm -v bnglookup_app_data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/bnglookup-data-$(date +%F).tar.gz -C /data .
+
+# Fetch the latest code and rebuild
+git pull
+sudo docker compose -f compose.yaml -f compose.acme.yaml up --build -d   # or without -f if not using ports 80/443
+
+# Remove old, unused images and confirm the new version is running
+sudo docker image prune -f
+sudo docker compose ps
+sudo docker compose logs --tail 50
+```
+
+The volume name is `<project folder>_app_data` (lowercase), for example
+`bnglookup_app_data`; check it with `sudo docker volume ls`. To pin a specific
+release, run `git fetch --tags && git checkout v1.1` before rebuilding, and
+`git checkout main && git pull` to return to the latest code. To roll back, check
+out the previous tag or commit and rebuild.
+
+Other useful commands:
+
+```sh
+sudo docker compose restart        # restart without rebuilding
+sudo docker compose down           # stop and remove the container (keeps data)
+sudo docker compose down -v        # stop AND delete all data (irreversible)
+```
+
+Ports 80 and 443 must be free on the host (stop any web server using them), and
+the host's firewall or cloud security group must allow them. Before creating the
+administrator account, make sure only trusted people can reach the server.
+
 ### Configure the DNS resolver
 
 After creating the administrator account, open **Settings & users** and choose
@@ -196,7 +278,7 @@ Let's Encrypt using the HTTP-01 challenge; it needs no external dependencies.
 
 1. Point a public DNS name (for example `lookup.example.com`) at the Docker host.
 2. Publish port 80 to the app (for validation) and port 8443 as HTTPS. In
-   `compose.yaml` uncomment `"80:3000"` and `"443:8443"`. If a reverse proxy
+   run Compose with `-f compose.yaml -f compose.acme.yaml` (see the Ubuntu deployment steps above). If a reverse proxy
    owns port 80, forward `/.well-known/acme-challenge/` to the app.
 3. In the SSL certificate tab enter the domain and a contact email, accept the
    CA terms, and save. Start with the **Staging** environment (untrusted test
