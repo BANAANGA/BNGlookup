@@ -163,6 +163,12 @@ h1 {
 }
 .client-info-label, .client-info-ptr-label, .client-info-whois-label { font-weight: 600; }
 .client-info strong, #client-ptr, #client-whois { min-width: 0; overflow-wrap: anywhere; color: #26364e; }
+.client-info-whois-label { grid-column: 1 / -1; margin-top: 6px; }
+#client-whois { grid-column: 1 / -1; }
+.client-whois-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.client-whois-table th, .client-whois-table td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #242424; overflow-wrap: anywhere; }
+.client-whois-table th { width: 9em; font-weight: 600; color: #929292; white-space: nowrap; }
+.client-whois-table tr:last-child th, .client-whois-table tr:last-child td { border-bottom: 0; }
 .client-info strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .login-required-notice { margin: 18px 0; color: #aaa; font-size: 12px; line-height: 1.6; }
 .login-required-notice a { color: #8aeab1; }
