@@ -105,6 +105,18 @@ and 443 (the app's HTTPS listener on container port 8443, which only answers
 after a certificate is issued). Ports 80 and 443 must be free on the host and
 allowed by your firewall or cloud security group.
 
+### Prebuilt image (GitHub Container Registry)
+
+Each release publishes a multi-arch (amd64/arm64) image, so you can skip the build:
+
+```sh
+docker run -d --name bnglookup -p 3000:3000 -v bnglookup_data:/data \
+  --restart unless-stopped ghcr.io/banaanga/bnglookup:latest
+```
+
+Tags: `latest`, `1.2.69` and `1.2`. In Compose, replace `build: .` with
+`image: ghcr.io/banaanga/bnglookup:latest` and update with `docker compose pull && docker compose up -d`.
+
 ## Update
 
 Accounts, settings, logs and certificates live in the `app_data` volume and
