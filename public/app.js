@@ -21,7 +21,7 @@ const resultPanel = document.querySelector("#result");
 const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
 const formHint = document.querySelector("#form-hint");
-const tabs = [...document.querySelectorAll(".mode-tab")];
+const tabs = [...document.querySelectorAll(".mode-tab[data-mode]")];
 const autoTab = document.querySelector("#auto-tab");
 const autoDetectHint = document.querySelector("#auto-detect-hint");
 const modeTabs = document.querySelector(".mode-tabs");
@@ -32,7 +32,7 @@ const toolsLoginLink = document.querySelector("#tools-login-link");
 const guestUsageNotice = document.querySelector("#guest-usage-notice");
 const accountNav = document.querySelector("#account-nav");
 const accountName = document.querySelector("#account-name");
-const adminLink = document.querySelector("#admin-link");
+const adminTabs = document.querySelector("#admin-tabs");
 const loginLink = document.querySelector("#login-link");
 const logoutButton = document.querySelector("#logout-button");
 const clientInfo = document.querySelector("#client-info");
@@ -171,7 +171,7 @@ function setMode(nextMode) {
       : bulkPortScan
         ? "Check one TCP port across an explicit list or CIDR block of IP addresses."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
-  submitButton.innerHTML = `<span>${automatic ? "Auto lookup" : scan ? "Magic scan" : customPortScan ? "Custom port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : ping ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+  submitButton.innerHTML = `<span>${automatic ? "Auto lookup" : scan ? "Magic scan" : customPortScan ? "Port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : ping ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   if (automatic) updateAutoDetectHint();
@@ -189,7 +189,7 @@ async function initializeAccount() {
     accountNav.hidden = false;
     loginLink.hidden = Boolean(authState.user);
     logoutButton.hidden = !authState.user;
-    adminLink.hidden = authState.user?.role !== "admin";
+    adminTabs.hidden = authState.user?.role !== "admin";
     accountName.textContent = authState.user
       ? `${authState.user.username} (${authState.user.role})`
       : "Guest";
@@ -209,7 +209,7 @@ async function initializeAccount() {
     });
     autoTab.hidden = availableTabs.length === 0;
     const initialTab = availableTabs.length ? autoTab : null;
-    modeTabs.hidden = !initialTab;
+    modeTabs.hidden = !initialTab && adminTabs.hidden;
     lookupForm.hidden = !initialTab;
     loginRequiredNotice.hidden = Boolean(initialTab);
     guestUsageNotice.hidden = !initialTab || Boolean(authState.user);
@@ -217,7 +217,11 @@ async function initializeAccount() {
       loginRequiredMessage.textContent = "No lookup tools are available to your account. Contact an administrator.";
       toolsLoginLink.hidden = true;
     }
-    if (initialTab) setMode("auto");
+    if (initialTab) {
+      const requested = new URLSearchParams(window.location.search).get("mode");
+      const requestedTab = availableTabs.find((tab) => tab.dataset.mode === requested);
+      setMode(requestedTab ? requested : "auto");
+    }
   } catch {
     lookupForm.hidden = true;
     modeTabs.hidden = true;
@@ -1185,7 +1189,7 @@ form.addEventListener("submit", async (event) => {
     else if (requestMode === "ping") renderPingResult(data);
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "scan") renderScanResult(data);
-    else if (isPortScan) renderPortScanResult(data, customPortScan ? "Custom port scan" : "Bulk port scan");
+    else if (isPortScan) renderPortScanResult(data, customPortScan ? "Port scan" : "Bulk port scan");
     else {
       showResult(data);
       if (requestMode === "reverse") appendIpRegistration(lookupName.replace(/^\[|\]$/g, ""));
@@ -1195,7 +1199,7 @@ form.addEventListener("submit", async (event) => {
     errorMessage.hidden = false;
   } finally {
     submitButton.disabled = false;
-    submitButton.innerHTML = `<span>${mode === "auto" ? "Auto lookup" : mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Custom port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : mode === "ping" ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+    submitButton.innerHTML = `<span>${mode === "auto" ? "Auto lookup" : mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : mode === "ping" ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   }
 });
 

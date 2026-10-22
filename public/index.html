@@ -21,12 +21,48 @@
           <span class="online"><span></span> DNS over HTTPS</span>
           <nav class="account-nav" id="account-nav" aria-label="Account" hidden>
             <span id="account-name"></span>
-            <a id="admin-link" href="/admin.html" hidden>Admin</a>
             <a id="login-link" href="/login.html">Log in</a>
             <button id="logout-button" type="button" hidden>Log out</button>
           </nav>
         </div>
       </header>
+
+      <nav class="mode-tabs main-tabs" aria-label="Main navigation" hidden>
+          <div class="tab-group" role="tablist" aria-label="Lookup mode">
+          <button class="mode-tab active" id="auto-tab" type="button" role="tab" aria-selected="true" data-mode="auto" hidden>
+            <span aria-hidden="true">⌕</span> Auto lookup
+          </button>
+          <button class="mode-tab" id="forward-tab" type="button" role="tab" aria-selected="false" data-mode="forward" hidden>
+            <span aria-hidden="true">⌕</span> DNS lookup
+          </button>
+          <button class="mode-tab" id="reverse-tab" type="button" role="tab" aria-selected="false" data-mode="reverse" hidden>
+            <span aria-hidden="true">↶</span> Reverse lookup
+          </button>
+          <button class="mode-tab" id="details-tab" type="button" role="tab" aria-selected="false" data-mode="details" hidden>
+            <span aria-hidden="true">ⓘ</span> Whois
+          </button>
+          <button class="mode-tab" id="mac-tab" type="button" role="tab" aria-selected="false" data-mode="mac" hidden>
+            <span aria-hidden="true">◇</span> MAC lookup
+          </button>
+          <button class="mode-tab" id="ping-tab" type="button" role="tab" aria-selected="false" data-mode="ping" hidden>
+            <span aria-hidden="true">◉</span> Ping
+          </button>
+          <button class="mode-tab" id="scan-tab" type="button" role="tab" aria-selected="false" data-mode="scan" hidden>
+            <span aria-hidden="true">⌕</span> Magic scan
+          </button>
+          <button class="mode-tab" id="custom-port-tab" type="button" role="tab" aria-selected="false" data-mode="custom-port" hidden>
+            <span aria-hidden="true">⚙</span> Port scan
+          </button>
+          <button class="mode-tab" id="bulk-port-tab" type="button" role="tab" aria-selected="false" data-mode="bulk-port" hidden>
+            <span aria-hidden="true">⇢</span> Bulk port scan
+          </button>
+                  </div>
+          <div class="tab-group admin-tab-group" id="admin-tabs" hidden>
+            <a class="mode-tab" href="/admin-stats.html"><span aria-hidden="true">▤</span> Stats</a>
+            <a class="mode-tab" href="/admin-logs.html"><span aria-hidden="true">≣</span> Logs</a>
+            <a class="mode-tab" href="/admin.html"><span aria-hidden="true">⚙</span> Admin</a>
+          </div>
+      </nav>
 
       <section class="lookup-card" aria-label="DNS lookup">
         <div class="client-info" id="client-info" aria-live="polite" hidden>
@@ -115,36 +151,6 @@
           <p class="hint auto-detect-hint" id="auto-detect-hint">Enter a domain for DNS, an IP address for reverse DNS, or a MAC address for vendor details.</p>
           <p class="hint" id="form-hint">Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.</p>
         </form>
-
-        <div class="mode-tabs" role="tablist" aria-label="Lookup mode" hidden>
-          <button class="mode-tab active" id="auto-tab" type="button" role="tab" aria-selected="true" data-mode="auto" hidden>
-            <span aria-hidden="true">⌕</span> Auto lookup
-          </button>
-          <button class="mode-tab" id="forward-tab" type="button" role="tab" aria-selected="false" data-mode="forward" hidden>
-            <span aria-hidden="true">⌕</span> DNS lookup
-          </button>
-          <button class="mode-tab" id="reverse-tab" type="button" role="tab" aria-selected="false" data-mode="reverse" hidden>
-            <span aria-hidden="true">↶</span> Reverse lookup
-          </button>
-          <button class="mode-tab" id="details-tab" type="button" role="tab" aria-selected="false" data-mode="details" hidden>
-            <span aria-hidden="true">ⓘ</span> Whois
-          </button>
-          <button class="mode-tab" id="mac-tab" type="button" role="tab" aria-selected="false" data-mode="mac" hidden>
-            <span aria-hidden="true">◇</span> MAC lookup
-          </button>
-          <button class="mode-tab" id="ping-tab" type="button" role="tab" aria-selected="false" data-mode="ping" hidden>
-            <span aria-hidden="true">◉</span> Ping
-          </button>
-          <button class="mode-tab" id="scan-tab" type="button" role="tab" aria-selected="false" data-mode="scan" hidden>
-            <span aria-hidden="true">⌕</span> Magic scan
-          </button>
-          <button class="mode-tab" id="custom-port-tab" type="button" role="tab" aria-selected="false" data-mode="custom-port" hidden>
-            <span aria-hidden="true">⚙</span> Custom port scan
-          </button>
-          <button class="mode-tab" id="bulk-port-tab" type="button" role="tab" aria-selected="false" data-mode="bulk-port" hidden>
-            <span aria-hidden="true">⇢</span> Bulk port scan
-          </button>
-        </div>
 
         <div class="result" id="result" aria-live="polite" hidden></div>
       </section>

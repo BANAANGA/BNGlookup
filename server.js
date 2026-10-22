@@ -101,7 +101,7 @@ const featureNames = {
   mac: "MAC lookup",
   ping: "Ping / host check",
   scan: "Magic scan",
-  "custom-port": "Custom port scan",
+  "custom-port": "Port scan",
   "bulk-port": "Bulk port scan",
 };
 const portScanPolicyDefaults = {
@@ -156,6 +156,7 @@ database.exec(`
     WHERE id NOT IN (SELECT id FROM admin_logs ORDER BY id DESC LIMIT 20000);
   END;
 `);
+database.prepare("UPDATE admin_logs SET action = 'Port scan' WHERE action = 'Port scan'").run();
 database.prepare(`
   INSERT OR IGNORE INTO app_settings (key, value) VALUES ('trusted_proxies', ?)
 `).run(JSON.stringify(trustedProxyEntries));
@@ -1450,9 +1451,9 @@ async function runCustomPortScan(request, response) {
     sendJson(response, 200, data);
   } catch (error) {
     const statusCode = error.statusCode || 500;
-    if (statusCode === 500) console.error("Custom port scan failed:", error);
+    if (statusCode === 500) console.error("Port scan failed:", error);
     sendJson(response, statusCode, {
-      error: statusCode === 500 ? "Unable to complete the custom port scan." : error.message,
+      error: statusCode === 500 ? "Unable to complete the port scan." : error.message,
     });
   }
 }
@@ -2059,11 +2060,23 @@ function getAcmeConfig() {
   }
 }
 
+const maxAcmeDomains = 20;
+
 function parseAcmeConfig(body) {
-  const domain = typeof body.domain === "string" ? normalizeDomain(body.domain) : null;
-  if (!domain || isIP(domain) || /\.(?:local|localhost|internal|lan|home|test|invalid|example)$/.test(domain)) {
-    return { error: "Enter a public fully qualified domain name, for example lookup.example.com. Wildcards and IP addresses are not supported." };
+  const raw = Array.isArray(body.domains) ? body.domains.join("\n") : typeof body.domains === "string" ? body.domains : typeof body.domain === "string" ? body.domain : "";
+  const entries = raw.split(/[\s,;]+/).filter(Boolean);
+  if (!entries.length) return { error: "Enter at least one domain name." };
+  if (entries.length > maxAcmeDomains * 2) return { error: `Enter at most ${maxAcmeDomains} domain names.` };
+  const domains = [];
+  for (const entry of entries) {
+    const name = normalizeDomain(entry);
+    if (!name || isIP(name) || /\.(?:local|localhost|internal|lan|home|test|invalid|example)$/.test(name)) {
+      return { error: `"${entry.slice(0, 80)}" is not valid. Enter public fully qualified domain names, for example lookup.example.com. Wildcards and IP addresses are not supported.` };
+    }
+    if (!domains.includes(name)) domains.push(name);
   }
+  if (domains.length > maxAcmeDomains) return { error: `Enter at most ${maxAcmeDomains} domain names.` };
+  const domain = domains[0];
   const email = typeof body.email === "string" ? body.email.trim() : "";
   if (email && (email.length > 254 || !/^[^\s@<>",;:\\]+@[^\s@<>",;:\\]+\.[^\s@<>",;:\\]+$/.test(email))) {
     return { error: "Enter a valid contact email address or leave it blank." };
@@ -2077,6 +2090,7 @@ function parseAcmeConfig(body) {
   return {
     config: {
       domain,
+      domains,
       email,
       environment: body.environment,
       autoRenew: body.autoRenew !== false,
@@ -3318,7 +3332,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/lookup": { method: "GET", action: "DNS lookup", keys: ["name", "type", "reverse"] },
     "/api/domain-info": { method: "GET", action: "Domain/IP registration lookup", keys: ["name"] },
     "/api/scan": { method: "GET", action: "Magic scan", keys: ["name", "ports"] },
-    "/api/custom-port-scan": { method: "POST", action: "Custom port scan" },
+    "/api/custom-port-scan": { method: "POST", action: "Port scan" },
     "/api/bulk-port-scan": { method: "POST", action: "Bulk port scan" },
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },

@@ -37,9 +37,14 @@ function derOid(oid) {
   return der(0x06, Buffer.from(bytes));
 }
 
-function buildCsr(domain, privateKey, publicKey) {
-  const subject = der(0x30, der(0x31, der(0x30, derOid("2.5.4.3"), der(0x0c, Buffer.from(domain)))));
-  const subjectAltName = der(0x30, der(0x82, Buffer.from(domain)));
+function configuredDomains(config) {
+  const list = Array.isArray(config.domains) && config.domains.length ? config.domains : [config.domain];
+  return list.filter(Boolean);
+}
+
+function buildCsr(domains, privateKey, publicKey) {
+  const subject = der(0x30, der(0x31, der(0x30, derOid("2.5.4.3"), der(0x0c, Buffer.from(domains[0])))));
+  const subjectAltName = der(0x30, ...domains.map((name) => der(0x82, Buffer.from(name))));
   const extensions = der(0x30, der(0x30, derOid("2.5.29.17"), der(0x04, subjectAltName)));
   const attributes = der(0xa0, der(0x30, derOid("1.2.840.113549.1.9.14"), der(0x31, extensions)));
   const info = der(
@@ -162,7 +167,8 @@ function createAcmeManager({ dataDir, getConfig, onCertificate, log = console })
   }
 
   async function issue(config) {
-    const { domain, email, environment } = config;
+    const { email, environment } = config;
+    const domains = configuredDomains(config);
     step(`Contacting ${environment === "production" ? "Let's Encrypt" : "the staging ACME server"}…`);
     const directoryResponse = await fetch(directoryUrl(environment), { signal: AbortSignal.timeout(15000) });
     if (!directoryResponse.ok) throw new Error(`ACME directory returned HTTP ${directoryResponse.status}.`);
@@ -180,43 +186,44 @@ function createAcmeManager({ dataDir, getConfig, onCertificate, log = console })
       saveAccount(account, directoryUrl(environment));
     }
 
-    step(`Creating order for ${domain}…`);
+    step(`Creating order for ${domains.join(", ")}…`);
     const order = await acmeRequest(client, directory.newOrder, {
-      identifiers: [{ type: "dns", value: domain }],
+      identifiers: domains.map((value) => ({ type: "dns", value })),
     });
     const orderUrl = order.headers.get("location");
-    const authorizationUrl = order.body.authorizations?.[0];
-    if (!authorizationUrl) throw new Error("The ACME server returned no authorization.");
+    const authorizationUrls = order.body.authorizations || [];
+    if (!authorizationUrls.length) throw new Error("The ACME server returned no authorization.");
 
-    const authorization = (await acmeRequest(client, authorizationUrl, "")).body;
-    let challenge;
-    if (authorization.status !== "valid") {
-      challenge = authorization.challenges?.find((item) => item.type === "http-01");
-      if (!challenge) throw new Error("The ACME server did not offer an HTTP-01 challenge.");
-      const thumbprint = crypto.createHash("sha256")
-        .update(JSON.stringify(publicJwk(account.privateKey)))
-        .digest("base64url");
+    const thumbprint = crypto.createHash("sha256")
+      .update(JSON.stringify(publicJwk(account.privateKey)))
+      .digest("base64url");
+    for (const authorizationUrl of authorizationUrls) {
+      const authorization = (await acmeRequest(client, authorizationUrl, "")).body;
+      const name = authorization.identifier?.value || "the domain";
+      if (authorization.status === "valid") continue;
+      const challenge = authorization.challenges?.find((item) => item.type === "http-01");
+      if (!challenge) throw new Error(`The ACME server did not offer an HTTP-01 challenge for ${name}.`);
       challenges.set(challenge.token, `${challenge.token}.${thumbprint}`);
-      step("Answering the HTTP-01 challenge on /.well-known/acme-challenge/ …");
+      step(`Validating ${name} over HTTP-01 on /.well-known/acme-challenge/ …`);
       try {
         await acmeRequest(client, challenge.url, {});
         await pollUntil(client, authorizationUrl, (body) => {
           if (body.status === "valid") return true;
           if (body.status === "invalid") {
             const failure = body.challenges?.find((item) => item.error)?.error?.detail;
-            throw new Error(`Domain validation failed: ${failure || "the ACME server could not reach this host on port 80."}`);
+            throw new Error(`Validation of ${name} failed: ${failure || "the ACME server could not reach this host on port 80."}`);
           }
           return false;
-        }, "domain validation");
+        }, `validation of ${name}`);
       } finally {
         challenges.delete(challenge.token);
       }
-      step("Domain validated.");
+      step(`${name} validated.`);
     }
 
     step("Generating certificate key and signing request…");
     const keyPair = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
-    const csr = buildCsr(domain, keyPair.privateKey, keyPair.publicKey);
+    const csr = buildCsr(domains, keyPair.privateKey, keyPair.publicKey);
     await acmeRequest(client, order.body.finalize, { csr: base64url(csr) });
     const finished = await pollUntil(client, orderUrl, (body) => {
       if (body.status === "valid") return true;
@@ -236,7 +243,7 @@ function createAcmeManager({ dataDir, getConfig, onCertificate, log = console })
     }
     writePrivate(keyPath, keyPem);
     writePrivate(certPath, chain);
-    writePrivate(metaPath, JSON.stringify({ environment, domain, issuedAt: new Date().toISOString() }));
+    writePrivate(metaPath, JSON.stringify({ environment, domain: domains[0], domains, issuedAt: new Date().toISOString() }));
     step("Certificate installed.");
     onCertificate({ key: keyPem, cert: chain });
   }
@@ -303,7 +310,8 @@ function createAcmeManager({ dataDir, getConfig, onCertificate, log = console })
     const info = describeCertificate();
     if (!config?.domain || !config.autoRenew) return false;
     if (!info) return false;
-    if (info.domain && info.domain !== config.domain) return false;
+    const wanted = configuredDomains(config).slice().sort().join(",");
+    if (info.domains.length && info.domains.slice().sort().join(",") !== wanted) return false;
     return new Date(info.validTo).getTime() - Date.now() < renewBeforeMs;
   }
 

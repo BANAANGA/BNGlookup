@@ -39,6 +39,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Compare nameservers from registration data with live DNS NS answers, including
   available IP addresses and TTLs.
 - View DNS response status and answer, authority, and additional records.
+- Navigate everything from one tabbed header: all lookup tools, plus Stats, Logs
+  and Admin for administrators, on every page.
 - Search and sort DNS and Magic scan result tables, and click result values to
   copy them to the clipboard.
 - Review login attempts, administrator actions, and DNS/scan lookup activity in
@@ -67,7 +69,7 @@ illustrative sample data.
 
 <table>
   <tr>
-    <td align="center"><strong>Lookup tools</strong><br><img src="assets/dns-lookup.png" alt="BNGlookup home page with automatic, DNS, reverse, Whois, MAC, Magic scan, custom port scan, and bulk port scan modes" width="560"></td>
+    <td align="center"><strong>Lookup tools</strong><br><img src="assets/dns-lookup.png" alt="BNGlookup home page with automatic, DNS, reverse, Whois, MAC, Magic scan, port scan, and bulk port scan modes" width="560"></td>
     <td align="center"><strong>First-run administrator setup</strong><br><img src="assets/first-run-setup.png" alt="First-run setup page for creating the initial administrator account" width="560"></td>
   </tr>
   <tr>
@@ -276,11 +278,11 @@ Administrators can obtain a trusted certificate for the web interface from
 **Admin → SSL certificate**. The built-in client speaks ACME (RFC 8555) to
 Let's Encrypt using the HTTP-01 challenge; it needs no external dependencies.
 
-1. Point a public DNS name (for example `lookup.example.com`) at the Docker host.
-2. Publish port 80 to the app (for validation) and port 8443 as HTTPS. In
-   run Compose with `-f compose.yaml -f compose.acme.yaml` (see the Ubuntu deployment steps above). If a reverse proxy
+1. Point one or more public DNS names (for example `lookup.example.com`) at the Docker host.
+2. Publish port 80 to the app (for validation) and port 8443 as HTTPS.
+   Run Compose with `-f compose.yaml -f compose.acme.yaml` (see the Ubuntu deployment steps above). If a reverse proxy
    owns port 80, forward `/.well-known/acme-challenge/` to the app.
-3. In the SSL certificate tab enter the domain and a contact email, accept the
+3. In the SSL certificate tab enter the domain names (one per line, up to 20; they share a single certificate and each must resolve to this host) and a contact email, accept the
    CA terms, and save. Start with the **Staging** environment (untrusted test
    certificates, generous limits), then switch to **Production**.
 4. Click **Request certificate now**. Progress is shown live.
@@ -424,7 +426,7 @@ other reserved addresses are always skipped. It reports ports that accepted a
 TCP connection; it is not a vulnerability assessment. Only scan systems you
 are authorized to test.
 
-The **Custom port scan** tab checks a comma-separated list of ports and/or
+The **Port scan** tab checks a comma-separated list of ports and/or
 ranges (for example, `22,80,443,8000-8010`) on one domain or IP address. The
 administrator configures the maximum number of unique ports per target
 separately for Admin and User roles, from 1 to 65,535. Defaults are 100 ports

@@ -17,8 +17,26 @@
           <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
           <span class="brand-name">DNSLookup</span>
         </a>
-        <nav class="account-nav"><a href="/admin.html">Settings</a><a href="/admin-logs.html">Logs</a><a href="/">DNS</a><button id="admin-logout" type="button">Log out</button></nav>
+        <nav class="account-nav" aria-label="Account"><button id="admin-logout" type="button">Log out</button></nav>
       </header>
+      <nav class="mode-tabs main-tabs" aria-label="Main navigation">
+        <div class="tab-group">
+          <a class="mode-tab" href="/"><span aria-hidden="true">⌕</span> Auto lookup</a>
+          <a class="mode-tab" href="/?mode=forward"><span aria-hidden="true">⌕</span> DNS lookup</a>
+          <a class="mode-tab" href="/?mode=reverse"><span aria-hidden="true">↶</span> Reverse lookup</a>
+          <a class="mode-tab" href="/?mode=details"><span aria-hidden="true">ⓘ</span> Whois</a>
+          <a class="mode-tab" href="/?mode=mac"><span aria-hidden="true">◇</span> MAC lookup</a>
+          <a class="mode-tab" href="/?mode=ping"><span aria-hidden="true">◉</span> Ping</a>
+          <a class="mode-tab" href="/?mode=scan"><span aria-hidden="true">⌕</span> Magic scan</a>
+          <a class="mode-tab" href="/?mode=custom-port"><span aria-hidden="true">⚙</span> Port scan</a>
+          <a class="mode-tab" href="/?mode=bulk-port"><span aria-hidden="true">⇢</span> Bulk port scan</a>
+        </div>
+        <div class="tab-group admin-tab-group">
+          <a class="mode-tab active" aria-current="page" href="/admin-stats.html"><span aria-hidden="true">▤</span> Stats</a>
+          <a class="mode-tab" href="/admin-logs.html"><span aria-hidden="true">≣</span> Logs</a>
+          <a class="mode-tab" href="/admin.html"><span aria-hidden="true">⚙</span> Admin</a>
+        </div>
+      </nav>
       <section class="admin-heading">
         <p class="eyebrow">ADMINISTRATION</p>
         <h1>Usage statistics</h1>
