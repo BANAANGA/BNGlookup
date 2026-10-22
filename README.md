@@ -25,7 +25,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Look up PTR records from IPv4 or IPv6 addresses.
 - Look up public IPv4/IPv6 registration data from RDAP (IP WHOIS), including
   network range and CIDR subnet, AS number, registry handle, country, dates,
-  status, and published contacts.
+  status, and published contacts. IP WHOIS also appears under reverse DNS and
+  automatic IP lookups (when Whois access is permitted), and for your own IP on the home page.
 - Display the visitor's public IP address, PTR record, and IP registration
   details on the landing page.
 - Display PTR hostnames for IP addresses returned in DNS results and for

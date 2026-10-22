@@ -825,7 +825,7 @@ function formatIpAddressRange(registration) {
     .join(" – ");
 }
 
-function renderIpInfo(data) {
+function ipRegistrationHtml(data) {
   const registration = data.ipRegistration;
   const dateLabels = {
     registration: "Registered",
@@ -846,10 +846,7 @@ function renderIpInfo(data) {
       : "";
   }).join("");
 
-  resultPanel.innerHTML = `
-    <div class="result-heading">
-      <div><p class="eyebrow">IP WHOIS / RDAP</p><h2>${copyableResult(data.ip)}</h2></div>
-    </div>
+  return `
     ${data.registrationError ? `<p class="detail-notice">${escapeHtml(data.registrationError)}</p>` : ""}
     ${registration ? `<section class="record-section">
       <h3>Network registration</h3>
@@ -875,7 +872,36 @@ function renderIpInfo(data) {
       ${contacts ? `<div class="contact-list">${contacts}</div>` : ""}
     </section>` : '<p class="empty-result">No IP registration details could be retrieved.</p>'}
     <p class="scan-disclaimer">IP registration information is retrieved from RDAP, the modern WHOIS service. Contact details may be redacted or unavailable.</p>`;
+}
+
+function renderIpInfo(data) {
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">IP WHOIS / RDAP</p><h2>${copyableResult(data.ip)}</h2></div>
+    </div>
+    ${ipRegistrationHtml(data)}`;
   resultPanel.hidden = false;
+}
+
+async function appendIpRegistration(ip) {
+  const access = authState?.featureAccess?.whois || "user";
+  const permitted = Boolean(authState?.user) &&
+    (access !== "admin" || authState.user.role === "admin") ||
+    access === "public";
+  if (!permitted) return;
+  const section = document.createElement("section");
+  section.className = "ip-whois-section";
+  section.innerHTML = '<p class="detail-notice">Looking up IP WHOIS / RDAP…</p>';
+  resultPanel.append(section);
+  try {
+    const response = await fetch(`/api/domain-info?${new URLSearchParams({ name: ip })}`, { credentials: "same-origin" });
+    const data = await readApiResponse(response);
+    if (!response.ok || !data.ip) throw new Error(data.error || "IP WHOIS lookup failed.");
+    if (!section.isConnected) return;
+    section.innerHTML = `<p class="eyebrow">IP WHOIS / RDAP</p>${ipRegistrationHtml(data)}`;
+  } catch (error) {
+    if (section.isConnected) section.innerHTML = `<p class="detail-notice">${escapeHtml(error.message)}</p>`;
+  }
 }
 
 function detectAutomaticLookup(value) {
@@ -1077,7 +1103,10 @@ form.addEventListener("submit", async (event) => {
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "scan") renderScanResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Custom port scan" : "Bulk port scan");
-    else showResult(data);
+    else {
+      showResult(data);
+      if (requestMode === "reverse") appendIpRegistration(lookupName.replace(/^\[|\]$/g, ""));
+    }
   } catch (error) {
     errorMessage.textContent = error.message || "Unable to complete the lookup.";
     errorMessage.hidden = false;
