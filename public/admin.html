@@ -31,6 +31,7 @@
           <button class="settings-tab active" id="general-tab" type="button" role="tab" aria-selected="true" aria-controls="general-panel">General</button>
           <button class="settings-tab" id="access-tab" type="button" role="tab" aria-selected="false" aria-controls="access-panel" tabindex="-1">Access &amp; network</button>
           <button class="settings-tab" id="port-scan-tab" type="button" role="tab" aria-selected="false" aria-controls="port-scan-panel" tabindex="-1">Port scans</button>
+          <button class="settings-tab" id="certificate-tab" type="button" role="tab" aria-selected="false" aria-controls="certificate-panel" tabindex="-1">SSL certificate</button>
           <button class="settings-tab" id="users-tab" type="button" role="tab" aria-selected="false" aria-controls="users-panel" tabindex="-1">Users</button>
         </div>
         <form id="settings-form">
@@ -71,6 +72,27 @@
             <button class="submit-button" type="submit"><span>Save port scan settings</span><span aria-hidden="true">→</span></button>
           </section>
         </form>
+        <section class="settings-panel" id="certificate-panel" role="tabpanel" aria-labelledby="certificate-tab" hidden>
+          <h2>SSL certificate (ACME)</h2>
+          <p class="form-hint">Obtain and renew a free certificate for this web interface from Let's Encrypt using the HTTP-01 challenge. The domain must resolve to this server and public port 80 must reach BNGlookup (for example, publish <code>80:3000</code>). Once issued, HTTPS is served on the container's HTTPS port (default 8443; publish <code>443:8443</code>).</p>
+          <div id="certificate-current" class="certificate-current" aria-live="polite"></div>
+          <form id="certificate-form" class="admin-create-form">
+            <label for="acme-domain">Domain name</label>
+            <input id="acme-domain" name="domain" type="text" maxlength="253" placeholder="lookup.example.com" autocomplete="off" spellcheck="false" required>
+            <label for="acme-email">Contact email (optional)</label>
+            <input id="acme-email" name="email" type="email" maxlength="254" placeholder="admin@example.com" autocomplete="email">
+            <label for="acme-environment">Certificate authority</label>
+            <select id="acme-environment" name="environment">
+              <option value="staging">Let's Encrypt staging (testing; not trusted by browsers)</option>
+              <option value="production">Let's Encrypt production</option>
+            </select>
+            <label class="branding-reset" for="acme-auto-renew"><input id="acme-auto-renew" name="autoRenew" type="checkbox" checked> Renew automatically 30 days before expiry</label>
+            <label class="branding-reset" for="acme-terms"><input id="acme-terms" name="acceptTerms" type="checkbox" required> I agree to the <a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener noreferrer">Let's Encrypt subscriber agreement</a></label>
+            <button class="submit-button" type="submit"><span>Save certificate settings</span><span aria-hidden="true">→</span></button>
+          </form>
+          <button class="submit-button" id="acme-request" type="button"><span>Request certificate now</span><span aria-hidden="true">→</span></button>
+          <ol class="certificate-steps" id="acme-steps" aria-live="polite"></ol>
+        </section>
         <section class="settings-panel" id="users-panel" role="tabpanel" aria-labelledby="users-tab" hidden>
           <h2>Create user</h2>
           <form id="create-user-form" class="admin-create-form">

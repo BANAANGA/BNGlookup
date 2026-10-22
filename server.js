@@ -12,9 +12,11 @@ const { promisify } = require("node:util");
 const { DatabaseSync } = require("node:sqlite");
 const { lookup: resolveHost } = require("node:dns/promises");
 const { domainToASCII } = require("node:url");
+const { createAcmeManager } = require("./acme");
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
+const httpsPort = Number(process.env.HTTPS_PORT || 8443);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be an integer between 1 and 65535.");
 }
@@ -2046,6 +2048,110 @@ function getDefaultResolverId() {
   return customResolverOption.length ? "custom" : "cloudflare";
 }
 
+function getAcmeConfig() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'acme_config'").get();
+  if (!row) return null;
+  try {
+    const config = JSON.parse(row.value);
+    return config && typeof config.domain === "string" ? config : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseAcmeConfig(body) {
+  const domain = typeof body.domain === "string" ? normalizeDomain(body.domain) : null;
+  if (!domain || isIP(domain) || /\.(?:local|localhost|internal|lan|home|test|invalid|example)$/.test(domain)) {
+    return { error: "Enter a public fully qualified domain name, for example lookup.example.com. Wildcards and IP addresses are not supported." };
+  }
+  const email = typeof body.email === "string" ? body.email.trim() : "";
+  if (email && (email.length > 254 || !/^[^\s@<>",;:\\]+@[^\s@<>",;:\\]+\.[^\s@<>",;:\\]+$/.test(email))) {
+    return { error: "Enter a valid contact email address or leave it blank." };
+  }
+  if (!["staging", "production"].includes(body.environment)) {
+    return { error: "Choose the staging or production certificate authority." };
+  }
+  if (body.acceptTerms !== true) {
+    return { error: "You must accept the certificate authority's subscriber agreement." };
+  }
+  return {
+    config: {
+      domain,
+      email,
+      environment: body.environment,
+      autoRenew: body.autoRenew !== false,
+      termsAccepted: true,
+    },
+  };
+}
+
+let httpsServer = null;
+let httpsError = null;
+const acme = createAcmeManager({
+  dataDir,
+  getConfig: getAcmeConfig,
+  onCertificate: (credentials) => applyTlsCertificate(credentials),
+});
+
+function certificateStatusPayload() {
+  return {
+    config: getAcmeConfig(),
+    certificate: acme.describeCertificate(),
+    status: { ...acme.status, steps: [...acme.status.steps] },
+    running: acme.isRunning(),
+    httpsPort,
+    httpsListening: Boolean(httpsServer?.listening),
+    httpsError,
+  };
+}
+
+function handleAdminCertificate(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  request.logClientAddress = getClientAddress(request);
+  if (request.method === "GET") {
+    sendJson(response, 200, certificateStatusPayload());
+    return;
+  }
+  if (request.method !== "PUT" && request.method !== "POST") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  if (request.method === "POST") {
+    const config = getAcmeConfig();
+    if (!config?.termsAccepted) {
+      sendJson(response, 400, { error: "Save the certificate settings before requesting a certificate." });
+      return;
+    }
+    const result = acme.start("manual");
+    if (!result.started) {
+      sendJson(response, 409, { error: result.reason });
+      return;
+    }
+    recordAdminLog("audit", request, "Certificate requested", `${config.domain} (${config.environment})`, 202, admin.username);
+    sendJson(response, 202, certificateStatusPayload());
+    return;
+  }
+  void readAuthBody(request, response, 8192).then((body) => {
+    if (!body) return;
+    const parsed = parseAcmeConfig(body);
+    if (parsed.error) {
+      sendJson(response, 400, { error: parsed.error });
+      return;
+    }
+    database.prepare(`
+      INSERT INTO app_settings (key, value) VALUES ('acme_config', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(JSON.stringify(parsed.config));
+    recordAdminLog("audit", request, "Certificate settings updated", `${parsed.config.domain} (${parsed.config.environment})`, 200, admin.username);
+    sendJson(response, 200, certificateStatusPayload());
+  }).catch((error) => {
+    console.error("Certificate settings update failed:", error);
+    sendJson(response, 500, { error: "Unable to save certificate settings." });
+  });
+}
+
 function getSiteTitle() {
   const row = database.prepare("SELECT value FROM app_settings WHERE key = 'site_title'").get();
   return row && row.value.trim() ? row.value : "DNSLookup";
@@ -2153,13 +2259,17 @@ function currentUser(request) {
   return { id: session.id, username: session.username, role: session.role };
 }
 
+function cookieSecureAttribute(response) {
+  return process.env.COOKIE_SECURE === "true" || response.req?.socket?.encrypted ? "; Secure" : "";
+}
+
 function setSessionCookie(response, token) {
-  const secure = process.env.COOKIE_SECURE === "true" ? "; Secure" : "";
+  const secure = cookieSecureAttribute(response);
   response.setHeader("set-cookie", `${sessionCookieName}=${token}; Path=/; Max-Age=${sessionDurationMs / 1000}; HttpOnly; SameSite=Strict${secure}`);
 }
 
 function clearSessionCookie(response) {
-  const secure = process.env.COOKIE_SECURE === "true" ? "; Secure" : "";
+  const secure = cookieSecureAttribute(response);
   response.setHeader("set-cookie", `${sessionCookieName}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict${secure}`);
 }
 
@@ -3166,7 +3276,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   response.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
   response.setHeader("cross-origin-resource-policy", "same-origin");
   response.setHeader("cache-control", "no-store");
-  if (process.env.COOKIE_SECURE === "true") {
+  if (process.env.COOKIE_SECURE === "true" || request.socket.encrypted) {
     response.setHeader("strict-transport-security", "max-age=31536000");
   }
 
@@ -3179,6 +3289,20 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     url = new URL(request.url, "http://localhost");
   } catch {
     sendJson(response, 400, { error: "Malformed request URL." });
+    return;
+  }
+  const challengePrefix = "/.well-known/acme-challenge/";
+  if (url.pathname.startsWith(challengePrefix)) {
+    const keyAuthorization = request.method === "GET"
+      ? acme.challenges.get(url.pathname.slice(challengePrefix.length))
+      : undefined;
+    if (!keyAuthorization) {
+      response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      response.end("Not found");
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    response.end(keyAuthorization);
     return;
   }
   const queryKeys = new Set();
@@ -3286,6 +3410,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
 
   if (url.pathname === "/api/admin/logs") {
     handleAdminLogs(request, url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/certificate") {
+    handleAdminCertificate(request, response);
     return;
   }
 
@@ -3468,3 +3597,36 @@ server.requestTimeout = 30_000;
 server.listen(port, host, () => {
   console.log(`DNS lookup listening on ${host}:${port}`);
 });
+
+function applyTlsCertificate(credentials) {
+  if (httpsServer) {
+    httpsServer.setSecureContext(credentials);
+    return;
+  }
+  httpsError = null;
+  const secureServer = https.createServer(
+    { ...credentials, minVersion: "TLSv1.2", maxHeaderSize: 8192 },
+    (request, response) => server.emit("request", request, response),
+  );
+  secureServer.headersTimeout = 10_000;
+  secureServer.requestTimeout = 30_000;
+  secureServer.on("error", (error) => {
+    console.error("HTTPS listener failed:", error);
+    httpsError = `Unable to listen on HTTPS port ${httpsPort}: ${error.code || error.message}`;
+    if (httpsServer === secureServer) httpsServer = null;
+  });
+  httpsServer = secureServer;
+  secureServer.listen(httpsPort, host, () => {
+    console.log(`DNS lookup HTTPS listening on ${host}:${httpsPort}`);
+  });
+}
+
+const storedCertificate = acme.loadStored();
+if (storedCertificate) {
+  try {
+    applyTlsCertificate(storedCertificate);
+  } catch (error) {
+    console.error("Unable to start HTTPS with the stored certificate:", error);
+  }
+}
+acme.startRenewalTimer();

@@ -4,6 +4,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 COPY server.js ./server.js
+COPY acme.js ./acme.js
 COPY public ./public
 
 RUN mkdir -p /data && chown node:node /data
