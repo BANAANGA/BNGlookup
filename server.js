@@ -2059,11 +2059,23 @@ function getAcmeConfig() {
   }
 }
 
+const maxAcmeDomains = 20;
+
 function parseAcmeConfig(body) {
-  const domain = typeof body.domain === "string" ? normalizeDomain(body.domain) : null;
-  if (!domain || isIP(domain) || /\.(?:local|localhost|internal|lan|home|test|invalid|example)$/.test(domain)) {
-    return { error: "Enter a public fully qualified domain name, for example lookup.example.com. Wildcards and IP addresses are not supported." };
+  const raw = Array.isArray(body.domains) ? body.domains.join("\n") : typeof body.domains === "string" ? body.domains : typeof body.domain === "string" ? body.domain : "";
+  const entries = raw.split(/[\s,;]+/).filter(Boolean);
+  if (!entries.length) return { error: "Enter at least one domain name." };
+  if (entries.length > maxAcmeDomains * 2) return { error: `Enter at most ${maxAcmeDomains} domain names.` };
+  const domains = [];
+  for (const entry of entries) {
+    const name = normalizeDomain(entry);
+    if (!name || isIP(name) || /\.(?:local|localhost|internal|lan|home|test|invalid|example)$/.test(name)) {
+      return { error: `"${entry.slice(0, 80)}" is not valid. Enter public fully qualified domain names, for example lookup.example.com. Wildcards and IP addresses are not supported.` };
+    }
+    if (!domains.includes(name)) domains.push(name);
   }
+  if (domains.length > maxAcmeDomains) return { error: `Enter at most ${maxAcmeDomains} domain names.` };
+  const domain = domains[0];
   const email = typeof body.email === "string" ? body.email.trim() : "";
   if (email && (email.length > 254 || !/^[^\s@<>",;:\\]+@[^\s@<>",;:\\]+\.[^\s@<>",;:\\]+$/.test(email))) {
     return { error: "Enter a valid contact email address or leave it blank." };
@@ -2077,6 +2089,7 @@ function parseAcmeConfig(body) {
   return {
     config: {
       domain,
+      domains,
       email,
       environment: body.environment,
       autoRenew: body.autoRenew !== false,

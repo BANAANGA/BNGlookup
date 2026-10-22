@@ -348,7 +348,7 @@ let certificatePollTimer = null;
 
 function renderCertificate(data) {
   if (data.config) {
-    certificateForm.elements.domain.value = data.config.domain;
+    certificateForm.elements.domain.value = (data.config.domains || [data.config.domain]).join("\n");
     certificateForm.elements.email.value = data.config.email || "";
     certificateForm.elements.environment.value = data.config.environment;
     certificateForm.elements.autoRenew.checked = data.config.autoRenew !== false;
@@ -360,6 +360,7 @@ function renderCertificate(data) {
     const staging = /STAGING|Fake/i.test(certificate.issuer);
     lines.push(
       `<strong>${escapeHtml(certificate.subject || (certificate.domains && certificate.domains[0]) || "")}</strong>`,
+      `Domains: ${escapeHtml((certificate.domains || []).join(", "))}`,
       `Issuer: ${escapeHtml(certificate.issuer)}${staging ? " (staging, not trusted by browsers)" : ""}`,
       `Valid until ${escapeHtml(new Date(certificate.validTo).toLocaleString())} (${certificate.daysRemaining} days remaining)`,
     );
@@ -397,7 +398,7 @@ certificateForm.addEventListener("submit", async (event) => {
     renderCertificate(await api("/api/admin/certificate", {
       method: "PUT",
       body: JSON.stringify({
-        domain: form.domain.value,
+        domains: form.domain.value,
         email: form.email.value,
         environment: form.environment.value,
         autoRenew: form.autoRenew.checked,

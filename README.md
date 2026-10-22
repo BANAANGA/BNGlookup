@@ -276,11 +276,11 @@ Administrators can obtain a trusted certificate for the web interface from
 **Admin → SSL certificate**. The built-in client speaks ACME (RFC 8555) to
 Let's Encrypt using the HTTP-01 challenge; it needs no external dependencies.
 
-1. Point a public DNS name (for example `lookup.example.com`) at the Docker host.
+1. Point one or more public DNS names (for example `lookup.example.com`) at the Docker host.
 2. Publish port 80 to the app (for validation) and port 8443 as HTTPS. In
    run Compose with `-f compose.yaml -f compose.acme.yaml` (see the Ubuntu deployment steps above). If a reverse proxy
    owns port 80, forward `/.well-known/acme-challenge/` to the app.
-3. In the SSL certificate tab enter the domain and a contact email, accept the
+3. In the SSL certificate tab enter the domain names (one per line, up to 20; they share a single certificate and each must resolve to this host) and a contact email, accept the
    CA terms, and save. Start with the **Staging** environment (untrusted test
    certificates, generous limits), then switch to **Production**.
 4. Click **Request certificate now**. Progress is shown live.
