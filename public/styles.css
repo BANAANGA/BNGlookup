@@ -973,3 +973,13 @@ body {
 }
 .admin-create-form textarea:focus { outline: 1px solid #777; }
 .admin-create-form > .form-hint { grid-column: 2; margin: 0; }
+.main-tabs { display: flex; flex-wrap: wrap; align-items: stretch; justify-content: space-between; gap: 0 27px; margin: 0 0 22px; border-bottom: 1px solid #242424; }
+.main-tabs .tab-group { display: flex; flex-wrap: wrap; gap: 0 27px; }
+.main-tabs .admin-tab-group { padding-left: 27px; border-left: 1px solid #242424; margin-left: auto; }
+.main-tabs a.mode-tab { text-decoration: none; }
+.main-tabs a.mode-tab:hover { color: #cfcfcf; }
+@media (max-width: 680px) {
+  .main-tabs .tab-group { gap: 0 15px; }
+  .main-tabs .admin-tab-group { padding-left: 0; border-left: 0; margin-left: 0; }
+  .main-tabs .mode-tab { padding: 11px 1px 9px; }
+}

@@ -21,7 +21,7 @@ const resultPanel = document.querySelector("#result");
 const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
 const formHint = document.querySelector("#form-hint");
-const tabs = [...document.querySelectorAll(".mode-tab")];
+const tabs = [...document.querySelectorAll(".mode-tab[data-mode]")];
 const autoTab = document.querySelector("#auto-tab");
 const autoDetectHint = document.querySelector("#auto-detect-hint");
 const modeTabs = document.querySelector(".mode-tabs");
@@ -32,7 +32,7 @@ const toolsLoginLink = document.querySelector("#tools-login-link");
 const guestUsageNotice = document.querySelector("#guest-usage-notice");
 const accountNav = document.querySelector("#account-nav");
 const accountName = document.querySelector("#account-name");
-const adminLink = document.querySelector("#admin-link");
+const adminTabs = document.querySelector("#admin-tabs");
 const loginLink = document.querySelector("#login-link");
 const logoutButton = document.querySelector("#logout-button");
 const clientInfo = document.querySelector("#client-info");
@@ -189,7 +189,7 @@ async function initializeAccount() {
     accountNav.hidden = false;
     loginLink.hidden = Boolean(authState.user);
     logoutButton.hidden = !authState.user;
-    adminLink.hidden = authState.user?.role !== "admin";
+    adminTabs.hidden = authState.user?.role !== "admin";
     accountName.textContent = authState.user
       ? `${authState.user.username} (${authState.user.role})`
       : "Guest";
@@ -209,7 +209,7 @@ async function initializeAccount() {
     });
     autoTab.hidden = availableTabs.length === 0;
     const initialTab = availableTabs.length ? autoTab : null;
-    modeTabs.hidden = !initialTab;
+    modeTabs.hidden = !initialTab && adminTabs.hidden;
     lookupForm.hidden = !initialTab;
     loginRequiredNotice.hidden = Boolean(initialTab);
     guestUsageNotice.hidden = !initialTab || Boolean(authState.user);
@@ -217,7 +217,11 @@ async function initializeAccount() {
       loginRequiredMessage.textContent = "No lookup tools are available to your account. Contact an administrator.";
       toolsLoginLink.hidden = true;
     }
-    if (initialTab) setMode("auto");
+    if (initialTab) {
+      const requested = new URLSearchParams(window.location.search).get("mode");
+      const requestedTab = availableTabs.find((tab) => tab.dataset.mode === requested);
+      setMode(requestedTab ? requested : "auto");
+    }
   } catch {
     lookupForm.hidden = true;
     modeTabs.hidden = true;

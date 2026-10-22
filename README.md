@@ -39,6 +39,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Compare nameservers from registration data with live DNS NS answers, including
   available IP addresses and TTLs.
 - View DNS response status and answer, authority, and additional records.
+- Navigate everything from one tabbed header: all lookup tools, plus Stats, Logs
+  and Admin for administrators, on every page.
 - Search and sort DNS and Magic scan result tables, and click result values to
   copy them to the clipboard.
 - Review login attempts, administrator actions, and DNS/scan lookup activity in
