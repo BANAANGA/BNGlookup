@@ -37,6 +37,13 @@
           <a class="mode-tab" href="/admin.html"><span aria-hidden="true">⚙</span> Admin</a>
         </div>
       </nav>
+      <form class="quick-search" action="/" method="get" role="search" aria-label="Quick lookup">
+        <div class="input-wrap">
+          <span class="input-icon" aria-hidden="true">⌕</span>
+          <input name="q" type="text" maxlength="2048" placeholder="Domain, IP address, or MAC address" autocomplete="off" spellcheck="false" aria-label="Lookup" required>
+        </div>
+        <button class="submit-button" type="submit"><span>Lookup</span><span aria-hidden="true">→</span></button>
+      </form>
       <section class="admin-heading">
         <p class="eyebrow">ADMINISTRATION</p>
         <h1>Application logs</h1>

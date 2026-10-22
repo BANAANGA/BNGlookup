@@ -65,15 +65,6 @@
       </nav>
 
       <section class="lookup-card" aria-label="DNS lookup">
-        <div class="client-info" id="client-info" aria-live="polite" hidden>
-          <span class="client-info-label" id="client-info-label">Your public IP</span>
-          <strong id="client-ip">Checking…</strong>
-          <span class="client-info-ptr-label">PTR</span>
-          <span id="client-ptr">Looking up reverse DNS…</span>
-          <span class="client-info-whois-label">IP WHOIS</span>
-          <span id="client-whois">Looking up registration details…</span>
-        </div>
-
         <p class="login-required-notice" id="login-required-notice" role="status" hidden>
           <span id="login-required-message">Log in to access the available lookup tools.</span>
           <a id="tools-login-link" href="/login.html">Log in</a>
@@ -153,6 +144,15 @@
         </form>
 
         <div class="result" id="result" aria-live="polite" hidden></div>
+
+        <div class="client-info" id="client-info" aria-live="polite" hidden>
+          <span class="client-info-label" id="client-info-label">Your public IP</span>
+          <strong id="client-ip">Checking…</strong>
+          <span class="client-info-ptr-label">PTR</span>
+          <span id="client-ptr">Looking up reverse DNS…</span>
+          <span class="client-info-whois-label">IP WHOIS</span>
+          <span id="client-whois">Looking up registration details…</span>
+        </div>
       </section>
 
       <footer>

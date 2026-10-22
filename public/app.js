@@ -221,6 +221,12 @@ async function initializeAccount() {
       const requested = new URLSearchParams(window.location.search).get("mode");
       const requestedTab = availableTabs.find((tab) => tab.dataset.mode === requested);
       setMode(requestedTab ? requested : "auto");
+      const query = new URLSearchParams(window.location.search).get("q");
+      if (query) {
+        input.value = query.slice(0, 2048);
+        if (mode === "auto") updateAutoDetectHint();
+        form.requestSubmit();
+      }
     }
   } catch {
     lookupForm.hidden = true;

@@ -983,3 +983,6 @@ body {
   .main-tabs .admin-tab-group { padding-left: 0; border-left: 0; margin-left: 0; }
   .main-tabs .mode-tab { padding: 11px 1px 9px; }
 }
+.quick-search { display: flex; gap: 10px; margin: 0 0 22px; }
+.quick-search .submit-button { width: auto; flex: none; padding: 0 22px; margin: 0; }
+@media (max-width: 680px) { .quick-search { flex-direction: column; } .quick-search .submit-button { width: 100%; min-height: 44px; } }
