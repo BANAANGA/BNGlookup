@@ -15,6 +15,9 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Let administrators choose the default encrypted DNS-over-HTTPS resolver:
   Google Public DNS, Cloudflare, Quad9, or DNS4EU (EU).
 - Look up the registered vendor and address attributes for a MAC address.
+- Check whether a remote host is up with an ICMP ping (4 echo requests, with
+  packet loss and round-trip times) or an HTTP/HTTPS GET request (status code,
+  response time, redirect target, and TLS trust).
 - Scan a domain and common subdomains for DNS records, cloud-provider
   endpoints, WHOIS/RDAP registration data, SPF policies, and common DKIM
   selectors, with IP geolocation and country information for returned IPs.
@@ -127,7 +130,7 @@ network.** Whoever reaches the setup page first can create the initial admin.
 The administrator can create and manage user accounts, assign the Admin or
 User role, disable accounts, reset passwords, and set each feature to **Public**,
 **Logged-in users**, or **Administrators**. By default DNS lookup, reverse
-lookup, Whois, and MAC lookup require a logged-in user; Magic scan and both
+lookup, Whois, MAC lookup, and Ping require a logged-in user; Magic scan and both
 port-scan tools require an administrator. Public access can be enabled or
 changed from the admin panel. Sessions use HttpOnly, SameSite cookies and expire
 after 12 hours.
@@ -337,3 +340,11 @@ Choose **MAC lookup** to normalize a MAC address and retrieve its registered
 vendor, OUI block, and address classification (unicast/multicast and
 universally/locally administered). Vendor data is provided by `maclookup.app`;
 the submitted MAC address is sent to that external service.
+
+Choose **Ping** to check whether a host is up. **ICMP ping** sends four echo
+requests from the server and reports packet loss and round-trip times; **HTTP**
+and **HTTPS** send a single GET request to `/` (redirects are reported, not
+followed). Use a GET check for hosts that block ICMP. Private and reserved
+addresses are refused unless local-network access is enabled for your role.
+ICMP from the container works with Docker's default settings; if your runtime
+disables unprivileged ICMP, add `cap_add: [NET_RAW]` to the Compose service.

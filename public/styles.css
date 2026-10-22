@@ -278,7 +278,7 @@ h1 {
   margin-top: 14px;
 }
 .scan-extra-control label { color: #b9c7bd; font-size: 11px; font-weight: 600; }
-.scan-extra-control input, .scan-extra-control textarea {
+.scan-extra-control input, .scan-extra-control textarea, .scan-extra-control select {
   width: 100%;
   min-width: 0;
   min-height: 38px;
@@ -290,7 +290,7 @@ h1 {
   background: #080808;
   font-size: 11px;
 }
-.scan-extra-control input:focus, .scan-extra-control textarea:focus {
+.scan-extra-control input:focus, .scan-extra-control textarea:focus, .scan-extra-control select:focus {
   border-color: #3c8b5d;
   outline: 3px solid #54d88f20;
 }
@@ -949,3 +949,8 @@ body {
 .scan-answer { color: #efefef; }
 .empty-result, .scan-disclaimer { color: #929292; }
 .detail-notice { color: #e4c88f; }
+
+.ping-status { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.ping-status .status-badge { font-size: 13px; }
+.ping-times { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.ping-times span { padding: 3px 8px; border: 1px solid #292929; border-radius: 6px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
