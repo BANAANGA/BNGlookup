@@ -1,4 +1,6 @@
 const http = require("node:http");
+const https = require("node:https");
+const { execFile } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { isIP } = require("node:net");
@@ -85,6 +87,7 @@ const featureAccessDefaults = {
   reverse: "user",
   whois: "user",
   mac: "user",
+  ping: "user",
   scan: "admin",
   "custom-port": "admin",
   "bulk-port": "admin",
@@ -94,6 +97,7 @@ const featureNames = {
   reverse: "Reverse lookup",
   whois: "Whois",
   mac: "MAC lookup",
+  ping: "Ping / host check",
   scan: "Magic scan",
   "custom-port": "Custom port scan",
   "bulk-port": "Bulk port scan",
@@ -2850,6 +2854,139 @@ function consumePublicLookup(request, response) {
   return false;
 }
 
+const pingMethods = new Set(["icmp", "https", "http"]);
+
+function runIcmpPing(address) {
+  const command = isIP(address) === 6 ? "ping6" : "ping";
+  return new Promise((resolve) => {
+    execFile(command, ["-c", "4", "-W", "2", address], { timeout: 12000, maxBuffer: 65536 }, (error, stdout) => {
+      const output = String(stdout || "");
+      const sent = output.match(/(\d+) packets transmitted/);
+      const received = output.match(/(\d+) (?:packets )?received/);
+      const summary = output.match(/min\/avg\/max(?:\/mdev)? = ([\d.]+)\/([\d.]+)\/([\d.]+)/);
+      const times = [...output.matchAll(/time=([\d.]+) ms/g)].map((match) => Number(match[1]));
+      if (!sent && error) {
+        resolve({
+          up: false,
+          error: error.code === "ENOENT"
+            ? "ICMP ping is not available on this server."
+            : "ICMP ping could not be run. The host may block ICMP or the server may lack permission.",
+        });
+        return;
+      }
+      const transmitted = Number(sent?.[1] || 0);
+      const replies = Number(received?.[1] || 0);
+      resolve({
+        up: replies > 0,
+        transmitted,
+        received: replies,
+        lossPercent: transmitted ? Math.round(((transmitted - replies) / transmitted) * 100) : 100,
+        times,
+        minMs: summary ? Number(summary[1]) : null,
+        avgMs: summary ? Number(summary[2]) : null,
+        maxMs: summary ? Number(summary[3]) : null,
+      });
+    });
+  });
+}
+
+function runHttpCheck(hostname, address, scheme) {
+  return new Promise((resolve) => {
+    const started = process.hrtime.bigint();
+    const transport = scheme === "https" ? https : http;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve({ scheme, ...result });
+    };
+    const request = transport.request({
+      host: hostname,
+      method: "GET",
+      path: "/",
+      timeout: 8000,
+      headers: { "user-agent": "BNGlookup-host-check/1.0", accept: "*/*", connection: "close" },
+      lookup: (_host, options, callback) => {
+        if (options?.all) callback(null, [{ address, family: isIP(address) }]);
+        else callback(null, address, isIP(address));
+      },
+      rejectUnauthorized: false,
+      servername: isIP(hostname) ? undefined : hostname,
+    }, (reply) => {
+      const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+      const status = reply.statusCode;
+      finish({
+        up: true,
+        status,
+        statusText: reply.statusMessage || "",
+        responseMs: Math.round(elapsedMs * 10) / 10,
+        redirect: status >= 300 && status < 400 && typeof reply.headers.location === "string"
+          ? reply.headers.location.slice(0, 500)
+          : null,
+        server: typeof reply.headers.server === "string" ? reply.headers.server.slice(0, 200) : null,
+        tlsAuthorized: scheme === "https" ? Boolean(reply.socket?.authorized) : null,
+      });
+      reply.destroy();
+    });
+    request.on("timeout", () => {
+      finish({ up: false, error: "The request timed out." });
+      request.destroy();
+    });
+    request.on("error", (error) => {
+      finish({ up: false, error: error.code ? `Connection failed (${error.code}).` : "Connection failed." });
+    });
+    request.end();
+  });
+}
+
+async function pingHost(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const method = (url.searchParams.get("method") || "icmp").toLowerCase();
+  if (!pingMethods.has(method)) {
+    sendJson(response, 400, { error: "Choose ICMP, HTTPS, or HTTP." });
+    return;
+  }
+  let target = rawName.trim();
+  const bracketed = target.match(/^\[([0-9a-f:.]+)\]$/i);
+  if (bracketed) target = bracketed[1];
+  try {
+    const user = currentUser(request);
+    const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+    let addresses;
+    if (isIP(target)) {
+      addresses = [target];
+    } else {
+      const domain = normalizeDomain(target);
+      if (!domain) {
+        sendJson(response, 400, { error: "Enter a valid domain name or IP address." });
+        return;
+      }
+      target = domain;
+      try {
+        addresses = (await resolveHost(domain, { all: true, verbatim: true })).map((entry) => entry.address);
+      } catch {
+        sendJson(response, 200, { target, method, up: false, error: "The host name could not be resolved." });
+        return;
+      }
+    }
+    const eligible = addresses.filter((address) => isScannableAddress(address, allowLocal));
+    eligible.sort((left, right) => isIP(left) - isIP(right));
+    if (!eligible.length) {
+      sendJson(response, 400, { error: "This target resolves to a private or reserved address that cannot be checked." });
+      return;
+    }
+    const address = eligible[0];
+    const result = method === "icmp"
+      ? await runIcmpPing(address)
+      : await runHttpCheck(target, address, method);
+    sendJson(response, 200, { target, address, method, ...result });
+  } catch (error) {
+    console.error("Ping failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the host check." });
+  }
+}
+
 async function macLookup(url, response) {
   const rawInput = queryInput(url, "name", 32, response);
   if (rawInput === null) return;
@@ -3060,6 +3197,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/custom-port-scan": { method: "POST", action: "Custom port scan" },
     "/api/bulk-port-scan": { method: "POST", action: "Bulk port scan" },
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
+    "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
   };
   const queryLogRoute = queryLogRoutes[url.pathname];
   if (queryLogRoute && request.method === queryLogRoute.method) {
@@ -3179,6 +3317,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/custom-port-scan": "custom-port",
     "/api/bulk-port-scan": "bulk-port",
     "/api/mac-lookup": "mac",
+    "/api/ping": "ping",
   };
   const feature = protectedFeatures[url.pathname];
   const requiresPortScanLogin =
@@ -3228,6 +3367,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     runBulkPortScan(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/ping") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    pingHost(request, url, response);
     return;
   }
 

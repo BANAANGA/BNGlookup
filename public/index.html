@@ -88,6 +88,15 @@
             <label><input id="port-scan-input" type="checkbox"> Also scan 26 common TCP ports on the domain's eligible IP addresses</label>
             <span>Optional active check, limited to 8 addresses. Local targets are scanned only when allowed for your role in the admin settings.</span>
           </div>
+          <div class="scan-extra-control" id="ping-method-control" hidden>
+            <label for="ping-method-input">Check method</label>
+            <select id="ping-method-input">
+              <option value="icmp">ICMP ping (4 echo requests)</option>
+              <option value="https">HTTPS GET request</option>
+              <option value="http">HTTP GET request</option>
+            </select>
+            <span>Checks whether the host is up. Some hosts block ICMP; try an HTTP(S) GET instead. Private addresses are checked only when allowed for your role.</span>
+          </div>
           <div class="scan-extra-control" id="custom-ports-control" hidden>
             <label for="custom-ports-input">TCP ports</label>
             <input id="custom-ports-input" type="text" maxlength="65536" placeholder="e.g. 22,80,443,8000-8010" autocomplete="off" spellcheck="false">
@@ -122,6 +131,9 @@
           </button>
           <button class="mode-tab" id="mac-tab" type="button" role="tab" aria-selected="false" data-mode="mac" hidden>
             <span aria-hidden="true">◇</span> MAC lookup
+          </button>
+          <button class="mode-tab" id="ping-tab" type="button" role="tab" aria-selected="false" data-mode="ping" hidden>
+            <span aria-hidden="true">◉</span> Ping
           </button>
           <button class="mode-tab" id="scan-tab" type="button" role="tab" aria-selected="false" data-mode="scan" hidden>
             <span aria-hidden="true">⌕</span> Magic scan

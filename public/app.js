@@ -15,6 +15,8 @@ const bulkTargetsControl = document.querySelector("#bulk-targets-control");
 const bulkTargetsInput = document.querySelector("#bulk-targets-input");
 const bulkPortControl = document.querySelector("#bulk-port-control");
 const bulkPortInput = document.querySelector("#bulk-port-input");
+const pingMethodControl = document.querySelector("#ping-method-control");
+const pingMethodInput = document.querySelector("#ping-method-input");
 const resultPanel = document.querySelector("#result");
 const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
@@ -108,6 +110,7 @@ function setMode(nextMode) {
   const reverse = mode === "reverse";
   const details = mode === "details";
   const mac = mode === "mac";
+  const ping = mode === "ping";
   const scan = mode === "scan";
   const customPortScan = mode === "custom-port";
   const bulkPortScan = mode === "bulk-port";
@@ -129,7 +132,7 @@ function setMode(nextMode) {
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
       ? "e.g. 00:1A:2B:3C:4D:5E"
-    : details
+    : details || ping
       ? "e.g. example.com or 8.8.8.8"
     : automatic
       ? "Domain, IP address, or MAC address"
@@ -137,10 +140,11 @@ function setMode(nextMode) {
       ? "e.g. example.com or 8.8.8.8"
       : "e.g. example.com";
   input.autocomplete = reverse || mac || portScan ? "off" : "url";
-  typeControl.hidden = automatic || reverse || details || mac || scan || portScan;
-  customType.hidden = automatic || reverse || details || mac || scan || portScan || recordType.value !== "custom";
+  typeControl.hidden = automatic || reverse || details || mac || ping || scan || portScan;
+  customType.hidden = automatic || reverse || details || mac || ping || scan || portScan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
   if (!isAdmin) nameserverInput.value = "";
+  pingMethodControl.hidden = !ping;
   portScanControl.hidden = !scan || !authState?.user;
   customPortsControl.hidden = !customPortScan;
   bulkTargetsControl.hidden = !bulkPortScan;
@@ -156,6 +160,8 @@ function setMode(nextMode) {
     ? "Find the PTR record associated with an IPv4 or IPv6 address."
     : details
       ? "View public domain or IP registration (RDAP/WHOIS) and authoritative nameserver details."
+      : ping
+        ? "Check whether a remote host is up using ICMP ping or an HTTP(S) GET request."
       : mac
         ? "Find the registered hardware vendor and MAC address type."
       : scan
@@ -165,7 +171,7 @@ function setMode(nextMode) {
       : bulkPortScan
         ? "Check one TCP port across an explicit list or CIDR block of IP addresses."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
-  submitButton.innerHTML = `<span>${automatic ? "Auto lookup" : scan ? "Magic scan" : customPortScan ? "Custom port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+  submitButton.innerHTML = `<span>${automatic ? "Auto lookup" : scan ? "Magic scan" : customPortScan ? "Custom port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : ping ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   if (automatic) updateAutoDetectHint();
@@ -682,6 +688,52 @@ function renderPortScanResult(data, title) {
   resultPanel.hidden = false;
 }
 
+function renderPingResult(data) {
+  const methodLabels = { icmp: "ICMP ping", https: "HTTPS GET", http: "HTTP GET" };
+  const up = Boolean(data.up);
+  const details = [];
+  if (data.method === "icmp") {
+    if (data.transmitted !== undefined) {
+      details.push(
+        renderDetail("Packets", `${data.received} received of ${data.transmitted} sent`),
+        renderDetail("Packet loss", `${data.lossPercent}%`),
+        renderDetail("Round trip (min / avg / max)", data.avgMs === null || data.avgMs === undefined
+          ? ""
+          : `${data.minMs} / ${data.avgMs} / ${data.maxMs} ms`),
+      );
+    }
+  } else if (data.status) {
+    details.push(
+      renderDetail("HTTP status", `${data.status} ${data.statusText || ""}`.trim()),
+      renderDetail("Response time", `${data.responseMs} ms`),
+      renderDetail("Redirects to", data.redirect),
+      renderDetail("Server", data.server),
+      data.tlsAuthorized === null || data.tlsAuthorized === undefined
+        ? ""
+        : renderDetail("TLS certificate", data.tlsAuthorized ? "Trusted" : "Not trusted or name mismatch"),
+    );
+  }
+  const times = data.times?.length
+    ? `<div class="ping-times">${data.times.map((time) => `<span>${escapeHtml(String(time))} ms</span>`).join("")}</div>`
+    : "";
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">HOST CHECK</p><h2>${copyableResult(data.target)}</h2></div>
+      <span class="status-badge ${up ? "success" : "warning"}">${up ? "Host is up" : "No response"}</span>
+    </div>
+    <section class="record-section">
+      <h3>${escapeHtml(methodLabels[data.method] || "Ping")}</h3>
+      <div class="detail-list">
+        ${renderDetail("Target address", data.address)}
+        ${details.join("")}
+      </div>
+      ${times}
+      ${data.error ? `<p class="detail-notice">${escapeHtml(data.error)}</p>` : ""}
+      ${!up && !data.error ? '<p class="detail-notice">No replies were received. The host may be down or may block this type of check.</p>' : ""}
+    </section>`;
+  resultPanel.hidden = false;
+}
+
 function renderMacResult(data) {
   const addressType = data.multicast ? "Multicast address" : "Unicast address";
   const administration = data.locallyAdministered
@@ -1082,6 +1134,7 @@ form.addEventListener("submit", async (event) => {
       ? nameserverInput.value.trim()
       : "",
   });
+  if (requestMode === "ping") params.set("method", pingMethodInput.value);
   if (requestMode === "scan" && portScanInput.checked) {
     params.set("ports", "common");
   }
@@ -1093,6 +1146,8 @@ form.addEventListener("submit", async (event) => {
         ? "/api/bulk-port-scan"
         : requestMode === "details"
       ? "/api/domain-info"
+        : requestMode === "ping"
+        ? "/api/ping"
         : requestMode === "mac"
         ? "/api/mac-lookup"
         : requestMode === "scan"
@@ -1127,6 +1182,7 @@ form.addEventListener("submit", async (event) => {
     if (!response.ok) throw new Error(data.error || "DNS lookup failed.");
     if (requestMode === "details" && data.ip) renderIpInfo(data);
     else if (requestMode === "details") renderDomainInfo(data);
+    else if (requestMode === "ping") renderPingResult(data);
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "scan") renderScanResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Custom port scan" : "Bulk port scan");
@@ -1139,7 +1195,7 @@ form.addEventListener("submit", async (event) => {
     errorMessage.hidden = false;
   } finally {
     submitButton.disabled = false;
-    submitButton.innerHTML = `<span>${mode === "auto" ? "Auto lookup" : mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Custom port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+    submitButton.innerHTML = `<span>${mode === "auto" ? "Auto lookup" : mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Custom port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : mode === "ping" ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   }
 });
 
