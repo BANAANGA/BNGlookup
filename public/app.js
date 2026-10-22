@@ -37,6 +37,7 @@ const clientInfo = document.querySelector("#client-info");
 const clientInfoLabel = document.querySelector("#client-info-label");
 const clientIp = document.querySelector("#client-ip");
 const clientPtr = document.querySelector("#client-ptr");
+const clientWhois = document.querySelector("#client-whois");
 let mode = "auto";
 let authState = null;
 
@@ -74,6 +75,11 @@ async function loadClientInfo() {
         ? data.ptr.join(", ")
         : data.ptrError || "No PTR record"
       : "PTR lookup is available for public IP addresses only.";
+    clientWhois.textContent = data.isPublic
+      ? formatIpRegistrationSummary(data.ipRegistration) ||
+        data.ipRegistrationError ||
+        "No IP registration details were returned."
+      : "IP registration lookup is available for public IP addresses only.";
     if (data.isPublic) {
       clientPtr.classList.add("copy-result");
       clientPtr.dataset.copyValue = data.ptr?.length
@@ -89,6 +95,7 @@ async function loadClientInfo() {
     clientInfoLabel.textContent = "Client IP";
     clientIp.textContent = "Unable to determine";
     clientPtr.textContent = "PTR lookup unavailable.";
+    clientWhois.textContent = "IP registration lookup unavailable.";
     clientInfo.hidden = false;
   }
 }
@@ -120,6 +127,8 @@ function setMode(nextMode) {
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
       ? "e.g. 00:1A:2B:3C:4D:5E"
+    : details
+      ? "e.g. example.com or 8.8.8.8"
     : automatic
       ? "Domain, IP address, or MAC address"
     : customPortScan
@@ -144,7 +153,7 @@ function setMode(nextMode) {
     : reverse
     ? "Find the PTR record associated with an IPv4 or IPv6 address."
     : details
-      ? "View public domain registration (RDAP/WHOIS) and authoritative nameserver details."
+      ? "View public domain or IP registration (RDAP/WHOIS) and authoritative nameserver details."
       : mac
         ? "Find the registered hardware vendor and MAC address type."
       : scan
@@ -796,6 +805,79 @@ function renderDomainInfo(data) {
   resultPanel.hidden = false;
 }
 
+function formatIpRegistrationSummary(registration) {
+  if (!registration) return "";
+  return [
+    registration.name,
+    registration.handle,
+    registration.asNumbers?.length ? `AS ${registration.asNumbers.join(", ")}` : "",
+    registration.asnError ? `AS lookup: ${registration.asnError}` : "",
+    registration.cidrs?.length ? `CIDR ${registration.cidrs.join(", ")}` : "",
+    formatIpAddressRange(registration),
+    registration.country,
+  ].filter(Boolean).join(" · ");
+}
+
+function formatIpAddressRange(registration) {
+  return [registration.startAddress, registration.endAddress]
+    .filter(Boolean)
+    .filter((address, index, addresses) => addresses.indexOf(address) === index)
+    .join(" – ");
+}
+
+function renderIpInfo(data) {
+  const registration = data.ipRegistration;
+  const dateLabels = {
+    registration: "Registered",
+    "last changed": "Last updated",
+    "last update of RDAP database": "RDAP record updated",
+  };
+  const contacts = (registration?.contacts || []).map((contact) => {
+    const role = contact.roles.length ? contact.roles.join(", ") : "Contact";
+    const values = [
+      contact.name,
+      contact.organization,
+      contact.email,
+      contact.phone,
+      contact.address,
+    ].filter(Boolean);
+    return values.length
+      ? `<div class="contact-row"><span>${escapeHtml(role)}</span><strong>${copyableResult(values.join(" · "))}</strong></div>`
+      : "";
+  }).join("");
+
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">IP WHOIS / RDAP</p><h2>${copyableResult(data.ip)}</h2></div>
+    </div>
+    ${data.registrationError ? `<p class="detail-notice">${escapeHtml(data.registrationError)}</p>` : ""}
+    ${registration ? `<section class="record-section">
+      <h3>Network registration</h3>
+      <div class="detail-list">
+        ${renderDetail("Network", registration.name)}
+        ${renderDetail("Registry handle", registration.handle)}
+        ${renderDetail("AS number", registration.asNumbers?.join(", "))}
+        ${renderDetail("Subnet / CIDR", registration.cidrs?.join(", "))}
+        ${registration.asnError ? `<p class="detail-notice">${escapeHtml(registration.asnError)}</p>` : ""}
+        ${renderDetail("Address range", formatIpAddressRange(registration))}
+        ${renderDetail("IP version", registration.ipVersion)}
+        ${renderDetail("Country", registration.country)}
+        ${renderDetail("Network type", registration.type)}
+        ${renderDetail("Parent network", registration.parentHandle)}
+        ${Object.entries(registration.dates || {}).map(([action, date]) =>
+    renderDetail(dateLabels[action] || action, new Date(date).toLocaleDateString()),
+  ).join("")}
+        ${renderDetail("WHOIS server", registration.port43)}
+      </div>
+      ${registration.statuses?.length
+    ? `<div class="status-list">${registration.statuses.map((status) => copyableResult(status)).join("")}</div>`
+    : ""}
+      ${contacts ? `<div class="contact-list">${contacts}</div>` : ""}
+    </section>` : '<p class="empty-result">No IP registration details could be retrieved.</p>'}
+    <p class="scan-disclaimer">IP registration information is retrieved from RDAP, the modern WHOIS service. Contact details may be redacted or unavailable.</p>`;
+  resultPanel.hidden = false;
+}
+
 function detectAutomaticLookup(value) {
   const candidate = value.trim();
   const macPattern = /^(?:[0-9a-f]{12}|(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|(?:[0-9a-f]{2}-){5}[0-9a-f]{2}|(?:[0-9a-f]{4}\.){2}[0-9a-f]{4})$/i;
@@ -990,7 +1072,8 @@ form.addEventListener("submit", async (event) => {
       return;
     }
     if (!response.ok) throw new Error(data.error || "DNS lookup failed.");
-    if (requestMode === "details") renderDomainInfo(data);
+    if (requestMode === "details" && data.ip) renderIpInfo(data);
+    else if (requestMode === "details") renderDomainInfo(data);
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "scan") renderScanResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Custom port scan" : "Bulk port scan");
