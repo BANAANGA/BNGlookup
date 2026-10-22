@@ -105,17 +105,51 @@ and 443 (the app's HTTPS listener on container port 8443, which only answers
 after a certificate is issued). Ports 80 and 443 must be free on the host and
 allowed by your firewall or cloud security group.
 
-### Prebuilt image (GitHub Container Registry)
+### Deploy from the container registry
 
-Each release publishes a multi-arch (amd64/arm64) image, so you can skip the build:
+Each release publishes a multi-arch (amd64/arm64) image to
+`ghcr.io/banaanga/bnglookup` (tags `latest`, `1.2.69`, `1.2`), so no clone or
+build is needed. On a clean Ubuntu 24.04 host, first install Docker (step 1 of
+the section above), then:
 
 ```sh
-docker run -d --name bnglookup -p 3000:3000 -v bnglookup_data:/data \
-  --restart unless-stopped ghcr.io/banaanga/bnglookup:latest
+mkdir -p ~/bnglookup && cd ~/bnglookup
+curl -fsSLO https://raw.githubusercontent.com/BANAANGA/BNGlookup/main/compose.registry.yaml
+curl -fsSLO https://raw.githubusercontent.com/BANAANGA/BNGlookup/main/compose.acme.yaml
+
+# Port 3000 only (HTTP) ...
+sudo docker compose -f compose.registry.yaml up -d
+# ... OR ports 80 and 443 mapped (needed for the ACME certificate)
+sudo docker compose -f compose.registry.yaml -f compose.acme.yaml up -d
+
+sudo docker compose -f compose.registry.yaml ps
 ```
 
-Tags: `latest`, `1.2.69` and `1.2`. In Compose, replace `build: .` with
-`image: ghcr.io/banaanga/bnglookup:latest` and update with `docker compose pull && docker compose up -d`.
+Optional settings go in front of the command or in a `.env` file next to the
+compose file: `PORT=8080`, `BNGLOOKUP_TAG=1.2.69` (pin a version),
+`COOKIE_SECURE=true`, `TRUSTED_PROXIES=…`, `DOH_ENDPOINT=…`. Include the same
+`-f` flags in every later command (or set `COMPOSE_FILE=compose.registry.yaml:compose.acme.yaml`).
+
+Update or roll back by pulling a newer tag:
+
+```sh
+sudo docker compose -f compose.registry.yaml pull
+sudo docker compose -f compose.registry.yaml up -d
+sudo docker image prune -f
+# roll back: BNGLOOKUP_TAG=1.2.68 sudo -E docker compose -f compose.registry.yaml up -d
+```
+
+Without Compose:
+
+```sh
+docker run -d --name bnglookup --restart unless-stopped \
+  -p 3000:3000 -v bnglookup_data:/data ghcr.io/banaanga/bnglookup:latest
+# add -p 80:3000 -p 443:8443 for the ACME client
+```
+
+If the package is private, run `docker login ghcr.io` with a GitHub token that
+has `read:packages` first. Data lives in the `app_data` volume, as with a local
+build, so back it up the same way (see Update below).
 
 ## Update
 
