@@ -575,6 +575,7 @@ h1 {
 }
 .query-meta strong { color: #34445e; }
 .record-section { margin-top: 19px; }
+.ip-whois-section { margin-top: 28px; padding-top: 20px; border-top: 1px solid #242424; }
 .record-section h3 {
   display: flex;
   align-items: center;
