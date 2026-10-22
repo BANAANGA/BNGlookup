@@ -3,8 +3,13 @@ services:
     build: .
     ports:
       - "${PORT:-3000}:3000"
+      # To obtain an SSL certificate with the built-in ACME client, publish
+      # port 80 (HTTP-01 validation) and the HTTPS listener (port 8443):
+      # - "80:3000"
+      # - "443:8443"
     environment:
       PORT: 3000
+      HTTPS_PORT: 8443
       DOH_ENDPOINT: "${DOH_ENDPOINT:-https://cloudflare-dns.com/dns-query}"
       DATA_DIR: /data
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"

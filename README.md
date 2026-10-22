@@ -53,6 +53,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Customize the site title and browser/header icon from the administrator
   settings. Icons can be uploaded as PNG, JPEG, GIF, WebP, or ICO (up to
   256 KB), or loaded from an HTTPS URL.
+- Obtain and renew a free SSL certificate for the web interface with the
+  built-in ACME (Let's Encrypt) client, using the HTTP-01 challenge.
 - Apply daily per-IP limits to public lookups and use secure, expiring
   authenticated sessions.
 - Run as a small Docker container, with no application dependencies to install.
@@ -185,6 +187,28 @@ preserve accounts and quota state across container replacements, and back it up
 with your other application data. To enable the cookie's `Secure` attribute
 behind HTTPS, set `COOKIE_SECURE=true` in the deployment environment. Do not
 expose the service over an untrusted network without HTTPS.
+
+## SSL certificate (ACME)
+
+Administrators can obtain a trusted certificate for the web interface from
+**Admin → SSL certificate**. The built-in client speaks ACME (RFC 8555) to
+Let's Encrypt using the HTTP-01 challenge; it needs no external dependencies.
+
+1. Point a public DNS name (for example `lookup.example.com`) at the Docker host.
+2. Publish port 80 to the app (for validation) and port 8443 as HTTPS. In
+   `compose.yaml` uncomment `"80:3000"` and `"443:8443"`. If a reverse proxy
+   owns port 80, forward `/.well-known/acme-challenge/` to the app.
+3. In the SSL certificate tab enter the domain and a contact email, accept the
+   CA terms, and save. Start with the **Staging** environment (untrusted test
+   certificates, generous limits), then switch to **Production**.
+4. Click **Request certificate now**. Progress is shown live.
+
+The HTTPS listener (`HTTPS_PORT`, default 8443) starts automatically and is
+reloaded without a restart whenever a certificate is issued. With auto-renew
+enabled, the certificate is renewed when fewer than 30 days remain. The
+certificate, private key, and account key are stored with restrictive
+permissions in `/data/acme`, so keep the `/data` volume private and persistent.
+Requests over HTTPS get HSTS and Secure cookies automatically.
 
 ## Web security and input handling
 

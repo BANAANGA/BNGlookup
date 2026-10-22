@@ -340,4 +340,85 @@ document.querySelector("#admin-logout").addEventListener("click", async () => {
   window.location.assign("/");
 });
 
+const certificateForm = document.querySelector("#certificate-form");
+const certificateCurrent = document.querySelector("#certificate-current");
+const acmeSteps = document.querySelector("#acme-steps");
+const acmeRequestButton = document.querySelector("#acme-request");
+let certificatePollTimer = null;
+
+function renderCertificate(data) {
+  if (data.config) {
+    certificateForm.elements.domain.value = data.config.domain;
+    certificateForm.elements.email.value = data.config.email || "";
+    certificateForm.elements.environment.value = data.config.environment;
+    certificateForm.elements.autoRenew.checked = data.config.autoRenew !== false;
+    certificateForm.elements.acceptTerms.checked = Boolean(data.config.termsAccepted);
+  }
+  const certificate = data.certificate;
+  const lines = [];
+  if (certificate) {
+    const staging = /STAGING|Fake/i.test(certificate.issuer);
+    lines.push(
+      `<strong>${escapeHtml(certificate.subject || (certificate.domains && certificate.domains[0]) || "")}</strong>`,
+      `Issuer: ${escapeHtml(certificate.issuer)}${staging ? " (staging, not trusted by browsers)" : ""}`,
+      `Valid until ${escapeHtml(new Date(certificate.validTo).toLocaleString())} (${certificate.daysRemaining} days remaining)`,
+    );
+  } else {
+    lines.push("No certificate has been issued yet.");
+  }
+  lines.push(data.httpsListening
+    ? `HTTPS is active on port ${data.httpsPort} inside the container.`
+    : certificate ? "HTTPS is not currently listening." : "");
+  if (data.httpsError) lines.push(escapeHtml(data.httpsError));
+  certificateCurrent.innerHTML = lines.filter(Boolean).map((line) => `<p>${line}</p>`).join("");
+  acmeSteps.replaceChildren(...(data.status?.steps || []).map((text) => {
+    const item = document.createElement("li");
+    item.textContent = text;
+    return item;
+  }));
+  if (data.status?.state === "error") acmeSteps.lastElementChild?.classList.add("certificate-error");
+  acmeRequestButton.disabled = Boolean(data.running) || !data.config;
+  clearTimeout(certificatePollTimer);
+  if (data.running) certificatePollTimer = setTimeout(loadCertificate, 2000);
+}
+
+async function loadCertificate() {
+  try {
+    renderCertificate(await api("/api/admin/certificate"));
+  } catch (error) {
+    showAdminError(error.message);
+  }
+}
+
+certificateForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = certificateForm.elements;
+  try {
+    renderCertificate(await api("/api/admin/certificate", {
+      method: "PUT",
+      body: JSON.stringify({
+        domain: form.domain.value,
+        email: form.email.value,
+        environment: form.environment.value,
+        autoRenew: form.autoRenew.checked,
+        acceptTerms: form.acceptTerms.checked,
+      }),
+    }));
+    showAdminSuccess("Certificate settings saved.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+acmeRequestButton.addEventListener("click", async () => {
+  try {
+    renderCertificate(await api("/api/admin/certificate", { method: "POST" }));
+    showAdminSuccess("Certificate request started.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+loadCertificate();
+
 initializeAdmin();
