@@ -493,7 +493,9 @@ function entityContact(entity) {
       .filter((field) => Array.isArray(field) && typeof field[0] === "string")
       .map((field) => [
         field[0].toLowerCase(),
-        Array.isArray(field[3]) ? field[3].join(", ") : field[3],
+        Array.isArray(field[3])
+          ? field[3].flat().filter((part) => typeof part === "string" && part.trim()).join(", ")
+          : field[3],
       ]),
   );
   const contact = {
