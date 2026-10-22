@@ -3,6 +3,8 @@ FROM node:22-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 
+RUN apk add --no-cache iputils-tracepath
+
 COPY server.js ./server.js
 COPY acme.js ./acme.js
 COPY public ./public

@@ -90,6 +90,9 @@ const featureAccessDefaults = {
   whois: "user",
   mac: "user",
   ping: "user",
+  "ping-scan": "admin",
+  traceroute: "user",
+  "multi-traceroute": "admin",
   scan: "admin",
   "custom-port": "admin",
   "bulk-port": "admin",
@@ -100,6 +103,9 @@ const featureNames = {
   whois: "Whois",
   mac: "MAC lookup",
   ping: "Ping / host check",
+  "ping-scan": "Ping scan",
+  traceroute: "Traceroute",
+  "multi-traceroute": "Multi traceroute",
   scan: "Magic scan",
   "custom-port": "Port scan",
   "bulk-port": "Bulk port scan",
@@ -2917,7 +2923,7 @@ function checkFeatureAccess(request, response, feature, requireLogin = false) {
   const access = getFeatureAccess()[feature] || "admin";
   const user = currentUser(request);
   if (access === "public" && (!requireLogin || user)) {
-    const expectedMethod = ["/api/custom-port-scan", "/api/bulk-port-scan"]
+    const expectedMethod = ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute"]
       .includes(new URL(request.url, "http://localhost").pathname)
       ? "POST"
       : "GET";
@@ -3108,6 +3114,183 @@ async function pingHost(request, url, response) {
   } catch (error) {
     console.error("Ping failed:", error);
     sendJson(response, 500, { error: "Unable to complete the host check." });
+  }
+}
+
+function runSinglePing(address) {
+  const command = isIP(address) === 6 ? "ping6" : "ping";
+  return new Promise((resolve) => {
+    execFile(command, ["-c", "1", "-W", "1", address], { timeout: 5000, maxBuffer: 16384 }, (error, stdout) => {
+      const time = String(stdout || "").match(/time=([\d.]+) ms/);
+      resolve({ address, up: Boolean(time), rttMs: time ? Number(time[1]) : null });
+    });
+  });
+}
+
+async function runPingScan(request, response) {
+  try {
+    const user = currentUser(request);
+    if (!user) throw invalidScanRequest("Log in to run a ping scan.", 401);
+    const body = await readJsonRequest(request);
+    const addresses = parseBulkScanTargets(typeof body.targets === "string" ? body.targets : "");
+    const allowLocal = getPortScanPolicy().localScanByRole[user.role];
+    const eligible = addresses.filter((address) => isScannableAddress(address, allowLocal));
+    request.logDetails = JSON.stringify({ targets: addresses.slice(0, 256) });
+    const results = new Array(eligible.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(32, eligible.length) }, async () => {
+      while (next < eligible.length) {
+        const index = next;
+        next += 1;
+        results[index] = await runSinglePing(eligible[index]);
+      }
+    }));
+    sendJson(response, 200, {
+      scanned: eligible.length,
+      skipped: addresses.length - eligible.length,
+      up: results.filter((result) => result.up).length,
+      results,
+    });
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    if (statusCode === 500) console.error("Ping scan failed:", error);
+    sendJson(response, statusCode, {
+      error: statusCode === 500 ? "Unable to complete the ping scan." : error.message,
+    });
+  }
+}
+
+async function resolveCheckTarget(rawTarget, allowLocal) {
+  let target = String(rawTarget || "").trim();
+  const bracketed = target.match(/^\[([0-9a-f:.]+)\]$/i);
+  if (bracketed) target = bracketed[1];
+  let addresses;
+  if (isIP(target)) {
+    addresses = [target];
+  } else {
+    const domain = normalizeDomain(target);
+    if (!domain) throw invalidScanRequest("Enter a valid domain name or IP address.");
+    target = domain;
+    try {
+      addresses = (await resolveHost(domain, { all: true, verbatim: true })).map((entry) => entry.address);
+    } catch {
+      return { target, error: "The host name could not be resolved." };
+    }
+  }
+  const eligible = addresses.filter((address) => isScannableAddress(address, allowLocal));
+  eligible.sort((left, right) => isIP(left) - isIP(right));
+  if (!eligible.length) {
+    return { target, error: "This target resolves to a private or reserved address that cannot be traced." };
+  }
+  return { target, address: eligible[0] };
+}
+
+const maxTraceHops = 20;
+
+function parseTracepath(output, destination) {
+  const hops = new Map();
+  let reached = false;
+  for (const line of String(output || "").split("\n")) {
+    if (/^\s*Resume:/.test(line) && !/Too many hops/.test(output)) reached = true;
+    const match = line.match(/^\s*(\d+)\??:\s+(.*)$/);
+    if (!match) continue;
+    const hop = Number(match[1]);
+    if (hop < 1 || hop > maxTraceHops) continue;
+    const rest = match[2].trim();
+    if (rest.startsWith("[")) continue;
+    if (/^no reply/i.test(rest)) {
+      if (!hops.has(hop)) hops.set(hop, { hop, address: null, rttMs: null });
+      continue;
+    }
+    const address = rest.split(/\s+/)[0];
+    if (!isIP(address)) continue;
+    const rtt = rest.match(/([\d.]+)ms/);
+    const existing = hops.get(hop);
+    if (!existing || !existing.address) {
+      hops.set(hop, { hop, address, rttMs: rtt ? Number(rtt[1]) : null });
+    }
+    if (address === destination) reached = true;
+  }
+  const sorted = [...hops.values()].sort((left, right) => left.hop - right.hop);
+  while (sorted.length && !sorted.at(-1).address) sorted.pop();
+  return { hops: sorted, reached };
+}
+
+function runTraceroute(address) {
+  const args = ["-n", "-m", String(maxTraceHops), isIP(address) === 6 ? "-6" : "-4", address];
+  return new Promise((resolve) => {
+    execFile("tracepath", args, { timeout: 45000, maxBuffer: 65536 }, (error, stdout) => {
+      if (error && error.code === "ENOENT") {
+        resolve({ error: "Traceroute is not available on this server." });
+        return;
+      }
+      const parsed = parseTracepath(stdout, address);
+      if (!parsed.hops.length && error) {
+        resolve({ error: "The traceroute could not be run. The server may lack permission or network access." });
+        return;
+      }
+      resolve({ ...parsed, partial: Boolean(error && error.killed) });
+    });
+  });
+}
+
+async function tracerouteHost(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  try {
+    const user = currentUser(request);
+    const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+    const resolved = await resolveCheckTarget(rawName, allowLocal);
+    if (resolved.error) {
+      sendJson(response, 200, { target: resolved.target, hops: [], reached: false, error: resolved.error });
+      return;
+    }
+    const result = await runTraceroute(resolved.address);
+    sendJson(response, 200, { target: resolved.target, address: resolved.address, hops: [], reached: false, ...result });
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    if (statusCode === 500) console.error("Traceroute failed:", error);
+    sendJson(response, statusCode, {
+      error: statusCode === 500 ? "Unable to complete the traceroute." : error.message,
+    });
+  }
+}
+
+async function runMultiTraceroute(request, response) {
+  try {
+    const user = currentUser(request);
+    if (!user) throw invalidScanRequest("Log in to run a traceroute.", 401);
+    const body = await readJsonRequest(request);
+    const raw = typeof body.targets === "string" ? body.targets : "";
+    if (raw.length > 4096) throw invalidScanRequest("Target list must not exceed 4,096 characters.");
+    const targets = [...new Set(raw.split(/[\s,;]+/).filter(Boolean))];
+    if (!targets.length) throw invalidScanRequest("Enter at least one domain name or IP address.");
+    if (targets.length > 10) throw invalidScanRequest("Enter no more than 10 targets.");
+    const allowLocal = getPortScanPolicy().localScanByRole[user.role];
+    request.logDetails = JSON.stringify({ targets });
+    const results = new Array(targets.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(4, targets.length) }, async () => {
+      while (next < targets.length) {
+        const index = next;
+        next += 1;
+        try {
+          const resolved = await resolveCheckTarget(targets[index], allowLocal);
+          results[index] = resolved.error
+            ? { target: resolved.target, hops: [], reached: false, error: resolved.error }
+            : { target: resolved.target, address: resolved.address, hops: [], reached: false, ...await runTraceroute(resolved.address) };
+        } catch (error) {
+          results[index] = { target: targets[index].slice(0, 80), hops: [], reached: false, error: error.message };
+        }
+      }
+    }));
+    sendJson(response, 200, { results });
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    if (statusCode === 500) console.error("Multi traceroute failed:", error);
+    sendJson(response, statusCode, {
+      error: statusCode === 500 ? "Unable to complete the traceroute." : error.message,
+    });
   }
 }
 
@@ -3336,6 +3519,9 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/bulk-port-scan": { method: "POST", action: "Bulk port scan" },
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
+    "/api/ping-scan": { method: "POST", action: "Ping scan" },
+    "/api/traceroute": { method: "GET", action: "Traceroute", keys: ["name"] },
+    "/api/multi-traceroute": { method: "POST", action: "Multi traceroute" },
   };
   const queryLogRoute = queryLogRoutes[url.pathname];
   if (queryLogRoute && request.method === queryLogRoute.method) {
@@ -3461,10 +3647,13 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/bulk-port-scan": "bulk-port",
     "/api/mac-lookup": "mac",
     "/api/ping": "ping",
+    "/api/ping-scan": "ping-scan",
+    "/api/traceroute": "traceroute",
+    "/api/multi-traceroute": "multi-traceroute",
   };
   const feature = protectedFeatures[url.pathname];
   const requiresPortScanLogin =
-    ["/api/custom-port-scan", "/api/bulk-port-scan"].includes(url.pathname) ||
+    ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute"].includes(url.pathname) ||
     (url.pathname === "/api/scan" && url.searchParams.get("ports") === "common");
   if (feature && !checkFeatureAccess(request, response, feature, requiresPortScanLogin)) return;
 
@@ -3519,6 +3708,33 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     pingHost(request, url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/ping-scan") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    runPingScan(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/traceroute") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    tracerouteHost(request, url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/multi-traceroute") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    runMultiTraceroute(request, response);
     return;
   }
 

@@ -18,6 +18,8 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Check whether a remote host is up with an ICMP ping (4 echo requests, with
   packet loss and round-trip times) or an HTTP/HTTPS GET request (status code,
   response time, redirect target, and TLS trust).
+- Ping an entire subnet once (ping scan), trace the route to a host, or trace
+  several hosts at once and compare their routes (traceroute / multi traceroute).
 - Scan a domain and common subdomains for DNS records, cloud-provider
   endpoints, WHOIS/RDAP registration data, SPF policies, and common DKIM
   selectors, with IP geolocation and country information for returned IPs.
@@ -456,3 +458,13 @@ followed). Use a GET check for hosts that block ICMP. Private and reserved
 addresses are refused unless local-network access is enabled for your role.
 ICMP from the container works with Docker's default settings; if your runtime
 disables unprivileged ICMP, add `cap_add: [NET_RAW]` to the Compose service.
+
+Choose **Ping scan** to send one ICMP echo request to every address in a list or
+CIDR block (max 256 addresses) and see which hosts are up. **Traceroute** shows
+the router path to a host (up to 20 hops, 45 s limit), and **Multi traceroute**
+traces up to 10 targets at once and adds a hop-by-hop route comparison table.
+Traceroute uses `tracepath` (UDP probes, installed in the image as
+`iputils-tracepath`), so it needs no extra privileges; routers that do not
+answer appear as "no reply". Default access: Ping scan and Multi traceroute are
+admin-only, Traceroute is user-level; change this under the admin access settings. Private
+and reserved addresses follow the same local-network policy as port scans.

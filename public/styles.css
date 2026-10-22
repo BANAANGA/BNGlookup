@@ -986,3 +986,9 @@ body {
 .quick-search { display: flex; gap: 10px; margin: 0 0 22px; }
 .quick-search .submit-button { width: auto; flex: none; padding: 0 22px; margin: 0; }
 @media (max-width: 680px) { .quick-search { flex-direction: column; } .quick-search .submit-button { width: 100%; min-height: 44px; } }
+.net-table { min-width: 0; }
+.net-table td:first-child { white-space: nowrap; }
+.trace-section { margin-top: 18px; }
+.trace-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.trace-heading h3 { margin: 0; }
+.trace-silent { color: #7c7c7c; }
