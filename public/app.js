@@ -171,7 +171,7 @@ function setMode(nextMode) {
       : bulkPortScan
         ? "Check one TCP port across an explicit list or CIDR block of IP addresses."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
-  submitButton.innerHTML = `<span>${automatic ? "Auto lookup" : scan ? "Magic scan" : customPortScan ? "Custom port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : ping ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+  submitButton.innerHTML = `<span>${automatic ? "Auto lookup" : scan ? "Magic scan" : customPortScan ? "Port scan" : bulkPortScan ? "Bulk port scan" : mac ? "Lookup MAC" : ping ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   if (automatic) updateAutoDetectHint();
@@ -1189,7 +1189,7 @@ form.addEventListener("submit", async (event) => {
     else if (requestMode === "ping") renderPingResult(data);
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "scan") renderScanResult(data);
-    else if (isPortScan) renderPortScanResult(data, customPortScan ? "Custom port scan" : "Bulk port scan");
+    else if (isPortScan) renderPortScanResult(data, customPortScan ? "Port scan" : "Bulk port scan");
     else {
       showResult(data);
       if (requestMode === "reverse") appendIpRegistration(lookupName.replace(/^\[|\]$/g, ""));
@@ -1199,7 +1199,7 @@ form.addEventListener("submit", async (event) => {
     errorMessage.hidden = false;
   } finally {
     submitButton.disabled = false;
-    submitButton.innerHTML = `<span>${mode === "auto" ? "Auto lookup" : mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Custom port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : mode === "ping" ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
+    submitButton.innerHTML = `<span>${mode === "auto" ? "Auto lookup" : mode === "scan" ? "Magic scan" : mode === "custom-port" ? "Port scan" : mode === "bulk-port" ? "Bulk port scan" : mode === "mac" ? "Lookup MAC" : mode === "ping" ? "Ping host" : "Lookup"}</span><span aria-hidden="true">→</span>`;
   }
 });
 

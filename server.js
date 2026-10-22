@@ -101,7 +101,7 @@ const featureNames = {
   mac: "MAC lookup",
   ping: "Ping / host check",
   scan: "Magic scan",
-  "custom-port": "Custom port scan",
+  "custom-port": "Port scan",
   "bulk-port": "Bulk port scan",
 };
 const portScanPolicyDefaults = {
@@ -156,6 +156,7 @@ database.exec(`
     WHERE id NOT IN (SELECT id FROM admin_logs ORDER BY id DESC LIMIT 20000);
   END;
 `);
+database.prepare("UPDATE admin_logs SET action = 'Port scan' WHERE action = 'Port scan'").run();
 database.prepare(`
   INSERT OR IGNORE INTO app_settings (key, value) VALUES ('trusted_proxies', ?)
 `).run(JSON.stringify(trustedProxyEntries));
@@ -1450,9 +1451,9 @@ async function runCustomPortScan(request, response) {
     sendJson(response, 200, data);
   } catch (error) {
     const statusCode = error.statusCode || 500;
-    if (statusCode === 500) console.error("Custom port scan failed:", error);
+    if (statusCode === 500) console.error("Port scan failed:", error);
     sendJson(response, statusCode, {
-      error: statusCode === 500 ? "Unable to complete the custom port scan." : error.message,
+      error: statusCode === 500 ? "Unable to complete the port scan." : error.message,
     });
   }
 }
@@ -3331,7 +3332,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/lookup": { method: "GET", action: "DNS lookup", keys: ["name", "type", "reverse"] },
     "/api/domain-info": { method: "GET", action: "Domain/IP registration lookup", keys: ["name"] },
     "/api/scan": { method: "GET", action: "Magic scan", keys: ["name", "ports"] },
-    "/api/custom-port-scan": { method: "POST", action: "Custom port scan" },
+    "/api/custom-port-scan": { method: "POST", action: "Port scan" },
     "/api/bulk-port-scan": { method: "POST", action: "Bulk port scan" },
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },

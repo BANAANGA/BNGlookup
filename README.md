@@ -69,7 +69,7 @@ illustrative sample data.
 
 <table>
   <tr>
-    <td align="center"><strong>Lookup tools</strong><br><img src="assets/dns-lookup.png" alt="BNGlookup home page with automatic, DNS, reverse, Whois, MAC, Magic scan, custom port scan, and bulk port scan modes" width="560"></td>
+    <td align="center"><strong>Lookup tools</strong><br><img src="assets/dns-lookup.png" alt="BNGlookup home page with automatic, DNS, reverse, Whois, MAC, Magic scan, port scan, and bulk port scan modes" width="560"></td>
     <td align="center"><strong>First-run administrator setup</strong><br><img src="assets/first-run-setup.png" alt="First-run setup page for creating the initial administrator account" width="560"></td>
   </tr>
   <tr>
@@ -426,7 +426,7 @@ other reserved addresses are always skipped. It reports ports that accepted a
 TCP connection; it is not a vulnerability assessment. Only scan systems you
 are authorized to test.
 
-The **Custom port scan** tab checks a comma-separated list of ports and/or
+The **Port scan** tab checks a comma-separated list of ports and/or
 ranges (for example, `22,80,443,8000-8010`) on one domain or IP address. The
 administrator configures the maximum number of unique ports per target
 separately for Admin and User roles, from 1 to 65,535. Defaults are 100 ports
