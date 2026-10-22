@@ -23,8 +23,11 @@ reverse DNS (PTR) records for IPv4 and IPv6 addresses.
 - Run a custom TCP port list/range against one domain or IP, or run a bounded
   single-port scan against an explicit IP list or CIDR block.
 - Look up PTR records from IPv4 or IPv6 addresses.
-- Display the connecting IP address and its PTR record on the landing page
-  when the address is public.
+- Look up public IPv4/IPv6 registration data from RDAP (IP WHOIS), including
+  network range and CIDR subnet, AS number, registry handle, country, dates,
+  status, and published contacts.
+- Display the visitor's public IP address, PTR record, and IP registration
+  details on the landing page.
 - Display PTR hostnames for IP addresses returned in DNS results and for
   resolved nameserver addresses.
 - View public domain registration details from RDAP (the modern WHOIS service),
@@ -197,8 +200,10 @@ scanning only systems you are authorized to test. Keep `COOKIE_SECURE=true`
 when serving the app behind an HTTPS reverse proxy.
 
 The landing page displays the client IP observed by the application and
-performs a PTR lookup when it is public. Behind a reverse proxy, set
-the proxy's connection address in **Settings & users → Trusted reverse proxies**
+performs PTR and RDAP registration lookups when it is public. This sends the
+visitor's public IP address to the DNS-over-HTTPS provider for PTR resolution
+and to `rdap.org` for registration data. Behind a reverse proxy, set the
+proxy's connection address in **Settings & users → Trusted reverse proxies**
 so the app can safely use its forwarded client-IP header.
 
 ## Deploy with Arcane
@@ -262,11 +267,15 @@ configured default DNS-over-HTTPS provider. A custom port can be provided after 
 (`[2606:4700:4700::1111]:53`). Hostnames are resolved using the container's
 configured system resolver before querying the selected server.
 
-Choose **Whois** to view publicly available registration information
-and compare registered nameservers with the domain's live DNS NS records.
-Registration data is retrieved from RDAP using `rdap.org`, which redirects to
-the responsible registry. The domain name is sent to the RDAP service;
-contact details may be redacted or unavailable.
+Choose **Whois** to view publicly available registration information for a
+domain or IP address. Domain lookups compare registered nameservers with the
+domain's live DNS NS records. Registration data is retrieved from RDAP using
+`rdap.org`, which redirects to the responsible registry. The queried domain or
+IP address is sent to the RDAP service; contact details may be redacted or
+unavailable. For visitors with a public IP address, the landing page also
+retrieves and displays that IP's RDAP registration details. If the RDAP record
+does not include an AS number, BNGlookup requests it from `ipwho.is`; this
+applies to the visitor IP as well as IP addresses submitted to Whois.
 
 The **Magic scan** tool opens by default. It checks A, AAAA, CAA, CNAME, HTTPS,
 MX, NS, SOA, SRV, and TXT records for the domain and common subdomains such as

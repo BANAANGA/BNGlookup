@@ -560,6 +560,111 @@ async function fetchRdap(domain) {
   };
 }
 
+async function fetchIpRdap(address) {
+  const response = await fetch(`https://rdap.org/ip/${address}`, {
+    headers: {
+      accept: "application/rdap+json, application/json",
+      "user-agent": "BNGlookup/0.1 (+https://github.com/BANAANGA/BNGlookup)",
+    },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (response.status === 404) {
+    throw new Error("No registration record was found for this IP address.");
+  }
+  if (!response.ok) {
+    throw new Error(`RDAP provider returned HTTP ${response.status}.`);
+  }
+
+  const data = await response.json();
+  if (data.objectClassName !== "ip network") {
+    throw new Error("RDAP provider returned an invalid IP address record.");
+  }
+
+  const contacts = [];
+  function collectContacts(entities) {
+    for (const entity of entities) {
+      if (!entity || typeof entity !== "object") continue;
+      const contact = entityContact(entity);
+      if (contact) {
+        contacts.push({
+          roles: Array.isArray(entity.roles) ? entity.roles : [],
+          ...contact,
+        });
+      }
+      if (Array.isArray(entity.entities)) collectContacts(entity.entities);
+    }
+  }
+  collectContacts(Array.isArray(data.entities) ? data.entities : []);
+  const asNumbers = [
+    ...(Array.isArray(data.originAutnums) ? data.originAutnums : []),
+    ...(Array.isArray(data.arin_originas0_originautnums)
+      ? data.arin_originas0_originautnums
+      : []),
+  ]
+    .map((value) => typeof value === "number" ? String(value) : String(value).replace(/^AS/i, ""))
+    .filter((value) => /^\d+$/.test(value))
+    .map((value) => `AS${value}`);
+  const cidrs = (Array.isArray(data.cidr0_cidrs) ? data.cidr0_cidrs : [])
+    .flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const prefix = typeof entry.v4prefix === "string"
+        ? entry.v4prefix
+        : typeof entry.v6prefix === "string"
+          ? entry.v6prefix
+          : null;
+      const maxPrefix = entry.v4prefix ? 32 : entry.v6prefix ? 128 : 0;
+      return prefix && Number.isInteger(entry.length) &&
+        entry.length >= 0 && entry.length <= maxPrefix
+        ? [`${prefix}/${entry.length}`]
+        : [];
+    });
+  let asnError = null;
+  if (asNumbers.length === 0 && isPublicAddress(address)) {
+    try {
+      const response = await fetch(`https://ipwho.is/${address}`, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) {
+        throw new Error(`ASN provider returned HTTP ${response.status}.`);
+      }
+      const result = await response.json();
+      const asn = result.success === true ? result.connection?.asn : null;
+      if (typeof asn === "string" && /^AS\d+$/i.test(asn)) {
+        asNumbers.push(asn.toUpperCase());
+      } else {
+        throw new Error("ASN provider returned no autonomous system number.");
+      }
+    } catch (error) {
+      asnError = error.message || "Unable to retrieve the autonomous system number.";
+    }
+  }
+  const dates = {};
+  for (const event of Array.isArray(data.events) ? data.events : []) {
+    if (event.eventAction && event.eventDate) {
+      dates[event.eventAction] = event.eventDate;
+    }
+  }
+
+  return {
+    name: typeof data.name === "string" ? data.name : null,
+    handle: typeof data.handle === "string" ? data.handle : null,
+    startAddress: typeof data.startAddress === "string" ? data.startAddress : null,
+    endAddress: typeof data.endAddress === "string" ? data.endAddress : null,
+    ipVersion: typeof data.ipVersion === "string" ? data.ipVersion : null,
+    country: typeof data.country === "string" ? data.country : null,
+    type: typeof data.type === "string" ? data.type : null,
+    parentHandle: typeof data.parentHandle === "string" ? data.parentHandle : null,
+    port43: typeof data.port43 === "string" ? data.port43 : null,
+    asNumbers: [...new Set(asNumbers)],
+    asnError,
+    cidrs: [...new Set(cidrs)],
+    dates,
+    statuses: Array.isArray(data.status) ? data.status : [],
+    contacts,
+  };
+}
+
 function parseNameserver(input) {
   if (!input) return null;
   if (input.length > 300) {
@@ -1029,22 +1134,20 @@ async function handleClientInfo(request, response) {
     sendJson(response, 200, { address, isPublic: false, ptr: [], ptrError: null });
     return;
   }
-  try {
-    const result = await fetchPtr(address);
-    sendJson(response, 200, {
-      address,
-      isPublic: true,
-      ptr: result.answers,
-      ptrError: null,
-    });
-  } catch (error) {
-    sendJson(response, 200, {
-      address,
-      isPublic: true,
-      ptr: [],
-      ptrError: "PTR lookup is unavailable.",
-    });
-  }
+  const [ptrResult, rdapResult] = await Promise.allSettled([
+    fetchPtr(address),
+    fetchIpRdap(address),
+  ]);
+  sendJson(response, 200, {
+    address,
+    isPublic: true,
+    ptr: ptrResult.status === "fulfilled" ? ptrResult.value.answers : [],
+    ptrError: ptrResult.status === "rejected" ? "PTR lookup is unavailable." : null,
+    ipRegistration: rdapResult.status === "fulfilled" ? rdapResult.value : null,
+    ipRegistrationError: rdapResult.status === "rejected"
+      ? rdapResult.reason.message || "Unable to retrieve IP registration details."
+      : null,
+  });
 }
 
 async function queryDnsRecords(name, type) {
@@ -1802,11 +1905,26 @@ async function fetchNameservers(domain) {
 }
 
 async function domainInfo(url, response) {
-  const rawDomain = queryInput(url, "name", 253, response);
-  if (rawDomain === null) return;
-  const domain = normalizeDomain(rawDomain);
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const name = rawName.trim();
+  if (isIP(name)) {
+    try {
+      const registration = await fetchIpRdap(name);
+      sendJson(response, 200, { ip: name, ipRegistration: registration, registrationError: null });
+    } catch (error) {
+      sendJson(response, 200, {
+        ip: name,
+        ipRegistration: null,
+        registrationError: error.message || "Unable to retrieve IP registration details.",
+      });
+    }
+    return;
+  }
+
+  const domain = normalizeDomain(name);
   if (!domain) {
-    sendJson(response, 400, { error: "Enter a valid domain name." });
+    sendJson(response, 400, { error: "Enter a valid domain name or IP address." });
     return;
   }
 
@@ -2935,7 +3053,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
 
   const queryLogRoutes = {
     "/api/lookup": { method: "GET", action: "DNS lookup", keys: ["name", "type", "reverse"] },
-    "/api/domain-info": { method: "GET", action: "Domain registration lookup", keys: ["name"] },
+    "/api/domain-info": { method: "GET", action: "Domain/IP registration lookup", keys: ["name"] },
     "/api/scan": { method: "GET", action: "Magic scan", keys: ["name", "ports"] },
     "/api/custom-port-scan": { method: "POST", action: "Custom port scan" },
     "/api/bulk-port-scan": { method: "POST", action: "Bulk port scan" },

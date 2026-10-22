@@ -161,8 +161,8 @@ h1 {
   color: #718097;
   font-size: 11px;
 }
-.client-info-label, .client-info-ptr-label { font-weight: 600; }
-.client-info strong, #client-ptr { min-width: 0; overflow-wrap: anywhere; color: #26364e; }
+.client-info-label, .client-info-ptr-label, .client-info-whois-label { font-weight: 600; }
+.client-info strong, #client-ptr, #client-whois { min-width: 0; overflow-wrap: anywhere; color: #26364e; }
 .client-info strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .login-required-notice { margin: 18px 0; color: #aaa; font-size: 12px; line-height: 1.6; }
 .login-required-notice a { color: #8aeab1; }
@@ -875,7 +875,7 @@ body {
 .mode-tab.active { color: #70e2a5; }
 .mode-tab.active::after { background: #54d88f; }
 .client-info { border-color: #292929; color: #929292; background: #090d0a; }
-.client-info strong, #client-ptr { color: #d8e8dd; }
+.client-info strong, #client-ptr, #client-whois { color: #d8e8dd; }
 .field-label { color: #c5c5c5; }
 .input-wrap, .type-control select, .custom-type {
   color: #e8e8e8;
