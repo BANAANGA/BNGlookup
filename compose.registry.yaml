@@ -1,0 +1,22 @@
+# Deploys the prebuilt image from GitHub Container Registry (no build, no clone needed).
+# Use: docker compose -f compose.registry.yaml up -d
+# Pin a release with: BNGLOOKUP_TAG=1.2.69 docker compose -f compose.registry.yaml up -d
+# For the ACME client also publish 80/443: add -f compose.acme.yaml
+services:
+  dnslookup:
+    image: ghcr.io/banaanga/bnglookup:${BNGLOOKUP_TAG:-latest}
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      HTTPS_PORT: 8443
+      DOH_ENDPOINT: "${DOH_ENDPOINT:-https://cloudflare-dns.com/dns-query}"
+      DATA_DIR: /data
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
+    volumes:
+      - app_data:/data
+    restart: unless-stopped
+
+volumes:
+  app_data:
