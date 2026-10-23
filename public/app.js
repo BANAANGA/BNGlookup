@@ -22,6 +22,8 @@ const multiTraceInput = document.querySelector("#multi-trace-input");
 const bulkTargetsHint = document.querySelector("#bulk-targets-hint");
 const pingMethodControl = document.querySelector("#ping-method-control");
 const pingMethodInput = document.querySelector("#ping-method-input");
+const sslScanControl = document.querySelector("#sslscan-control");
+const sslScanPort = document.querySelector("#sslscan-port");
 const pingMonitorControl = document.querySelector("#ping-monitor-control");
 const pingMonitorStart = document.querySelector("#ping-monitor-start");
 const pingMonitorStop = document.querySelector("#ping-monitor-stop");
@@ -140,6 +142,7 @@ function submitLabel(currentMode) {
     nmap: "Run Nmap scan",
     mac: "Lookup MAC",
     ping: "Ping host",
+    sslscan: "Check SSL/TLS",
     "ping-scan": "Run ping scan",
     traceroute: "Trace route",
     "multi-traceroute": "Trace routes",
@@ -154,6 +157,7 @@ function setMode(nextMode) {
   const details = mode === "details";
   const mac = mode === "mac";
   const ping = mode === "ping";
+  const sslscan = mode === "sslscan";
   const scan = mode === "scan";
   const customPortScan = mode === "custom-port";
   const bulkPortScan = mode === "bulk-port";
@@ -180,7 +184,7 @@ function setMode(nextMode) {
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
       ? "e.g. 00:1A:2B:3C:4D:5E"
-    : details || ping || traceroute || nmapScan
+    : details || ping || sslscan || traceroute || nmapScan
       ? "e.g. example.com or 8.8.8.8"
     : automatic
       ? "Domain, IP address, or MAC address"
@@ -188,11 +192,14 @@ function setMode(nextMode) {
       ? "e.g. example.com or 8.8.8.8"
       : "e.g. example.com";
   input.autocomplete = reverse || mac || portScan ? "off" : "url";
-  typeControl.hidden = automatic || reverse || details || mac || ping || traceroute || listMode || scan || portScan;
-  customType.hidden = automatic || reverse || details || mac || ping || traceroute || listMode || scan || portScan || recordType.value !== "custom";
+  typeControl.hidden = automatic || reverse || details || mac || ping || sslscan || traceroute || listMode || scan || portScan;
+  customType.hidden = automatic || reverse || details || mac || ping || sslscan || traceroute || listMode || scan || portScan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
   if (!isAdmin) nameserverInput.value = "";
   pingMethodControl.hidden = !ping;
+  sslScanControl.hidden = !sslscan;
+  sslScanPort.disabled = !sslscan;
+  sslScanPort.required = sslscan;
   pingMonitorControl.hidden = !ping;
   pingMonitorStart.disabled = pingMonitorActive || !authState?.user;
   pingMonitorStop.disabled = !pingMonitorActive;
@@ -222,6 +229,8 @@ function setMode(nextMode) {
       ? "View public domain or IP registration (RDAP/WHOIS) and authoritative nameserver details."
       : ping
         ? "Check whether a remote host is up using ICMP ping or an HTTP(S) GET request."
+      : sslscan
+        ? "Test one TLS handshake and inspect the remote server's negotiated protocol, cipher, certificate chain, and trust status."
       : mac
         ? "Find the registered hardware vendor and MAC address type."
       : scan
@@ -850,6 +859,51 @@ function renderPingResult(data) {
       ${data.error ? `<p class="detail-notice">${escapeHtml(data.error)}</p>` : ""}
       ${!up && !data.error ? '<p class="detail-notice">No replies were received. The host may be down or may block this type of check.</p>' : ""}
     </section>`;
+  resultPanel.hidden = false;
+}
+
+function renderSslScanResult(data) {
+  const handshakeSucceeded = Boolean(data.handshake);
+  const trusted = handshakeSucceeded && Boolean(data.authorized);
+  const certificates = Array.isArray(data.certificateChain) ? data.certificateChain : [];
+  const certificateSections = certificates.map((certificate, index) => `
+    <section class="record-section">
+      <h3>${index === 0 ? "Server certificate" : `Certificate ${index + 1}`}</h3>
+      <div class="detail-list">
+        ${renderDetail("Subject", certificate.subject)}
+        ${renderDetail("Subject alternative names", certificate.subjectAltName)}
+        ${renderDetail("Issuer", certificate.issuer)}
+        ${renderDetail("Valid from", certificate.validFrom)}
+        ${renderDetail("Valid until", certificate.validTo)}
+        ${renderDetail("Serial number", certificate.serialNumber)}
+        ${renderDetail("SHA-256 fingerprint", certificate.fingerprint256)}
+      </div>
+    </section>
+  `).join("");
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">SSL/TLS CHECK</p><h2>${copyableResult(data.target)}:${escapeHtml(String(data.port))}</h2></div>
+      <span class="status-badge ${trusted ? "success" : "warning"}">${!handshakeSucceeded
+    ? "Handshake failed"
+    : trusted ? "Certificate trusted" : "Certificate not trusted"}</span>
+    </div>
+    <section class="record-section">
+      <h3>Negotiated connection</h3>
+      <div class="detail-list">
+        ${renderDetail("Resolved address", data.address)}
+        ${renderDetail("TLS protocol", data.protocol)}
+        ${renderDetail("Cipher", data.cipher?.name)}
+        ${renderDetail("Cipher protocol", data.cipher?.version)}
+        ${renderDetail("Cipher strength", data.cipher?.bits ? `${data.cipher.bits} bits` : "")}
+        ${renderDetail("Certificate verification", handshakeSucceeded ? (trusted ? "Trusted" : "Failed") : "Not completed")}
+        ${renderDetail("Verification detail", data.authorizationError)}
+      </div>
+      ${data.error ? `<p class="detail-notice">${escapeHtml(data.error)}</p>` : ""}
+    </section>
+    ${certificateSections || (handshakeSucceeded
+    ? '<p class="empty-result">The server did not provide a certificate.</p>'
+    : "")}
+    <p class="scan-disclaimer">This performs one TLS handshake only. It does not enumerate supported protocol versions or cipher suites, or test for TLS vulnerabilities.</p>`;
   resultPanel.hidden = false;
 }
 
@@ -1623,7 +1677,7 @@ form.addEventListener("submit", async (event) => {
   const nmapScan = requestMode === "nmap";
   const isPortScan = customPortScan || bulkPortScan;
   const postsJson = isPortScan || pingScan || multiTraceroute || nmapScan;
-  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${requestMode === "scan" ? "Scanning" : isPortScan || nmapScan ? "Scanning ports" : pingScan ? "Pinging" : requestMode === "traceroute" || multiTraceroute ? "Tracing" : "Looking up"}</span>`;
+  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${requestMode === "scan" ? "Scanning" : isPortScan || nmapScan ? "Scanning ports" : requestMode === "sslscan" ? "Checking TLS" : pingScan ? "Pinging" : requestMode === "traceroute" || multiTraceroute ? "Tracing" : "Looking up"}</span>`;
 
   const params = new URLSearchParams({
     name: lookupName,
@@ -1635,6 +1689,7 @@ form.addEventListener("submit", async (event) => {
       : "",
   });
   if (requestMode === "ping") params.set("method", pingMethodInput.value);
+  if (requestMode === "sslscan") params.set("port", sslScanPort.value.trim());
   if (requestMode === "scan" && portScanInput.checked) {
     params.set("ports", "common");
   }
@@ -1644,7 +1699,9 @@ form.addEventListener("submit", async (event) => {
       await streamTraceroute(multiTraceroute);
       return;
     }
-    const endpoint = customPortScan
+    const endpoint = requestMode === "sslscan"
+      ? "/api/sslscan"
+      : customPortScan
       ? "/api/custom-port-scan"
       : bulkPortScan
         ? "/api/bulk-port-scan"
@@ -1710,6 +1767,7 @@ form.addEventListener("submit", async (event) => {
     if (requestMode === "details" && data.ip) renderIpInfo(data);
     else if (requestMode === "details") renderDomainInfo(data);
     else if (requestMode === "ping") renderPingResult(data);
+    else if (requestMode === "sslscan") renderSslScanResult(data);
     else if (pingScan) renderPingScanResult(data);
     else if (requestMode === "traceroute") renderTracerouteResult({ results: [data] }, false);
     else if (multiTraceroute) renderTracerouteResult(data, true);

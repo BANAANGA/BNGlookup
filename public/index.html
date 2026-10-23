@@ -47,6 +47,9 @@
           <button class="mode-tab" id="ping-tab" type="button" role="tab" aria-selected="false" data-mode="ping" hidden>
             <span aria-hidden="true">◉</span> Ping
           </button>
+          <button class="mode-tab" id="sslscan-tab" type="button" role="tab" aria-selected="false" data-mode="sslscan" hidden>
+            <span aria-hidden="true">▣</span> SSLscan
+          </button>
           <button class="mode-tab" id="ping-scan-tab" type="button" role="tab" aria-selected="false" data-mode="ping-scan" hidden>
             <span aria-hidden="true">◎</span> Ping scan
           </button>
@@ -136,6 +139,11 @@
               <option value="http">HTTP GET request</option>
             </select>
             <span>Checks whether the host is up. Some hosts block ICMP; try an HTTP(S) GET instead. Private addresses are checked only when allowed for your role.</span>
+          </div>
+          <div class="scan-extra-control" id="sslscan-control" hidden>
+            <label for="sslscan-port">TLS port</label>
+            <input id="sslscan-port" type="number" min="1" max="65535" value="443" inputmode="numeric">
+            <span>Tests one TLS handshake and reports the negotiated protocol, cipher, certificate chain and trust status. Private addresses are checked only when allowed for your role.</span>
           </div>
           <div class="scan-extra-control ping-monitor-control" id="ping-monitor-control" hidden>
             <span class="ping-monitor-label">Live monitoring</span>
