@@ -242,6 +242,8 @@ Several tools send data to external services; these are listed under
 - Ping scan, Multi traceroute and both port scans need a login even if set to Public.
 - Public features are limited to 15 lookups per client IP per UTC day (stored in
   SQLite); logged-in users are exempt.
+- New accounts and admin password resets require a **password change on first login**;
+  until it is changed, the session has no access to any feature.
 - **Dashboard** shows live CPU, memory (container cgroup limit when set), data-volume
   storage, system load, 24 h activity and the latest queries. Admin only.
 - **Logs** show login attempts, admin actions and lookup/scan requests (latest 200
