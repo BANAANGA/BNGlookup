@@ -179,14 +179,16 @@
             <select id="nmap-scan-type">
               <option value="tcp-top-20">TCP connect — top 20 ports</option>
               <option value="tcp-top-100">TCP connect — top 100 ports</option>
+              <option value="tcp-top-1000">TCP connect — top 1000 ports</option>
               <option value="service-top-20">Light service detection — top 20 ports</option>
             </select>
-            <span>Nmap runs against one IP or hostname at a time. The resolved address must be in an administrator-configured range or match an IP added at successful login. No custom command-line arguments or CIDR scans are accepted.</span>
+            <span>Nmap scans one IP or hostname at a time, only within an administrator-authorized range or a login IP. Profiles are bounded; custom arguments and CIDR scans are not accepted.</span>
           </div>
           <p class="hint auto-detect-hint" id="auto-detect-hint">Enter a domain for DNS, an IP address for reverse DNS, or a MAC address for vendor details.</p>
           <p class="hint" id="form-hint">Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.</p>
         </form>
 
+        <p class="nmap-live-status" id="nmap-live-status" role="status" aria-live="polite" hidden></p>
         <div class="result" id="result" aria-live="polite" hidden></div>
         <section class="ping-monitor-panel" id="ping-monitor-panel" aria-label="Live host monitor" hidden>
           <div class="ping-monitor-heading">

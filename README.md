@@ -25,7 +25,7 @@ small Docker container with no application dependencies.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side.
 - **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
 - **Port scan / Bulk port scan**: custom TCP ports on one target, or one port across many addresses.
-- **Nmap**: bounded TCP connect profiles for one target at a time, restricted to administrator-approved CIDRs and exact client IPs from successful logins (30-day expiry).
+- **Nmap**: bounded TCP profiles for one authorized target at a time, with live status and elapsed time.
 
 **Administration**
 
@@ -201,7 +201,7 @@ Several tools send data to external services; these are listed under
 | Magic scan | Default tab. See below. |
 | Port scan | Ports and ranges (`22,80,443,8000-8010`) on one target; max ports per role (default Admin 100, User 25); up to 8 resolved IPs. |
 | Bulk port scan | One TCP port across a list or CIDR blocks; max 256 unique addresses. |
-| Nmap | One IP or hostname within an administrator-approved CIDR or an exact IP observed at successful login (automatic entries expire after 30 days); top 20/100 TCP connect or light service detection. No arbitrary flags or range scans. |
+| Nmap | One IP or hostname within an administrator-approved CIDR or an exact IP observed at successful login (automatic entries expire after 30 days); TCP top 20/100/1000 or light TCP service detection. Live status includes elapsed time. No arbitrary flags or range scans. |
 
 **Notes**
 
@@ -219,6 +219,8 @@ Several tools send data to external services; these are listed under
   protocol versions or cipher suites, or test for TLS vulnerabilities.
 - **Live traceroute API**: `GET /api/traceroute?name=…&stream=1` and
   `POST /api/multi-traceroute` with `"stream": true` return newline-delimited JSON events.
+- **Live Nmap status**: the authenticated UI polls `GET /api/nmap-status` for
+  scan state and elapsed time; status is scoped to the signed-in user.
 - **Magic scan** checks A, AAAA, CAA, CNAME, HTTPS, MX, NS, SOA, SRV and TXT for the
   domain, common subdomains (`www`, `mail`, `api`, `staging`, …) and provider
   verification names (AWS/SES, Azure, Google Cloud, Cloudflare, Vercel, Netlify,
@@ -246,10 +248,11 @@ Several tools send data to external services; these are listed under
   manual CIDRs and replacing the oldest automatic entry when full. Targets are
   resolved by the server and must match an allowlisted range. One address is
   scanned per request, with one concurrent scan and fixed timeouts. Available
-  profiles are TCP connect on the top 20 or 100 ports, or light service detection
-  on the top 20 ports. The scanner does not accept custom command-line flags,
-  target lists, or CIDR scans. Only add networks you own or have explicit
-  authorization to assess.
+  profiles are TCP connect on the top 20, 100 or 1000 ports, or light TCP service
+  detection on the top 20 ports. Live status shows the running state, selected
+  profile and elapsed time. The scanner does not accept custom
+  command-line flags, target lists, or CIDR scans. Only scan systems you own or
+  have explicit authorization to assess.
 - **Result tables** are searchable and sortable; click a value to copy it.
 
 ## Accounts and access

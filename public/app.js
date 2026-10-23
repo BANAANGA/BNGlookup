@@ -36,6 +36,7 @@ const pingMonitorStatus = document.querySelector("#ping-monitor-status");
 const pingMonitorSummary = document.querySelector("#ping-monitor-summary");
 const pingMonitorChart = document.querySelector("#ping-monitor-chart");
 const resultPanel = document.querySelector("#result");
+const nmapLiveStatus = document.querySelector("#nmap-live-status");
 const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
 const formHint = document.querySelector("#form-hint");
@@ -71,6 +72,8 @@ let pingMonitorSamples = [];
 let pingMonitorPreviousState = null;
 let pingMonitorAbortController = null;
 let pingMonitorAudioContext = null;
+let nmapStatusPolling = false;
+let nmapStatusTimer = null;
 
 async function readApiResponse(response) {
   const body = await response.text();
@@ -814,6 +817,57 @@ function renderNmapResult(data) {
     ${hosts || '<p class="empty-result">Nmap did not return host results.</p>'}
     <p class="scan-disclaimer">Only the authorized target was scanned. Scan only systems you are authorized to test.</p>`;
   resultPanel.hidden = false;
+}
+
+function setNmapLiveStatus(message, running = false) {
+  nmapLiveStatus.textContent = message;
+  nmapLiveStatus.hidden = !message;
+  nmapLiveStatus.classList.toggle("is-running", running);
+  nmapLiveStatus.setAttribute("aria-live", running ? "off" : "polite");
+}
+
+function stopNmapStatusPolling() {
+  nmapStatusPolling = false;
+  clearTimeout(nmapStatusTimer);
+  nmapStatusTimer = null;
+}
+
+async function pollNmapStatus() {
+  if (!nmapStatusPolling) return;
+  try {
+    const response = await fetch("/api/nmap-status", {
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    const data = await readApiResponse(response);
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (!nmapStatusPolling) return;
+    if (data.state === "scanning") {
+      const elapsedSeconds = Math.max(0, Math.floor((Date.now() - data.startedAt) / 1000));
+      setNmapLiveStatus(
+        `${data.stage || "Nmap scan running"}: ${data.target} — ${data.profile}. Elapsed ${elapsedSeconds}s.`,
+        true,
+      );
+    } else if (data.state === "completed") {
+      stopNmapStatusPolling();
+      setNmapLiveStatus(`Nmap scan complete in ${(data.elapsedMs / 1000).toFixed(1)}s.`);
+    } else if (data.state === "failed") {
+      stopNmapStatusPolling();
+      setNmapLiveStatus(`Nmap scan failed: ${data.error || "Unable to complete the scan."}`);
+    }
+  } catch (error) {
+    if (!nmapStatusPolling) return;
+    setNmapLiveStatus(`Live Nmap status unavailable: ${error.message}`, true);
+  } finally {
+    if (nmapStatusPolling) nmapStatusTimer = setTimeout(pollNmapStatus, 1000);
+  }
+}
+
+function startNmapStatusPolling() {
+  stopNmapStatusPolling();
+  nmapStatusPolling = true;
+  setNmapLiveStatus("Checking target authorization before the scan starts…", true);
+  void pollNmapStatus();
 }
 
 function renderPingResult(data) {
@@ -1756,6 +1810,7 @@ form.addEventListener("submit", async (event) => {
             body: JSON.stringify({ targets: pingScan ? bulkTargetsInput.value : multiTraceInput.value }),
           }
           : {};
+    if (nmapScan) startNmapStatusPolling();
     const response = await fetch(postsJson ? endpoint : `${endpoint}?${params}`, requestOptions);
     const data = await readApiResponse(response);
     if (response.status === 401) {
@@ -1771,7 +1826,14 @@ form.addEventListener("submit", async (event) => {
     else if (pingScan) renderPingScanResult(data);
     else if (requestMode === "traceroute") renderTracerouteResult({ results: [data] }, false);
     else if (multiTraceroute) renderTracerouteResult(data, true);
-    else if (nmapScan) renderNmapResult(data);
+    else if (nmapScan) {
+      stopNmapStatusPolling();
+      const elapsed = Number.isFinite(data.elapsedMs)
+        ? ` in ${(data.elapsedMs / 1000).toFixed(1)}s`
+        : "";
+      setNmapLiveStatus(`Nmap scan complete${elapsed}.`);
+      renderNmapResult(data);
+    }
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "scan") renderScanResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Port scan" : "Bulk port scan");
@@ -1780,9 +1842,14 @@ form.addEventListener("submit", async (event) => {
       if (requestMode === "reverse") appendIpRegistration(lookupName.replace(/^\[|\]$/g, ""));
     }
   } catch (error) {
+    if (nmapScan) {
+      stopNmapStatusPolling();
+      setNmapLiveStatus("Nmap scan failed.");
+    }
     errorMessage.textContent = error.message || "Unable to complete the lookup.";
     errorMessage.hidden = false;
   } finally {
+    if (nmapScan) stopNmapStatusPolling();
     submitButton.disabled = false;
     submitButton.innerHTML = `<span>${submitLabel(mode)}</span><span aria-hidden="true">→</span>`;
   }

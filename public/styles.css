@@ -238,6 +238,34 @@ h1 {
 .submit-button:hover { transform: translateY(-1px); box-shadow: 0 6px 13px #3569e83b; }
 .submit-button:disabled { cursor: wait; opacity: .8; }
 .submit-button span:last-child { font-size: 18px; font-weight: 400; }
+.nmap-live-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  margin: 12px 0 0;
+  padding: 8px 11px;
+  border: 1px solid #d7eadc;
+  border-radius: 6px;
+  color: #28573a;
+  background: #f2fbf5;
+  font-size: 11px;
+}
+.nmap-live-status[hidden] { display: none; }
+.nmap-live-status.is-running::before {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: #54d88f;
+  box-shadow: 0 0 0 0 #32b77a70;
+  content: "";
+  animation: nmap-status-pulse 1.5s infinite;
+}
+@keyframes nmap-status-pulse {
+  70% { box-shadow: 0 0 0 6px #54d88f00; }
+  100% { box-shadow: 0 0 0 0 #54d88f00; }
+}
 .hint { margin: 10px 0 0; color: #8a96a9; font-size: 11px; }
 .auto-detect-hint { min-height: 15px; }
 .nameserver-control {
@@ -1047,7 +1075,7 @@ body {
 .trace-silent { color: #7c7c7c; }
 .status-badge.live { background: #e8f1ff; color: #1d4ed8; border-color: transparent; animation: trace-pulse 1.2s ease-in-out infinite; }
 @keyframes trace-pulse { 50% { opacity: .45; } }
-@media (prefers-reduced-motion: reduce) { .status-badge.live { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .status-badge.live, .nmap-live-status.is-running::before { animation: none; } }
 .gauge { height: 7px; overflow: hidden; border-radius: 4px; background: #202020; }
 .gauge > i { display: block; width: 0; height: 100%; border-radius: 4px; background: #65d993; transition: width .6s ease; }
 .gauge > i.warn { background: #f5bd62; }
