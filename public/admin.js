@@ -7,6 +7,8 @@ const trustCloudflareProxiesSetting = document.querySelector("#trust-cloudflare-
 const cloudflareProxyStatus = document.querySelector("#cloudflare-proxy-status");
 const portScanSettings = document.querySelector("#port-scan-settings");
 const nmapAllowedCidrs = document.querySelector("#nmap-allowed-cidrs");
+const nmapLoginIpStatus = document.querySelector("#nmap-login-ip-status");
+const nmapLoginIpList = document.querySelector("#nmap-login-ip-list");
 const userList = document.querySelector("#user-list");
 const settingsTabs = [...document.querySelectorAll(".settings-tab")];
 const siteTitleSetting = document.querySelector("#site-title");
@@ -244,6 +246,28 @@ function setCloudflareProxyStatus(updatedAt) {
     : "When enabled, official Cloudflare IPv4 and IPv6 ranges are refreshed automatically. Cloudflare Tunnel users must also trust the local cloudflared connector address.";
 }
 
+function renderNmapLoginIps(ips) {
+  const entries = Array.isArray(ips) ? ips : [];
+  const manualCount = nmapAllowedCidrs.value.split(/[\s,]+/).filter(Boolean).length;
+  const automaticCapacity = Math.max(0, 254 - manualCount);
+  nmapLoginIpStatus.textContent = `${entries.length} automatically added login IP${entries.length === 1 ? "" : "s"}; up to ${automaticCapacity} automatic slot${automaticCapacity === 1 ? "" : "s"} available. Entries expire after 30 days.`;
+  nmapLoginIpList.replaceChildren();
+  if (!entries.length) {
+    nmapLoginIpList.textContent = "No login IPs have been added yet.";
+    return;
+  }
+  for (const entry of entries) {
+    const row = document.createElement("div");
+    row.className = "nmap-login-ip";
+    const address = document.createElement("strong");
+    address.textContent = `${entry.address}/${entry.address.includes(":") ? 128 : 32}`;
+    const expiry = document.createElement("span");
+    expiry.textContent = `Expires ${new Date(entry.expiresAt).toLocaleString()}`;
+    row.append(address, expiry);
+    nmapLoginIpList.append(row);
+  }
+}
+
 async function initializeAdmin() {
   try {
     const [settings, users, mail] = await Promise.all([
@@ -259,6 +283,7 @@ async function initializeAdmin() {
     setCloudflareProxyStatus(settings.cloudflareProxyUpdatedAt);
     renderPortScanSettings(settings.portScanPolicy);
     nmapAllowedCidrs.value = settings.nmapAllowedCidrs;
+    renderNmapLoginIps(settings.nmapLoginIps);
     siteTitleSetting.value = settings.branding.title;
     const customIcon = settings.branding.iconUrl !== "/favicon.svg";
     if (customIcon && !settings.branding.iconUrl.startsWith("data:image/")) {
@@ -328,6 +353,8 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
     });
     if (activePanel === "access-panel") {
       setCloudflareProxyStatus(savedSettings.cloudflareProxyUpdatedAt);
+    } else if (activePanel === "port-scan-panel") {
+      renderNmapLoginIps(savedSettings.nmapLoginIps);
     }
     if (activePanel === "general-panel") {
       await window.applySiteBranding();

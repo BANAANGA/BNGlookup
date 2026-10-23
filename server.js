@@ -184,6 +184,12 @@ database.exec(`
     lookup_count INTEGER NOT NULL,
     PRIMARY KEY (client_hash, utc_date)
   );
+  CREATE TABLE IF NOT EXISTS nmap_login_ips (
+    address TEXT PRIMARY KEY,
+    last_seen_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS nmap_login_ips_expiry ON nmap_login_ips(expires_at);
   CREATE TABLE IF NOT EXISTS admin_logs (
     id INTEGER PRIMARY KEY,
     category TEXT NOT NULL CHECK (category IN ('login', 'audit', 'query')),
@@ -2267,7 +2273,7 @@ function getPortScanPolicy() {
   }
 }
 
-function getNmapAllowedCidrs() {
+function getManualNmapAllowedCidrs() {
   const row = database.prepare("SELECT value FROM app_settings WHERE key = 'nmap_allowed_cidrs'").get();
   if (!row) return { entries: [], ranges: new net.BlockList() };
   try {
@@ -2275,6 +2281,96 @@ function getNmapAllowedCidrs() {
   } catch (error) {
     console.error("Stored Nmap network allowlist is invalid:", error.message);
     return { entries: [], ranges: new net.BlockList() };
+  }
+}
+
+const nmapLoginIpLifetimeMs = 30 * 24 * 60 * 60 * 1000;
+
+function pruneNmapLoginIps(manualEntries, { makeRoom = false } = {}) {
+  const now = Date.now();
+  database.prepare("DELETE FROM nmap_login_ips WHERE expires_at <= ?").run(now);
+  const capacity = Math.max(0, 254 - manualEntries.length);
+  const rows = database.prepare(`
+    SELECT address, last_seen_at, expires_at FROM nmap_login_ips
+    ORDER BY last_seen_at DESC, address ASC
+  `).all();
+  const manualRanges = parseNmapAllowedCidrs(manualEntries.join("\n")).ranges;
+  for (const row of rows) {
+    const family = isIP(row.address);
+    if (!family || manualRanges.check(row.address, family === 4 ? "ipv4" : "ipv6")) {
+      database.prepare("DELETE FROM nmap_login_ips WHERE address = ?").run(row.address);
+    }
+  }
+  const activeRows = database.prepare(`
+    SELECT address, last_seen_at, expires_at FROM nmap_login_ips
+    ORDER BY last_seen_at DESC, address ASC
+  `).all();
+  if (makeRoom && activeRows.length >= capacity) {
+    const removeCount = activeRows.length - capacity + 1;
+    for (const row of activeRows.slice(-removeCount)) {
+      database.prepare("DELETE FROM nmap_login_ips WHERE address = ?").run(row.address);
+    }
+  } else if (activeRows.length > capacity) {
+    for (const row of activeRows.slice(capacity)) {
+      database.prepare("DELETE FROM nmap_login_ips WHERE address = ?").run(row.address);
+    }
+  }
+}
+
+function getNmapLoginIps() {
+  const manual = getManualNmapAllowedCidrs();
+  pruneNmapLoginIps(manual.entries);
+  return database.prepare(`
+    SELECT address, last_seen_at AS lastSeenAt, expires_at AS expiresAt
+    FROM nmap_login_ips ORDER BY last_seen_at DESC, address ASC
+  `).all();
+}
+
+function getNmapAllowedCidrs() {
+  const manual = getManualNmapAllowedCidrs();
+  pruneNmapLoginIps(manual.entries);
+  const automatic = database.prepare("SELECT address FROM nmap_login_ips ORDER BY last_seen_at DESC").all();
+  const automaticEntries = automatic.map(({ address }) => `${address}/${isIP(address) === 4 ? 32 : 128}`);
+  try {
+    return parseNmapAllowedCidrs([...manual.entries, ...automaticEntries].join("\n"));
+  } catch (error) {
+    console.error("Combined Nmap network allowlist is invalid:", error.message);
+    return { entries: [], ranges: new net.BlockList() };
+  }
+}
+
+function addNmapLoginIp(request) {
+  const address = normalizeIpAddress(getClientAddress(request));
+  if (!address) return;
+  const manual = getManualNmapAllowedCidrs();
+  if (manual.entries.length >= 254) return;
+  const family = isIP(address);
+  if (manual.ranges.check(address, family === 4 ? "ipv4" : "ipv6")) return;
+  pruneNmapLoginIps(manual.entries);
+  const existing = database.prepare("SELECT address FROM nmap_login_ips WHERE address = ?").get(address);
+  if (!existing) pruneNmapLoginIps(manual.entries, { makeRoom: true });
+  const now = Date.now();
+  database.prepare(`
+    INSERT INTO nmap_login_ips (address, last_seen_at, expires_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(address) DO UPDATE SET last_seen_at = excluded.last_seen_at,
+      expires_at = excluded.expires_at
+  `).run(address, now, now + nmapLoginIpLifetimeMs);
+}
+
+function recordNmapLoginIp(request, username) {
+  try {
+    addNmapLoginIp(request);
+  } catch (error) {
+    console.error("Unable to add successful login address to the Nmap allowlist:", error);
+    recordAdminLog(
+      "audit",
+      request,
+      "Automatic Nmap IP allowlisting failed",
+      error.message || "Unknown error",
+      500,
+      username,
+    );
   }
 }
 
@@ -2656,6 +2752,7 @@ async function handleInitialSetup(request, response) {
     `).run(username, credentials.hash, credentials.salt);
     database.exec("COMMIT");
     await establishSession(Number(result.lastInsertRowid), response);
+    recordNmapLoginIp(request, username);
     resetAuthAttempts(request);
     recordAdminLog(
       "audit",
@@ -2727,6 +2824,7 @@ async function handleLogin(request, response) {
   }
   resetAuthAttempts(request);
   await establishSession(user.id, response);
+  if (!user.must_change_password) recordNmapLoginIp(request, user.username);
   recordAdminLog("login", request, "Login successful", "", 200, user.username);
   sendJson(response, 200, {
     user: { username: user.username, role: user.role },
@@ -2780,6 +2878,7 @@ async function handleChangePassword(request, response) {
   database.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(user.id);
   resetAuthAttempts(request);
   await establishSession(user.id, response);
+  recordNmapLoginIp(request, user.username);
   recordAdminLog("login", request, "Password changed", "", 200, user.username);
   sendJson(response, 200, { changed: true, role: user.role });
 }
@@ -2818,7 +2917,8 @@ function handleAdminSettings(request, response) {
       featureAccess: getFeatureAccess(),
       features: featureNames,
       portScanPolicy: getPortScanPolicy(),
-      nmapAllowedCidrs: getNmapAllowedCidrs().entries.join("\n"),
+      nmapAllowedCidrs: getManualNmapAllowedCidrs().entries.join("\n"),
+      nmapLoginIps: getNmapLoginIps(),
       defaultDnsResolver: getDefaultResolverId(),
       dnsResolvers: getDnsResolverOptions(),
       trustedProxies: trustedProxyEntries.join("\n"),
@@ -2839,7 +2939,7 @@ function handleAdminSettings(request, response) {
     const portScanPolicy = Object.hasOwn(body, "portScanPolicy")
       ? body.portScanPolicy
       : getPortScanPolicy();
-    let nmapAllowedCidrs = getNmapAllowedCidrs();
+    let nmapAllowedCidrs = getManualNmapAllowedCidrs();
     if (Object.hasOwn(body, "nmapAllowedCidrs")) {
       try {
         nmapAllowedCidrs = parseNmapAllowedCidrs(body.nmapAllowedCidrs);
@@ -2975,6 +3075,9 @@ function handleAdminSettings(request, response) {
     trustedProxyEntries = trustedProxyConfig.entries;
     cloudflareProxyTrustEnabled = trustCloudflareProxies;
     trustedProxyRanges = combinedTrustedProxyConfig.ranges;
+    if (Object.hasOwn(body, "nmapAllowedCidrs")) {
+      pruneNmapLoginIps(nmapAllowedCidrs.entries);
+    }
     recordAdminLog(
       "audit",
       request,
@@ -2987,6 +3090,7 @@ function handleAdminSettings(request, response) {
       featureAccess: access,
       portScanPolicy,
       nmapAllowedCidrs: nmapAllowedCidrs.entries.join("\n"),
+      nmapLoginIps: getNmapLoginIps(),
       defaultDnsResolver,
       trustedProxies: trustedProxyEntries.join("\n"),
       trustCloudflareProxies: cloudflareProxyTrustEnabled,
@@ -4182,7 +4286,7 @@ async function handleNmapScan(request, response) {
     if (!profile) throw invalidScanRequest("Choose one of the available Nmap scan profiles.");
     const allowlist = getNmapAllowedCidrs();
     if (!allowlist.entries.length) {
-      throw invalidScanRequest("Nmap is disabled until an administrator configures authorized CIDR ranges.", 403);
+      throw invalidScanRequest("No authorized Nmap CIDRs or automatic login IPs are available.", 403);
     }
     let target = rawTarget.replace(/^\\[|\\]$/g, "");
     let addresses;
@@ -4200,7 +4304,7 @@ async function handleNmapScan(request, response) {
     }
     const address = addresses.find((candidate) => nmapAllowedAddress(candidate, allowlist));
     if (!address) {
-      throw invalidScanRequest("The target does not resolve to an address in an administrator-approved CIDR range.", 403);
+      throw invalidScanRequest("The target does not resolve to an address in the authorized Nmap allowlist.", 403);
     }
     if (!acquireHeavyJob("nmap")) {
       throw invalidScanRequest("An Nmap scan is already running. Try again shortly.", 503);
