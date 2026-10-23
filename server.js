@@ -123,7 +123,7 @@ const featureNames = {
   scan: "Magic scan",
   "custom-port": "Port scan",
   "bulk-port": "Bulk port scan",
-  nmap: "Nmap scan (authorized CIDRs only)",
+  nmap: "Nmap scan (authorized targets only)",
   sslscan: "SSL/TLS handshake and certificate check",
 };
 
@@ -4137,6 +4137,43 @@ function runSinglePing(address) {
 
 const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4 };
 const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0 };
+const nmapScanStatuses = new Map();
+const nmapStatusCleanupTimers = new Map();
+
+function updateNmapScanStatus(userId, updates) {
+  const cleanupTimer = nmapStatusCleanupTimers.get(userId);
+  if (cleanupTimer) {
+    clearTimeout(cleanupTimer);
+    nmapStatusCleanupTimers.delete(userId);
+  }
+  const status = {
+    ...nmapScanStatuses.get(userId),
+    ...updates,
+    updatedAt: Date.now(),
+  };
+  nmapScanStatuses.set(userId, status);
+  return status;
+}
+
+function scheduleNmapStatusCleanup(userId) {
+  const status = nmapScanStatuses.get(userId);
+  if (!status) return;
+  const timer = setTimeout(() => {
+    if (nmapScanStatuses.get(userId) === status) nmapScanStatuses.delete(userId);
+    nmapStatusCleanupTimers.delete(userId);
+  }, 60_000);
+  timer.unref();
+  nmapStatusCleanupTimers.set(userId, timer);
+}
+
+function handleNmapStatus(request, response) {
+  const user = currentUser(request);
+  if (!user) {
+    sendJson(response, 401, { error: "Log in to view Nmap scan status." });
+    return;
+  }
+  sendJson(response, 200, nmapScanStatuses.get(user.id) || { state: "idle" });
+}
 
 function acquireHeavyJob(kind) {
   if (heavyJobsActive[kind] >= heavyJobLimits[kind]) return false;
@@ -4159,6 +4196,12 @@ const nmapProfiles = {
     options: ["-sT", "--top-ports", "100"],
     timeoutMs: 60000,
   },
+  "tcp-top-1000": {
+    label: "TCP connect — top 1000 ports",
+    options: ["-sT", "--top-ports", "1000"],
+    timingTemplate: 3,
+    timeoutMs: 90000,
+  },
   "service-top-20": {
     label: "Service detection — top 20 ports (light)",
     options: ["-sT", "-sV", "--version-light", "--top-ports", "20"],
@@ -4177,7 +4220,7 @@ function runNmap(address, profile) {
     ...profile.options,
     "-Pn",
     "-n",
-    "-T2",
+    `-T${profile.timingTemplate || 2}`,
     "--max-retries",
     "1",
     "--host-timeout",
@@ -4310,17 +4353,45 @@ async function handleNmapScan(request, response) {
       throw invalidScanRequest("An Nmap scan is already running. Try again shortly.", 503);
     }
     request.logDetails = JSON.stringify({ target, address, scanType: body.scanType });
+    const startedAt = Date.now();
+    updateNmapScanStatus(user.id, {
+      state: "scanning",
+      stage: "Nmap scan running",
+      target,
+      address,
+      scanType: body.scanType,
+      profile: profile.label,
+      startedAt,
+    });
     try {
       const xml = await runNmap(address, profile);
+      updateNmapScanStatus(user.id, { stage: "Reading scan results" });
+      const hosts = parseNmapXml(xml);
+      const elapsedMs = Date.now() - startedAt;
+      updateNmapScanStatus(user.id, {
+        state: "completed",
+        stage: "Complete",
+        elapsedMs,
+      });
       sendJson(response, 200, {
         target,
         address,
         scanType: body.scanType,
         profile: profile.label,
-        hosts: parseNmapXml(xml),
+        elapsedMs,
+        hosts,
       });
+    } catch (error) {
+      updateNmapScanStatus(user.id, {
+        state: "failed",
+        stage: "Failed",
+        error: error.message || "Unable to complete the Nmap scan.",
+        elapsedMs: Date.now() - startedAt,
+      });
+      throw error;
     } finally {
       releaseHeavyJob("nmap");
+      scheduleNmapStatusCleanup(user.id);
     }
   } catch (error) {
     if (error.statusCode) {
@@ -5026,6 +5097,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/custom-port-scan": "custom-port",
     "/api/bulk-port-scan": "bulk-port",
     "/api/nmap-scan": "nmap",
+    "/api/nmap-status": "nmap",
     "/api/mac-lookup": "mac",
     "/api/ping": "ping",
     "/api/sslscan": "sslscan",
@@ -5035,7 +5107,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   };
   const feature = protectedFeatures[url.pathname];
   const requiresPortScanLogin =
-    ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan"].includes(url.pathname) ||
+    ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan", "/api/nmap-status"].includes(url.pathname) ||
     (url.pathname === "/api/ping" && url.searchParams.get("sample") === "1") ||
     (url.pathname === "/api/scan" && url.searchParams.get("ports") === "common");
   if (feature && !checkFeatureAccess(request, response, feature, requiresPortScanLogin)) return;
@@ -5091,6 +5163,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     void handleNmapScan(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/nmap-status") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    handleNmapStatus(request, response);
     return;
   }
 
