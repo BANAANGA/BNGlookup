@@ -121,12 +121,12 @@ const featureNames = {
 };
 
 function parseNmapAllowedCidrs(value) {
-  if (typeof value !== "string" || value.length > 2048) {
-    throw new Error("Authorized Nmap networks must be a list no longer than 2,048 characters.");
+  if (typeof value !== "string" || value.length > 12288) {
+    throw new Error("Authorized Nmap networks must be a list no longer than 12,288 characters.");
   }
   const entries = [...new Set(value.split(/[,\r\n]+/).map((entry) => entry.trim()).filter(Boolean))];
-  if (entries.length > 50) {
-    throw new Error("Authorized Nmap networks may contain no more than 50 CIDRs.");
+  if (entries.length > 254) {
+    throw new Error("Authorized Nmap networks may contain no more than 254 CIDRs.");
   }
   const ranges = new net.BlockList();
   for (const entry of entries) {

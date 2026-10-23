@@ -101,9 +101,9 @@
             <p class="form-hint">Port scans always require an account, even when the feature is marked Public. Private/local targets are enabled for administrators by default and remain unavailable to users until enabled here. Limits apply to unique TCP ports per target.</p>
             <div id="port-scan-settings" class="port-scan-settings"></div>
             <h2 class="policy-heading">Nmap authorized networks</h2>
-            <p class="form-hint">Nmap remains disabled until you add network ranges that you own or are authorized to assess. One IPv4 or IPv6 CIDR per line; maximum 50. Targets must resolve into one of these ranges. IPv4 ranges must be /8–/32 and IPv6 ranges /32–/128.</p>
+            <p class="form-hint">Nmap remains disabled until you add network ranges that you own or are authorized to assess. One IPv4 or IPv6 CIDR per line; maximum 254. Targets must resolve into one of these ranges. IPv4 ranges must be /8–/32 and IPv6 ranges /32–/128.</p>
             <label for="nmap-allowed-cidrs">Authorized CIDR ranges</label>
-            <textarea id="nmap-allowed-cidrs" rows="5" maxlength="2048" placeholder="192.168.10.0/24&#10;2001:db8:1234::/48" spellcheck="false"></textarea>
+            <textarea id="nmap-allowed-cidrs" rows="5" maxlength="12288" placeholder="192.168.10.0/24&#10;2001:db8:1234::/48" spellcheck="false"></textarea>
             <button class="submit-button" type="submit"><span>Save port scan settings</span><span aria-hidden="true">→</span></button>
           </section>
         </form>

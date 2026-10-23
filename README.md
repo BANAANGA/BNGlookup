@@ -228,7 +228,7 @@ Several tools send data to external services; these are listed under
   the role setting (default: allowed for Admins, not Users); other reserved
   addresses are always skipped. Only scan systems you are authorized to test.
 - **Nmap** is disabled until an administrator adds authorized CIDR ranges under
-  Settings → Port scans. Targets are resolved by the server and must match an
+  Settings → Port scans (up to 254 IPv4/IPv6 CIDRs). Targets are resolved by the server and must match an
   allowlisted range; one address is scanned per request, with one concurrent scan
   and fixed timeouts. Available profiles are TCP connect on the top 20 or 100 ports,
   or light service detection on the top 20 ports. The scanner does not accept custom
