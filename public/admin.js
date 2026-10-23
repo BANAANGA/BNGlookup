@@ -126,7 +126,7 @@ function renderDnsResolverSetting(resolvers, selectedResolver) {
 }
 
 function renderPortScanSettings(policy) {
-  portScanSettings.innerHTML = ["admin", "user"].map((role) => `
+  const roleSettings = ["admin", "user"].map((role) => `
     <fieldset class="port-scan-role">
       <legend>${role === "admin" ? "Administrators" : "Users"}</legend>
       <label for="max-ports-${role}">Maximum unique TCP ports per target</label>
@@ -137,6 +137,29 @@ function renderPortScanSettings(policy) {
       </label>
     </fieldset>
   `).join("");
+  const cidrSettings = `
+    <fieldset class="port-scan-role bulk-cidr-policy">
+      <legend>Bulk port scan CIDR limits</legend>
+      <label for="bulk-cidr-prefix-ipv4">Largest IPv4 CIDR</label>
+      <select id="bulk-cidr-prefix-ipv4" name="largestBulkCidrPrefixIpv4">
+        ${Array.from({ length: 9 }, (_, index) => 24 + index).map((prefix) => `
+          <option value="${prefix}" ${policy.largestBulkCidrPrefix.ipv4 === prefix ? "selected" : ""}>
+            /${prefix} (${2 ** (32 - prefix)} addresses max)
+          </option>
+        `).join("")}
+      </select>
+      <label for="bulk-cidr-prefix-ipv6">Largest IPv6 CIDR</label>
+      <select id="bulk-cidr-prefix-ipv6" name="largestBulkCidrPrefixIpv6">
+        ${Array.from({ length: 9 }, (_, index) => 120 + index).map((prefix) => `
+          <option value="${prefix}" ${policy.largestBulkCidrPrefix.ipv6 === prefix ? "selected" : ""}>
+            /${prefix} (${2 ** (128 - prefix)} addresses max)
+          </option>
+        `).join("")}
+      </select>
+      <p class="form-hint">The scan remains capped at 256 unique addresses total. IPv4 cannot be broader than /24 and IPv6 cannot be broader than /120.</p>
+    </fieldset>
+  `;
+  portScanSettings.innerHTML = roleSettings + cidrSettings;
 }
 
 function renderUsers(users) {
@@ -343,6 +366,10 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
           role,
           portScanSettings.querySelector(`[name="localScan-${role}"]`).checked,
         ])),
+        largestBulkCidrPrefix: {
+          ipv4: Number(portScanSettings.querySelector('[name="largestBulkCidrPrefixIpv4"]').value),
+          ipv6: Number(portScanSettings.querySelector('[name="largestBulkCidrPrefixIpv6"]').value),
+        },
       };
     } else {
       throw new Error("Select a settings category first.");

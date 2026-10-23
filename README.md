@@ -200,7 +200,7 @@ Several tools send data to external services; these are listed under
 | Multi traceroute | Up to 10 targets, 4 at a time; hop comparison table. |
 | Magic scan | Default tab. See below. |
 | Port scan | Ports and ranges (`22,80,443,8000-8010`) on one target; max ports per role (default Admin 100, User 25); up to 8 resolved IPs. |
-| Bulk port scan | One TCP port across a list or CIDR blocks; max 256 unique addresses. |
+| Bulk port scan | One TCP port across a list or CIDR blocks; largest CIDR prefix is admin-configurable (default IPv4 /24, IPv6 /120), with a hard cap of 256 unique addresses total. |
 | Nmap | One IP or hostname within an administrator-approved CIDR or an exact IP observed at successful login (automatic entries expire after 30 days); TCP top 20/100/1000 or light TCP service detection. Live status includes elapsed time. No arbitrary flags or range scans. |
 
 **Notes**
@@ -234,6 +234,10 @@ Several tools send data to external services; these are listed under
 - **Port scans** always require a signed-in account. Private/local targets follow
   the role setting (default: allowed for Admins, not Users); other reserved
   addresses are always skipped. Only scan systems you are authorized to test.
+- **Bulk port scan range limits**: admins can set the largest accepted IPv4 and
+  IPv6 CIDR under Settings → Port scans. Defaults are /24 and /120 respectively;
+  neither can be configured broader, and a hard cap of 256 unique addresses still
+  applies across the entire request.
 - **Live Ping monitoring** requires a signed-in user and checks one host every
   3 seconds for up to 5 minutes (100 samples maximum). It plots latency and
   availability, stops when the page is hidden or the user stops it, and can play

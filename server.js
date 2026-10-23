@@ -153,6 +153,7 @@ function parseNmapAllowedCidrs(value) {
 const portScanPolicyDefaults = {
   maxPortsByRole: { admin: 100, user: 25 },
   localScanByRole: { admin: true, user: false },
+  largestBulkCidrPrefix: { ipv4: 24, ipv6: 120 },
 };
 const publicLookupDailyLimit = 15;
 database.exec(`
@@ -1594,7 +1595,7 @@ function addressFromBigInt(value, family) {
   ).join(":");
 }
 
-function parseBulkScanTargets(input) {
+function parseBulkScanTargets(input, largestCidrPrefix = portScanPolicyDefaults.largestBulkCidrPrefix) {
   if (input.length > 8192) {
     throw invalidScanRequest("Target list must not exceed 8,192 characters.");
   }
@@ -1623,6 +1624,10 @@ function parseBulkScanTargets(input) {
     const width = family === 4 ? 32 : 128;
     if (!Number.isInteger(prefix) || prefix < 0 || prefix > width) {
       throw invalidScanRequest(`Invalid CIDR prefix: ${token}`);
+    }
+    const minimumPrefix = family === 4 ? largestCidrPrefix.ipv4 : largestCidrPrefix.ipv6;
+    if (prefix < minimumPrefix) {
+      throw invalidScanRequest(`Bulk scan CIDRs must be /${minimumPrefix} or narrower.`);
     }
     const hostBits = BigInt(width - prefix);
     const count = 1n << hostBits;
@@ -1703,7 +1708,7 @@ async function runBulkPortScan(request, response) {
       throw invalidScanRequest("Enter a TCP port between 1 and 65535.");
     }
     const targetsInput = typeof body.targets === "string" ? body.targets : "";
-    const addresses = parseBulkScanTargets(targetsInput);
+    const addresses = parseBulkScanTargets(targetsInput, policy.largestBulkCidrPrefix);
     request.logDetails = JSON.stringify({ targets: addresses, port });
     const data = await scanTcpTargets(
       "Bulk IP targets",
@@ -2267,6 +2272,14 @@ function getPortScanPolicy() {
           ? saved.localScanByRole[role]
           : portScanPolicyDefaults.localScanByRole[role],
       ])),
+      largestBulkCidrPrefix: Object.fromEntries(["ipv4", "ipv6"].map((family) => {
+        const minimumPrefix = family === "ipv4" ? 24 : 120;
+        const maximumPrefix = family === "ipv4" ? 32 : 128;
+        const prefix = saved.largestBulkCidrPrefix?.[family];
+        return [family, Number.isInteger(prefix) && prefix >= minimumPrefix && prefix <= maximumPrefix
+          ? prefix
+          : portScanPolicyDefaults.largestBulkCidrPrefix[family]];
+      })),
     };
   } catch {
     return structuredClone(portScanPolicyDefaults);
@@ -3009,6 +3022,18 @@ function handleAdminSettings(request, response) {
         sendJson(response, 400, { error: "Site icon URL must be a valid HTTPS URL without credentials." });
         return;
       }
+    }
+    if (!portScanPolicy?.largestBulkCidrPrefix ||
+      !Number.isInteger(portScanPolicy.largestBulkCidrPrefix.ipv4) ||
+      portScanPolicy.largestBulkCidrPrefix.ipv4 < 24 ||
+      portScanPolicy.largestBulkCidrPrefix.ipv4 > 32 ||
+      !Number.isInteger(portScanPolicy.largestBulkCidrPrefix.ipv6) ||
+      portScanPolicy.largestBulkCidrPrefix.ipv6 < 120 ||
+      portScanPolicy.largestBulkCidrPrefix.ipv6 > 128) {
+      sendJson(response, 400, {
+        error: "Bulk scan CIDR limits must be IPv4 /24–/32 and IPv6 /120–/128.",
+      });
+      return;
     }
     if (!access || typeof access !== "object" || Array.isArray(access) ||
       Object.keys(access).length !== Object.keys(featureAccessDefaults).length ||
