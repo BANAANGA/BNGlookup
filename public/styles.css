@@ -995,3 +995,12 @@ body {
 .status-badge.live { background: #e8f1ff; color: #1d4ed8; border-color: transparent; animation: trace-pulse 1.2s ease-in-out infinite; }
 @keyframes trace-pulse { 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) { .status-badge.live { animation: none; } }
+.gauge { height: 7px; overflow: hidden; border-radius: 4px; background: #202020; }
+.gauge > i { display: block; width: 0; height: 100%; border-radius: 4px; background: #65d993; transition: width .6s ease; }
+.gauge > i.warn { background: #f5bd62; }
+.gauge > i.crit { background: #fa8390; }
+.stats-card > small { overflow-wrap: anywhere; }
+.dash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dash-latest { margin-top: 14px; }
+@media (max-width: 760px) { .dash-grid { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .gauge > i { transition: none; } }
