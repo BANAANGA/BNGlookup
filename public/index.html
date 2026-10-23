@@ -20,7 +20,7 @@
         <div class="topbar-actions">
           <span class="online"><span></span> DNS over HTTPS</span>
           <nav class="account-nav" id="account-nav" aria-label="Account" hidden>
-            <span id="account-name"></span>
+            <a id="account-name" href="/my-account.html"></a>
             <a id="login-link" href="/login.html">Log in</a>
             <button id="logout-button" type="button" hidden>Log out</button>
           </nav>
@@ -159,6 +159,10 @@
         </form>
 
         <div class="result" id="result" aria-live="polite" hidden></div>
+        <div class="mail-results" id="mail-results" hidden>
+          <button type="button" id="mail-results-button">✉ Email these results to me</button>
+          <span id="mail-results-status" role="status"></span>
+        </div>
 
         <div class="client-info" id="client-info" aria-live="polite" hidden>
           <span class="client-info-label" id="client-info-label">Your public IP</span>

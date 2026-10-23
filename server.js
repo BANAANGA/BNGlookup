@@ -14,6 +14,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { lookup: resolveHost } = require("node:dns/promises");
 const { domainToASCII } = require("node:url");
 const { createAcmeManager } = require("./acme");
+const { sendMail, validAddress } = require("./mail");
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
@@ -64,6 +65,8 @@ const staticFiles = new Set([
   "/index.html",
   "/setup.html",
   "/login.html",
+  "/my-account.html",
+  "/my-account.js",
   "/change-password.html",
   "/admin.html",
   "/admin-logs.html",
@@ -169,6 +172,10 @@ database.exec(`
 if (!database.prepare("PRAGMA table_info(users)").all()
   .some((column) => column.name === "must_change_password")) {
   database.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0");
+}
+if (!database.prepare("PRAGMA table_info(users)").all()
+  .some((column) => column.name === "email")) {
+  database.exec("ALTER TABLE users ADD COLUMN email TEXT");
 }
 database.prepare("UPDATE admin_logs SET action = 'Port scan' WHERE action = 'Port scan'").run();
 database.prepare(`
@@ -2275,7 +2282,7 @@ function currentUser(request, { allowPending = false } = {}) {
   if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   const session = database.prepare(`
-    SELECT users.id, users.username, users.role, users.must_change_password,
+    SELECT users.id, users.username, users.role, users.must_change_password, users.email,
       user_sessions.expires_at
     FROM user_sessions JOIN users ON users.id = user_sessions.user_id
     WHERE user_sessions.token_hash = ? AND users.active = 1
@@ -2291,6 +2298,7 @@ function currentUser(request, { allowPending = false } = {}) {
     username: session.username,
     role: session.role,
     mustChangePassword: Boolean(session.must_change_password),
+    email: session.email || "",
   };
 }
 
@@ -2391,6 +2399,7 @@ function handleAuthStatus(request, response) {
   sendJson(response, 200, {
     setupRequired,
     user,
+    mailEnabled: Boolean(getMailConfig()),
     featureAccess: getFeatureAccess(),
     features: featureNames,
   });
@@ -2725,12 +2734,221 @@ function handleAdminSettings(request, response) {
   });
 }
 
+const mailRateLimit = new Map();
+
+function getMailConfig(includeSecret = false) {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'smtp_config'").get();
+  if (!row) return null;
+  try {
+    const saved = JSON.parse(row.value);
+    if (!saved.enabled || !saved.host || !saved.from) return null;
+    return includeSecret ? saved : { ...saved, password: undefined };
+  } catch {
+    return null;
+  }
+}
+
+function readMailSettings() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'smtp_config'").get();
+  let saved = {};
+  try { saved = row ? JSON.parse(row.value) : {}; } catch { saved = {}; }
+  return saved;
+}
+
+function publicMailSettings(saved) {
+  return {
+    enabled: Boolean(saved.enabled),
+    host: saved.host || "",
+    port: saved.port || 587,
+    security: saved.security || "starttls",
+    username: saved.username || "",
+    passwordSet: Boolean(saved.password),
+    from: saved.from || "",
+    fromName: saved.fromName || "",
+  };
+}
+
+function validateMailSettings(body, previous) {
+  const host = typeof body.host === "string" ? body.host.trim() : "";
+  const port = Number(body.port);
+  const security = body.security;
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  const from = typeof body.from === "string" ? body.from.trim() : "";
+  const fromName = typeof body.fromName === "string" ? body.fromName.trim() : "";
+  if (!/^[A-Za-z0-9._:-]{1,253}$/.test(host)) return { error: "Enter a valid mail server host name." };
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: "Enter a port from 1 to 65,535." };
+  if (!["starttls", "tls", "none"].includes(security)) return { error: "Choose a connection security mode." };
+  if (!validAddress(from)) return { error: "Enter a valid sender email address." };
+  if (fromName.length > 60 || /[\u0000-\u001f\u007f-\u009f]/.test(fromName)) {
+    return { error: "The sender name is too long or contains control characters." };
+  }
+  if (username.length > 254 || /[\u0000-\u001f\u007f-\u009f]/.test(username)) {
+    return { error: "Enter a valid SMTP username." };
+  }
+  let password = previous.password || "";
+  if (typeof body.password === "string" && body.password !== "") password = body.password;
+  if (body.clearPassword === true) password = "";
+  if (password.length > 256 || /[\u0000-\u001f]/.test(password)) {
+    return { error: "Enter a valid SMTP password." };
+  }
+  if (!username) password = "";
+  return { value: { enabled: body.enabled === true, host, port, security, username, password, from, fromName } };
+}
+
+function handleAdminMail(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") {
+    sendJson(response, 200, publicMailSettings(readMailSettings()));
+    return;
+  }
+  if (request.method !== "PUT" && request.method !== "POST") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response).then(async (body) => {
+    if (!body) return;
+    const previous = readMailSettings();
+    if (request.method === "PUT") {
+      const result = validateMailSettings(body, previous);
+      if (result.error) {
+        sendJson(response, 400, { error: result.error });
+        return;
+      }
+      database.prepare(`
+        INSERT INTO app_settings (key, value) VALUES ('smtp_config', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(JSON.stringify(result.value));
+      recordAdminLog("audit", request, "Mail settings updated",
+        `${result.value.host}:${result.value.port} (${result.value.enabled ? "enabled" : "disabled"})`,
+        200, admin.username);
+      sendJson(response, 200, publicMailSettings(result.value));
+      return;
+    }
+    const recipient = typeof body.to === "string" ? body.to.trim() : "";
+    const config = readMailSettings();
+    if (!config.host || !config.from) {
+      sendJson(response, 400, { error: "Save the mail server settings first." });
+      return;
+    }
+    if (!validAddress(recipient)) {
+      sendJson(response, 400, { error: "Enter a valid recipient email address." });
+      return;
+    }
+    try {
+      await sendMail(config, {
+        from: config.from,
+        fromName: config.fromName,
+        to: recipient,
+        subject: "Test email",
+        text: "This is a test email from your DNS lookup server. Mail delivery is working.",
+      });
+      recordAdminLog("audit", request, "Test email sent", recipient, 200, admin.username);
+      sendJson(response, 200, { sent: true });
+    } catch (error) {
+      recordAdminLog("audit", request, "Test email failed", String(error.message).slice(0, 200), 502, admin.username);
+      sendJson(response, 502, { error: `Could not send: ${String(error.message).slice(0, 200)}` });
+    }
+  }).catch((error) => {
+    console.error("Mail settings failed:", error);
+    sendJson(response, 500, { error: "Unable to process mail settings." });
+  });
+}
+
+function handleAccount(request, response) {
+  const user = currentUser(request);
+  if (!user) {
+    sendJson(response, 401, { error: "Log in to continue." });
+    return;
+  }
+  if (request.method === "GET") {
+    sendJson(response, 200, {
+      username: user.username,
+      role: user.role,
+      email: user.email,
+      mailEnabled: Boolean(getMailConfig()),
+    });
+    return;
+  }
+  if (request.method !== "PUT") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response).then((body) => {
+    if (!body) return;
+    const email = typeof body.email === "string" ? body.email.trim() : null;
+    if (email === null || (email !== "" && !validAddress(email))) {
+      sendJson(response, 400, { error: "Enter a valid email address, or leave it empty to remove it." });
+      return;
+    }
+    database.prepare("UPDATE users SET email = ? WHERE id = ?").run(email || null, user.id);
+    recordAdminLog("audit", request, "Email address updated", email ? "set" : "removed", 200, user.username);
+    sendJson(response, 200, { email });
+  }).catch((error) => {
+    console.error("Account update failed:", error);
+    sendJson(response, 500, { error: "Unable to update your account." });
+  });
+}
+
+async function handleMailResults(request, response) {
+  if (!enforceSameOrigin(request, response)) return;
+  const user = currentUser(request);
+  if (!user) {
+    sendJson(response, 401, { error: "Log in to continue." });
+    return;
+  }
+  const config = getMailConfig(true);
+  if (!config) {
+    sendJson(response, 503, { error: "Email is not configured on this server." });
+    return;
+  }
+  if (!user.email) {
+    sendJson(response, 400, { error: "Add your email address on the My account page first." });
+    return;
+  }
+  const now = Date.now();
+  const recent = (mailRateLimit.get(user.id) || []).filter((time) => now - time < 3600000);
+  if (recent.length >= 10) {
+    sendJson(response, 429, { error: "You can email up to 10 results per hour." });
+    return;
+  }
+  const body = await readAuthBody(request, response, 256 * 1024);
+  if (!body) return;
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  const subject = typeof body.subject === "string"
+    ? body.subject.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim().slice(0, 120)
+    : "";
+  if (!text || text.length > 200000) {
+    sendJson(response, 400, { error: "There are no results to send, or they are too large." });
+    return;
+  }
+  recent.push(now);
+  mailRateLimit.set(user.id, recent);
+  try {
+    await sendMail(config, {
+      from: config.from,
+      fromName: config.fromName,
+      to: user.email,
+      subject: subject || "DNS lookup results",
+      text,
+    });
+    recordAdminLog("audit", request, "Results emailed", subject, 200, user.username);
+    sendJson(response, 200, { sent: true });
+  } catch (error) {
+    console.error("Result email failed:", error.message);
+    recordAdminLog("audit", request, "Results email failed", String(error.message).slice(0, 200), 502, user.username);
+    sendJson(response, 502, { error: "The email could not be sent. Ask an administrator to check the mail settings." });
+  }
+}
+
 function handleAdminUsers(request, response) {
   const admin = requireAdmin(request, response);
   if (!admin) return;
   if (request.method === "GET") {
     const users = database.prepare(`
-      SELECT id, username, role, active, created_at AS createdAt
+      SELECT id, username, role, active, email, created_at AS createdAt
       FROM users ORDER BY id
     `).all();
     sendJson(response, 200, { users });
@@ -2755,12 +2973,17 @@ function handleAdminUsers(request, response) {
       sendJson(response, 400, { error: "Choose the admin or user role." });
       return;
     }
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+    if (email && !validAddress(email)) {
+      sendJson(response, 400, { error: "Enter a valid email address." });
+      return;
+    }
     const credentials = await hashPassword(body.password);
     try {
       database.prepare(`
-        INSERT INTO users (username, password_hash, password_salt, role, must_change_password)
-        VALUES (?, ?, ?, ?, 1)
-      `).run(body.username, credentials.hash, credentials.salt, body.role);
+        INSERT INTO users (username, password_hash, password_salt, role, must_change_password, email)
+        VALUES (?, ?, ?, ?, 1, ?)
+      `).run(body.username, credentials.hash, credentials.salt, body.role, email || null);
       recordAdminLog(
         "audit",
         request,
@@ -2787,6 +3010,31 @@ function handleAdminUsers(request, response) {
 function handleAdminUser(request, response, userId) {
   const admin = requireAdmin(request, response);
   if (!admin) return;
+  if (request.method === "DELETE") {
+    if (!enforceSameOrigin(request, response)) return;
+    const target = database.prepare(
+      "SELECT id, username, role, active FROM users WHERE id = ?",
+    ).get(userId);
+    if (!target) {
+      sendJson(response, 404, { error: "User not found." });
+      return;
+    }
+    if (target.id === admin.id) {
+      sendJson(response, 409, { error: "You cannot remove your own account." });
+      return;
+    }
+    if (target.role === "admin" && target.active === 1 && database.prepare(
+      "SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND active = 1",
+    ).get().count <= 1) {
+      sendJson(response, 409, { error: "The last active administrator cannot be removed." });
+      return;
+    }
+    database.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    mailRateLimit.delete(userId);
+    recordAdminLog("audit", request, "User account removed", target.username, 200, admin.username);
+    sendJson(response, 200, { removed: true });
+    return;
+  }
   if (request.method !== "PATCH") {
     sendJson(response, 405, { error: "Method not allowed." });
     return;
@@ -2812,6 +3060,14 @@ function handleAdminUser(request, response, userId) {
     if (!["admin", "user"].includes(role) || ![0, 1].includes(active)) {
       sendJson(response, 400, { error: "Choose a valid role and account status." });
       return;
+    }
+    let email;
+    if (body.email !== undefined) {
+      email = typeof body.email === "string" ? body.email.trim() : null;
+      if (email === null || (email && !validAddress(email))) {
+        sendJson(response, 400, { error: "Enter a valid email address." });
+        return;
+      }
     }
     const hasPassword = body.password !== undefined && body.password !== "";
     if (hasPassword && !validatePassword(body.password)) {
@@ -2840,6 +3096,9 @@ function handleAdminUser(request, response, userId) {
       database.prepare("UPDATE users SET role = ?, active = ? WHERE id = ?")
         .run(role, active, userId);
     }
+    if (email !== undefined) {
+      database.prepare("UPDATE users SET email = ? WHERE id = ?").run(email || null, userId);
+    }
     if (!active || hasPassword) {
       database.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
     }
@@ -2847,6 +3106,7 @@ function handleAdminUser(request, response, userId) {
       target.role !== role ? `role ${target.role} → ${role}` : "",
       target.active !== active ? `active ${target.active ? "yes" : "no"} → ${active ? "yes" : "no"}` : "",
       hasPassword ? "password reset" : "",
+      email !== undefined ? "email updated" : "",
     ].filter(Boolean);
     recordAdminLog(
       "audit",
@@ -3941,6 +4201,23 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/account") {
+    handleAccount(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/mail/results") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void handleMailResults(request, response).catch((error) => {
+      console.error("Result email failed:", error);
+      sendJson(response, 500, { error: "Unable to send email." });
+    });
+    return;
+  }
+
   if (url.pathname === "/api/auth/logout") {
     if (request.method !== "POST") {
       sendJson(response, 405, { error: "Method not allowed." });
@@ -3973,6 +4250,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
 
   if (url.pathname === "/api/admin/stats") {
     handleAdminStats(request, url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/mail") {
+    handleAdminMail(request, response);
     return;
   }
 
@@ -4119,6 +4401,17 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   if (url.pathname === "/login.html" && appSetupRequired()) {
     sendRedirect(response, "/setup.html");
     return;
+  }
+  if (url.pathname === "/my-account.html") {
+    const user = currentUser(request, { allowPending: true });
+    if (!user) {
+      sendRedirect(response, appSetupRequired() ? "/setup.html" : "/login.html?next=%2Fmy-account.html");
+      return;
+    }
+    if (user.mustChangePassword) {
+      sendRedirect(response, "/change-password.html");
+      return;
+    }
   }
   if (url.pathname === "/change-password.html") {
     const user = currentUser(request, { allowPending: true });

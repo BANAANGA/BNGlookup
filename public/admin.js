@@ -143,9 +143,11 @@ function renderUsers(users) {
         <option value="user" ${user.role === "user" ? "selected" : ""}>User</option>
         <option value="admin" ${user.role === "admin" ? "selected" : ""}>Admin</option>
       </select>
+      <input class="user-email" name="email" type="email" maxlength="254" value="${escapeHtml(user.email || "")}" placeholder="Email (optional)" autocomplete="off" aria-label="Email address for ${escapeHtml(user.username)}">
       <label class="user-active"><input type="checkbox" name="active" ${user.active ? "checked" : ""}> Active</label>
       <input class="user-reset-password" name="password" type="password" minlength="12" maxlength="128" placeholder="New password (optional)" autocomplete="new-password" aria-label="Set a new password for ${escapeHtml(user.username)}">
       <button type="submit">Save</button>
+      <button type="button" class="user-delete" data-delete="${user.id}" data-name="${escapeHtml(user.username)}">Remove</button>
     </form>
   `).join("");
   userList.querySelectorAll(".user-row").forEach((form) => {
@@ -168,6 +170,66 @@ function renderUsers(users) {
   });
 }
 
+userList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-delete]");
+  if (!button) return;
+  if (!window.confirm(`Permanently remove user "${button.dataset.name}"? This cannot be undone. To keep the account, disable it instead.`)) return;
+  try {
+    await api(`/api/admin/users/${button.dataset.delete}`, { method: "DELETE" });
+    showAdminSuccess("User account removed.");
+    await loadUsers();
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+const mailForm = document.querySelector("#mail-form");
+const mailTestForm = document.querySelector("#mail-test-form");
+
+function renderMailSettings(mail) {
+  mailForm.elements.enabled.checked = mail.enabled;
+  mailForm.elements.host.value = mail.host;
+  mailForm.elements.port.value = mail.port;
+  mailForm.elements.security.value = mail.security;
+  mailForm.elements.username.value = mail.username;
+  mailForm.elements.password.value = "";
+  mailForm.elements.password.placeholder = mail.passwordSet
+    ? "Password saved — leave empty to keep it"
+    : "Leave empty if the server needs no login";
+  mailForm.elements.from.value = mail.from;
+  mailForm.elements.fromName.value = mail.fromName;
+}
+
+mailForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const values = Object.fromEntries(new FormData(mailForm));
+    values.enabled = mailForm.elements.enabled.checked;
+    values.port = Number(values.port);
+    renderMailSettings(await api("/api/admin/mail", { method: "PUT", body: JSON.stringify(values) }));
+    showAdminSuccess("Email settings saved.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+mailTestForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = mailTestForm.querySelector("button");
+  button.disabled = true;
+  try {
+    await api("/api/admin/mail", {
+      method: "POST",
+      body: JSON.stringify({ to: mailTestForm.elements.to.value }),
+    });
+    showAdminSuccess("Test email sent.");
+  } catch (error) {
+    showAdminError(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 async function loadUsers() {
   const { users } = await api("/api/admin/users");
   renderUsers(users);
@@ -175,10 +237,12 @@ async function loadUsers() {
 
 async function initializeAdmin() {
   try {
-    const [settings, users] = await Promise.all([
+    const [settings, users, mail] = await Promise.all([
       api("/api/admin/settings"),
       api("/api/admin/users"),
+      api("/api/admin/mail"),
     ]);
+    renderMailSettings(mail);
     renderFeatureSettings(settings.features, settings.featureAccess);
     renderDnsResolverSetting(settings.dnsResolvers, settings.defaultDnsResolver);
     trustedProxySetting.value = settings.trustedProxies;

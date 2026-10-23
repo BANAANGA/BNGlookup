@@ -28,6 +28,7 @@ small Docker container with no application dependencies.
 **Administration**
 
 - First-run setup, user roles, per-feature access (public / users / admins), daily public quota.
+- Remove (permanently delete) or disable users; optional email addresses and **email results to yourself** through a configurable SMTP server.
 - Live **Dashboard** (CPU, memory, storage, load, activity, top tools, latest queries; refreshes every 3 s).
 - Stats, Logs and Admin tabs; searchable, sortable, click-to-copy result tables.
 - Selectable DNS-over-HTTPS resolver, per-query nameserver, trusted proxies, port-scan limits.
@@ -244,6 +245,13 @@ Several tools send data to external services; these are listed under
   SQLite); logged-in users are exempt.
 - New accounts and admin password resets require a **password change on first login**;
   until it is changed, the session has no access to any feature.
+- **Users** can be disabled (reversible) or removed permanently. You cannot remove yourself
+  or the last active administrator.
+- **Email**: in Settings → **Email**, configure an SMTP server (STARTTLS, TLS or none, optional
+  login, sender) and send a test message. Users add an optional address on **My account**
+  (click their name in the header); a ✉ **Email these results to me** button then appears under
+  results. Mail only goes to the user's own address, max 10 per hour per user. The SMTP password
+  is stored in the data volume and never displayed.
 - **Dashboard** shows live CPU, memory (container cgroup limit when set), data-volume
   storage, system load, 24 h activity and the latest queries. Admin only.
 - **Logs** show login attempts, admin actions and lookup/scan requests (latest 200

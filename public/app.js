@@ -35,6 +35,9 @@ const toolsLoginLink = document.querySelector("#tools-login-link");
 const guestUsageNotice = document.querySelector("#guest-usage-notice");
 const accountNav = document.querySelector("#account-nav");
 const accountName = document.querySelector("#account-name");
+const mailResults = document.querySelector("#mail-results");
+const mailResultsButton = document.querySelector("#mail-results-button");
+const mailResultsStatus = document.querySelector("#mail-results-status");
 const adminTabs = document.querySelector("#admin-tabs");
 const loginLink = document.querySelector("#login-link");
 const logoutButton = document.querySelector("#logout-button");
@@ -1409,3 +1412,37 @@ form.addEventListener("submit", async (event) => {
 
 initializeAccount();
 loadClientInfo();
+
+function updateMailResults() {
+  mailResults.hidden = !(authState?.user && authState.mailEnabled && !resultPanel.hidden);
+  if (mailResults.hidden) mailResultsStatus.textContent = "";
+}
+
+new MutationObserver(updateMailResults).observe(resultPanel, { attributes: true, attributeFilter: ["hidden"] });
+
+mailResultsButton.addEventListener("click", async () => {
+  if (!authState?.user?.email) {
+    mailResultsStatus.textContent = "Add your email address on the My account page first.";
+    return;
+  }
+  mailResultsButton.disabled = true;
+  mailResultsStatus.textContent = "Sending…";
+  try {
+    const response = await fetch("/api/mail/results", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        subject: `DNS lookup results: ${input.value.trim()}`.slice(0, 120),
+        text: `${resultPanel.innerText}\n\nQuery: ${input.value.trim()}\n`,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "The email could not be sent.");
+    mailResultsStatus.textContent = `Sent to ${authState.user.email}.`;
+  } catch (error) {
+    mailResultsStatus.textContent = error.message;
+  } finally {
+    mailResultsButton.disabled = false;
+  }
+});

@@ -1004,3 +1004,9 @@ body {
 .dash-latest { margin-top: 14px; }
 @media (max-width: 760px) { .dash-grid { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .gauge > i { transition: none; } }
+.mail-results { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+.mail-results button, .user-delete { cursor: pointer; }
+.user-delete { border-color: #fa839066; color: #fa8390; }
+.user-row .user-email { min-width: 0; }
+#account-name { color: inherit; text-decoration: none; }
+#account-name:hover, #account-name:focus-visible { text-decoration: underline; }

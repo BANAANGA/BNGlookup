@@ -11,6 +11,7 @@ RUN apk add --no-cache iputils-tracepath coreutils \
 
 COPY server.js ./server.js
 COPY acme.js ./acme.js
+COPY mail.js ./mail.js
 COPY public ./public
 
 RUN mkdir -p /data && chown node:node /data

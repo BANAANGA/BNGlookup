@@ -62,6 +62,7 @@
           <button class="settings-tab" id="port-scan-tab" type="button" role="tab" aria-selected="false" aria-controls="port-scan-panel" tabindex="-1">Port scans</button>
           <button class="settings-tab" id="certificate-tab" type="button" role="tab" aria-selected="false" aria-controls="certificate-panel" tabindex="-1">SSL certificate</button>
           <button class="settings-tab" id="users-tab" type="button" role="tab" aria-selected="false" aria-controls="users-panel" tabindex="-1">Users</button>
+          <button class="settings-tab" id="mail-tab" type="button" role="tab" aria-selected="false" aria-controls="mail-panel" tabindex="-1">Email</button>
         </div>
         <form id="settings-form">
           <section class="settings-panel" id="general-panel" role="tabpanel" aria-labelledby="general-tab">
@@ -130,12 +131,46 @@
             <input id="new-username" name="username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" autocomplete="off" required>
             <label for="new-password">Temporary password</label>
             <input id="new-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
+            <label for="new-email">Email (optional)</label>
+            <input id="new-email" name="email" type="email" maxlength="254" autocomplete="off">
             <label for="new-role">Role</label>
             <select id="new-role" name="role"><option value="user">User</option><option value="admin">Admin</option></select>
             <button class="submit-button" type="submit"><span>Create user</span><span aria-hidden="true">→</span></button>
           </form>
           <h2 class="policy-heading">User accounts</h2>
           <div id="user-list" class="user-list"></div>
+        </section>
+        <section class="settings-panel" id="mail-panel" role="tabpanel" aria-labelledby="mail-tab" hidden>
+          <h2>Mail server (SMTP)</h2>
+          <p class="form-hint">Lets logged-in users email lookup results to their own address. The SMTP password is stored in the data volume and never shown again.</p>
+          <form id="mail-form" class="admin-create-form">
+            <label class="branding-reset" for="mail-enabled"><input id="mail-enabled" name="enabled" type="checkbox"> Enable email</label>
+            <label for="mail-host">SMTP host</label>
+            <input id="mail-host" name="host" type="text" maxlength="253" placeholder="smtp.example.com" autocomplete="off" required>
+            <label for="mail-port">Port</label>
+            <input id="mail-port" name="port" type="number" min="1" max="65535" value="587" required>
+            <label for="mail-security">Connection security</label>
+            <select id="mail-security" name="security">
+              <option value="starttls">STARTTLS (usually port 587)</option>
+              <option value="tls">TLS / SSL (usually port 465)</option>
+              <option value="none">None (not recommended)</option>
+            </select>
+            <label for="mail-username">Username (optional)</label>
+            <input id="mail-username" name="username" type="text" maxlength="254" autocomplete="off">
+            <label for="mail-password">Password</label>
+            <input id="mail-password" name="password" type="password" maxlength="256" autocomplete="new-password" placeholder="Leave empty to keep the current password">
+            <label for="mail-from">Sender address</label>
+            <input id="mail-from" name="from" type="email" maxlength="254" placeholder="lookup@example.com" required>
+            <label for="mail-from-name">Sender name (optional)</label>
+            <input id="mail-from-name" name="fromName" type="text" maxlength="60" autocomplete="off">
+            <button class="submit-button" type="submit"><span>Save mail settings</span><span aria-hidden="true">→</span></button>
+          </form>
+          <h2 class="policy-heading">Send a test email</h2>
+          <form id="mail-test-form" class="admin-create-form">
+            <label for="mail-test-to">Recipient</label>
+            <input id="mail-test-to" name="to" type="email" maxlength="254" autocomplete="email" required>
+            <button class="submit-button" type="submit"><span>Send test email</span><span aria-hidden="true">→</span></button>
+          </form>
         </section>
       </section>
     </main>
