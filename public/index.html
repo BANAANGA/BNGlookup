@@ -137,6 +137,15 @@
             </select>
             <span>Checks whether the host is up. Some hosts block ICMP; try an HTTP(S) GET instead. Private addresses are checked only when allowed for your role.</span>
           </div>
+          <div class="scan-extra-control ping-monitor-control" id="ping-monitor-control" hidden>
+            <span class="ping-monitor-label">Live monitoring</span>
+            <div class="ping-monitor-actions">
+              <button id="ping-monitor-start" type="button">Start 5-minute monitor</button>
+              <button id="ping-monitor-stop" type="button" disabled>Stop</button>
+              <label><input id="ping-monitor-sound" type="checkbox"> Sound on up/down changes</label>
+            </div>
+            <span id="ping-monitor-hint">One sample every 3 seconds; monitoring stops after 5 minutes. Sign in to use live monitoring.</span>
+          </div>
           <div class="scan-extra-control" id="custom-ports-control" hidden>
             <label for="custom-ports-input">TCP ports</label>
             <input id="custom-ports-input" type="text" maxlength="65536" placeholder="e.g. 22,80,443,8000-8010" autocomplete="off" spellcheck="false">
@@ -171,6 +180,19 @@
         </form>
 
         <div class="result" id="result" aria-live="polite" hidden></div>
+        <section class="ping-monitor-panel" id="ping-monitor-panel" aria-label="Live host monitor" hidden>
+          <div class="ping-monitor-heading">
+            <div><p class="eyebrow">LIVE PING</p><h2 id="ping-monitor-target"></h2></div>
+            <span class="status-badge warning" id="ping-monitor-state">Waiting for sample</span>
+          </div>
+          <p class="ping-monitor-status" id="ping-monitor-status" role="status" aria-live="polite"></p>
+          <div class="ping-monitor-chart-wrap">
+            <canvas id="ping-monitor-chart" role="img" aria-label="Latency history chart, no samples yet">
+              Latency history chart. Text summaries are shown below.
+            </canvas>
+          </div>
+          <div class="ping-monitor-summary" id="ping-monitor-summary"></div>
+        </section>
         <div class="mail-results" id="mail-results" hidden>
           <button type="button" id="mail-results-button">✉ Email these results to me</button>
           <span id="mail-results-status" role="status"></span>
