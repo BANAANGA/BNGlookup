@@ -3568,6 +3568,34 @@ const tlsCiphers = [
   "ECDHE-RSA-AES128-GCM-SHA256",
 ].join(":");
 
+// TLS session resumption: tickets are on by default; this adds a bounded
+// in-memory session-ID cache (Node leaves server-side caching to the app).
+const tlsSessionTimeoutSeconds = 300;
+const tlsSessionCacheLimit = 2000;
+const tlsSessionCache = new Map();
+
+function attachTlsSessionCache(secureServer) {
+  secureServer.on("newSession", (id, data, callback) => {
+    const key = id.toString("hex");
+    tlsSessionCache.delete(key);
+    tlsSessionCache.set(key, { data, expires: Date.now() + tlsSessionTimeoutSeconds * 1000 });
+    while (tlsSessionCache.size > tlsSessionCacheLimit) {
+      tlsSessionCache.delete(tlsSessionCache.keys().next().value);
+    }
+    callback();
+  });
+  secureServer.on("resumeSession", (id, callback) => {
+    const key = id.toString("hex");
+    const entry = tlsSessionCache.get(key);
+    if (entry && entry.expires > Date.now()) {
+      callback(null, entry.data);
+      return;
+    }
+    tlsSessionCache.delete(key);
+    callback(null, null);
+  });
+}
+
 const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) => {
   response.setHeader("content-security-policy", [
     "default-src 'self'",
@@ -3973,9 +4001,10 @@ function applyTlsCertificate(credentials) {
   }
   httpsError = null;
   const secureServer = https.createServer(
-    { ...credentials, minVersion: "TLSv1.2", ciphers: tlsCiphers, honorCipherOrder: true, maxHeaderSize: 8192 },
+    { ...credentials, minVersion: "TLSv1.2", ciphers: tlsCiphers, honorCipherOrder: true, sessionTimeout: tlsSessionTimeoutSeconds, maxHeaderSize: 8192 },
     (request, response) => server.emit("request", request, response),
   );
+  attachTlsSessionCache(secureServer);
   secureServer.headersTimeout = 10_000;
   secureServer.requestTimeout = 30_000;
   secureServer.on("error", (error) => {

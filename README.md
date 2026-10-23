@@ -299,6 +299,8 @@ requests get HSTS and Secure cookies.
   (`/healthz`). The app shuts down gracefully on `SIGTERM`.
 - Expensive jobs are capped server-wide (8 concurrent traceroutes, 2 ping scans),
   and connections, header sizes and request timeouts are bounded.
+- The HTTPS listener supports TLS 1.2/1.3 with forward-secret AEAD suites only and
+  TLS session resumption (session tickets plus a bounded 5-minute session-ID cache).
 - Use HTTPS (set `COOKIE_SECURE=true` behind a proxy) and network-level access
   controls; do not expose the service over an untrusted network without them.
 
