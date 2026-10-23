@@ -94,6 +94,11 @@
             <p class="form-hint">Enter the IP addresses or CIDR ranges of proxies that connect directly to BNGlookup, one per line. Only these connections can supply client IP headers. Do not add a public or shared subnet unless every host in it is trusted.</p>
             <label class="sr-only" for="trusted-proxies">Trusted proxy IP addresses and CIDRs</label>
             <textarea id="trusted-proxies" name="trustedProxies" rows="4" maxlength="2048" placeholder="For example:&#10;172.18.0.3&#10;2001:db8::/32"></textarea>
+            <label class="form-checkbox" for="trust-cloudflare-proxies">
+              <input id="trust-cloudflare-proxies" name="trustCloudflareProxies" type="checkbox">
+              Automatically trust Cloudflare reverse proxy ranges
+            </label>
+            <p class="form-hint" id="cloudflare-proxy-status">When enabled, official Cloudflare IPv4 and IPv6 ranges are refreshed automatically. Cloudflare Tunnel users must also trust the local cloudflared connector address.</p>
             <button class="submit-button" type="submit"><span>Save access settings</span><span aria-hidden="true">→</span></button>
           </section>
           <section class="settings-panel" id="port-scan-panel" role="tabpanel" aria-labelledby="port-scan-tab" hidden>

@@ -23,13 +23,13 @@ const httpsPort = Number(process.env.HTTPS_PORT || 8443);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be an integer between 1 and 65535.");
 }
-function parseTrustedProxyEntries(value) {
-  if (typeof value !== "string" || value.length > 2048) {
-    throw new Error("Trusted proxies must be a list no longer than 2,048 characters.");
+function parseTrustedProxyEntries(value, maxEntries = 50, maxLength = 2048) {
+  if (typeof value !== "string" || value.length > maxLength) {
+    throw new Error(`Trusted proxies must be a list no longer than ${maxLength.toLocaleString()} characters.`);
   }
   const entries = [...new Set(value.split(/[,\r\n]+/).map((entry) => entry.trim()).filter(Boolean))];
-  if (entries.length > 50) {
-    throw new Error("Trusted proxies may contain no more than 50 IP addresses or CIDRs.");
+  if (entries.length > maxEntries) {
+    throw new Error(`Trusted proxies may contain no more than ${maxEntries} IP addresses or CIDRs.`);
   }
   const ranges = new net.BlockList();
   for (const entry of entries) {
@@ -50,6 +50,10 @@ function parseTrustedProxyEntries(value) {
 }
 let { entries: trustedProxyEntries, ranges: trustedProxyRanges } =
   parseTrustedProxyEntries(process.env.TRUSTED_PROXIES || "");
+let cloudflareProxyEntries = [];
+let cloudflareProxyTrustEnabled = false;
+let cloudflareProxyUpdatedAt = null;
+let cloudflareProxyRefreshPromise = null;
 const customDohEndpoint = process.env.DOH_ENDPOINT || "";
 const dnsResolvers = {
   google: { label: "Google Public DNS", endpoint: "https://dns.google/dns-query" },
@@ -226,6 +230,37 @@ if (savedTrustedProxies) {
   ({ entries: trustedProxyEntries, ranges: trustedProxyRanges } =
     parseTrustedProxyEntries(entries.join("\n")));
 }
+const savedCloudflareProxyTrust = database.prepare(
+  "SELECT value FROM app_settings WHERE key = 'cloudflare_proxy_trust'",
+).get();
+if (savedCloudflareProxyTrust) {
+  try {
+    cloudflareProxyTrustEnabled = JSON.parse(savedCloudflareProxyTrust.value) === true;
+  } catch {
+    throw new Error("Stored Cloudflare proxy trust setting is invalid JSON.");
+  }
+}
+const savedCloudflareProxyRanges = database.prepare(
+  "SELECT value FROM app_settings WHERE key = 'cloudflare_proxy_ranges'",
+).get();
+if (savedCloudflareProxyRanges) {
+  try {
+    const entries = JSON.parse(savedCloudflareProxyRanges.value);
+    if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string")) {
+      throw new Error("Expected an array of CIDR strings.");
+    }
+    cloudflareProxyEntries = parseCloudflareProxyRanges(entries.join("\n"));
+  } catch {
+    throw new Error("Stored Cloudflare proxy ranges are invalid.");
+  }
+}
+cloudflareProxyUpdatedAt = database.prepare(
+  "SELECT value FROM app_settings WHERE key = 'cloudflare_proxy_updated_at'",
+).get()?.value || null;
+({ ranges: trustedProxyRanges } = combineTrustedProxyRanges(
+  trustedProxyEntries,
+  cloudflareProxyTrustEnabled ? cloudflareProxyEntries : [],
+));
 database.prepare(`
   INSERT OR IGNORE INTO app_settings (key, value)
   VALUES ('public_lookup_hash_key', ?)
@@ -233,6 +268,115 @@ database.prepare(`
 const publicLookupHashKey = database.prepare(
   "SELECT value FROM app_settings WHERE key = 'public_lookup_hash_key'",
 ).get().value;
+
+function parseCloudflareProxyRanges(value) {
+  if (typeof value !== "string" || value.length > 8192) {
+    throw new Error("The Cloudflare proxy range list is too large.");
+  }
+  const entries = [...new Set(value.split(/\s+/).map((entry) => entry.trim()).filter(Boolean))];
+  if (entries.length < 2 || entries.length > 100) {
+    throw new Error("The Cloudflare proxy range list has an unexpected number of networks.");
+  }
+  const ranges = new net.BlockList();
+  const families = new Set();
+  for (const entry of entries) {
+    const [address, prefixText, ...extra] = entry.split("/");
+    const family = isIP(address);
+    const prefix = Number(prefixText);
+    if (!family || extra.length || prefixText === undefined || !/^\d+$/.test(prefixText) ||
+      !Number.isInteger(prefix) || prefix < (family === 4 ? 8 : 16) ||
+      prefix > (family === 4 ? 32 : 128)) {
+      throw new Error("Cloudflare published an invalid proxy IP range.");
+    }
+    ranges.addSubnet(address, prefix, family === 4 ? "ipv4" : "ipv6");
+    families.add(family);
+  }
+  if (!families.has(4) || !families.has(6)) {
+    throw new Error("Cloudflare must publish both IPv4 and IPv6 proxy ranges.");
+  }
+  return entries;
+}
+
+function combineTrustedProxyRanges(manualEntries, cloudflareEntries) {
+  return parseTrustedProxyEntries(
+    [...manualEntries, ...cloudflareEntries].join("\n"),
+    150,
+    16384,
+  );
+}
+
+async function fetchCloudflareProxyRanges(url) {
+  const response = await fetch(url, {
+    headers: { accept: "text/plain", "user-agent": "BNGlookup trusted proxy range updater" },
+    signal: AbortSignal.timeout(10000),
+    redirect: "error",
+  });
+  if (!response.ok) throw new Error(`Cloudflare range service returned HTTP ${response.status}.`);
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Cloudflare range service returned an empty response.");
+  const chunks = [];
+  let length = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > 8192) {
+      await reader.cancel();
+      throw new Error("Cloudflare range response exceeded the size limit.");
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+}
+
+function refreshCloudflareProxyRanges() {
+  if (cloudflareProxyRefreshPromise) return cloudflareProxyRefreshPromise;
+  cloudflareProxyRefreshPromise = (async () => {
+    const [ipv4, ipv6] = await Promise.all([
+      fetchCloudflareProxyRanges("https://www.cloudflare.com/ips-v4"),
+      fetchCloudflareProxyRanges("https://www.cloudflare.com/ips-v6"),
+    ]);
+    const updatedEntries = parseCloudflareProxyRanges(`${ipv4}\n${ipv6}`);
+    combineTrustedProxyRanges(trustedProxyEntries, updatedEntries);
+    const updatedAt = new Date().toISOString();
+    const saveSetting = database.prepare(`
+      INSERT INTO app_settings (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `);
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      saveSetting.run("cloudflare_proxy_ranges", JSON.stringify(updatedEntries));
+      saveSetting.run("cloudflare_proxy_updated_at", updatedAt);
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    cloudflareProxyEntries = updatedEntries;
+    cloudflareProxyUpdatedAt = updatedAt;
+    trustedProxyRanges = combineTrustedProxyRanges(
+      trustedProxyEntries,
+      cloudflareProxyTrustEnabled ? updatedEntries : [],
+    ).ranges;
+    return updatedAt;
+  })().finally(() => {
+    cloudflareProxyRefreshPromise = null;
+  });
+  return cloudflareProxyRefreshPromise;
+}
+
+if (cloudflareProxyTrustEnabled) {
+  void refreshCloudflareProxyRanges().catch((error) => {
+    console.error("Unable to refresh Cloudflare proxy ranges; retaining the last known-good list:", error);
+  });
+}
+setInterval(() => {
+  if (cloudflareProxyTrustEnabled) {
+    void refreshCloudflareProxyRanges().catch((error) => {
+      console.error("Unable to refresh Cloudflare proxy ranges; retaining the last known-good list:", error);
+    });
+  }
+}, 12 * 60 * 60 * 1000).unref();
 
 function recordAdminLog(category, request, action, details, statusCode, username) {
   try {
@@ -2678,6 +2822,8 @@ function handleAdminSettings(request, response) {
       defaultDnsResolver: getDefaultResolverId(),
       dnsResolvers: getDnsResolverOptions(),
       trustedProxies: trustedProxyEntries.join("\n"),
+      trustCloudflareProxies: cloudflareProxyTrustEnabled,
+      cloudflareProxyUpdatedAt,
       branding: getSiteBranding(),
     });
     return;
@@ -2687,7 +2833,7 @@ function handleAdminSettings(request, response) {
     return;
   }
   if (!enforceSameOrigin(request, response)) return;
-  void readAuthBody(request, response, 384 * 1024).then((body) => {
+  void readAuthBody(request, response, 384 * 1024).then(async (body) => {
     if (!body) return;
     const access = Object.hasOwn(body, "featureAccess") ? body.featureAccess : getFeatureAccess();
     const portScanPolicy = Object.hasOwn(body, "portScanPolicy")
@@ -2714,6 +2860,33 @@ function handleAdminSettings(request, response) {
         sendJson(response, 400, { error: error.message });
         return;
       }
+    }
+    const trustCloudflareProxies = Object.hasOwn(body, "trustCloudflareProxies")
+      ? body.trustCloudflareProxies
+      : cloudflareProxyTrustEnabled;
+    if (typeof trustCloudflareProxies !== "boolean") {
+      sendJson(response, 400, { error: "Choose whether to trust Cloudflare proxy ranges." });
+      return;
+    }
+    if (trustCloudflareProxies &&
+      (!cloudflareProxyTrustEnabled || !cloudflareProxyEntries.length)) {
+      try {
+        await refreshCloudflareProxyRanges();
+      } catch (error) {
+        console.error("Unable to load Cloudflare proxy ranges:", error);
+        sendJson(response, 502, { error: "Unable to retrieve Cloudflare proxy ranges. The setting was not enabled." });
+        return;
+      }
+    }
+    let combinedTrustedProxyConfig;
+    try {
+      combinedTrustedProxyConfig = combineTrustedProxyRanges(
+        trustedProxyConfig.entries,
+        trustCloudflareProxies ? cloudflareProxyEntries : [],
+      );
+    } catch (error) {
+      sendJson(response, 400, { error: error.message });
+      return;
     }
     let siteIconUrl;
     if (body.resetSiteIcon === true) {
@@ -2781,6 +2954,9 @@ function handleAdminSettings(request, response) {
       if (Object.hasOwn(body, "trustedProxies")) {
         saveSetting.run("trusted_proxies", JSON.stringify(trustedProxyConfig.entries));
       }
+      if (Object.hasOwn(body, "trustCloudflareProxies")) {
+        saveSetting.run("cloudflare_proxy_trust", JSON.stringify(trustCloudflareProxies));
+      }
       if (Object.hasOwn(body, "siteTitle")) {
         saveSetting.run("site_title", siteTitle);
       }
@@ -2797,7 +2973,8 @@ function handleAdminSettings(request, response) {
       throw error;
     }
     trustedProxyEntries = trustedProxyConfig.entries;
-    trustedProxyRanges = trustedProxyConfig.ranges;
+    cloudflareProxyTrustEnabled = trustCloudflareProxies;
+    trustedProxyRanges = combinedTrustedProxyConfig.ranges;
     recordAdminLog(
       "audit",
       request,
@@ -2812,6 +2989,8 @@ function handleAdminSettings(request, response) {
       nmapAllowedCidrs: nmapAllowedCidrs.entries.join("\n"),
       defaultDnsResolver,
       trustedProxies: trustedProxyEntries.join("\n"),
+      trustCloudflareProxies: cloudflareProxyTrustEnabled,
+      cloudflareProxyUpdatedAt,
       branding: getSiteBranding(),
     });
   }).catch((error) => {

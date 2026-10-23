@@ -287,7 +287,7 @@ Open **Admin** (Settings & users). Settings persist in SQLite at
 | Setting | Description |
 | --- | --- |
 | DNS resolver | Google Public DNS, Cloudflare, Quad9 or DNS4EU (EU, [protective](https://joindns4.eu/for-public), may filter malicious domains). Query names and types go to the chosen provider. |
-| Trusted reverse proxies | One IP or CIDR per line. Only then are `CF-Connecting-IP`, `X-Real-IP` and `X-Forwarded-For` used for display, quotas and login limits. Never trust `0.0.0.0/0` or `::/0`; the proxy must overwrite the headers. |
+| Trusted reverse proxies | Enter proxy IPs/CIDRs manually or enable automatic trust for Cloudflare's published IPv4/IPv6 reverse-proxy ranges. Cloudflare ranges are refreshed at startup and every 12 hours, and the last known-good list is retained if refresh fails. Only trusted connections can supply client-IP headers. The proxy must overwrite those headers. Cloudflare Tunnel users must also trust the local `cloudflared` connector address. |
 | Port-scan policy | Max ports per role and local-network permission per role. |
 | Site title and icon | Icon upload (PNG, JPEG, GIF, WebP, ICO; up to 256 KB) or HTTPS URL. |
 | SSL certificate | See below. |
@@ -348,6 +348,15 @@ requests get HSTS and Secure cookies.
 
 Behind a reverse proxy, configure Trusted reverse proxies so the landing page
 shows the real client IP.
+
+For a standard Cloudflare-proxied origin, enable **Automatically trust
+Cloudflare reverse proxy ranges** in **Admin → Feature access**. The official
+Cloudflare IPv4 and IPv6 ranges are downloaded over HTTPS, cached in SQLite and
+refreshed at startup and every 12 hours. This option is off by default. For
+Cloudflare Tunnel, also add the `cloudflared` connector's address or CIDR:
+the connection to BNGlookup comes from that local connector, not a Cloudflare
+edge IP. Keep the app reachable only through your intended proxy and ensure it
+overwrites client-IP headers.
 
 ## Other deployments
 
