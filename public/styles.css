@@ -298,6 +298,37 @@ h1 {
 .scan-extra-control textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .scan-extra-control > span { grid-column: 2; color: #737373; font-size: 10px; }
 .scan-port-control input { max-width: 180px; }
+.ping-monitor-control { grid-template-columns: 175px minmax(180px, 1fr); }
+.ping-monitor-control > .ping-monitor-label { grid-column: 1; }
+.ping-monitor-control > #ping-monitor-hint { grid-column: 2; }
+.ping-monitor-label { color: #b9c7bd; font-size: 11px; font-weight: 600; }
+.ping-monitor-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.ping-monitor-actions button {
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid #3c684d;
+  border-radius: 5px;
+  color: #c9f4d8;
+  background: #14251a;
+  cursor: pointer;
+}
+.ping-monitor-actions button:disabled { cursor: not-allowed; opacity: .55; }
+.ping-monitor-actions label { display: inline-flex; align-items: center; gap: 6px; color: #b9c7bd; font-weight: 400; }
+.ping-monitor-actions input { width: auto; min-height: 0; accent-color: #54d88f; }
+.ping-monitor-panel {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid #2b2b2b;
+  border-radius: 10px;
+  background: #0d0d0d;
+}
+.ping-monitor-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ping-monitor-heading h2 { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 18px; }
+.ping-monitor-heading .eyebrow { margin: 0; }
+.ping-monitor-status { min-height: 18px; color: #aaa; font-size: 11px; }
+.ping-monitor-chart-wrap { width: 100%; height: 220px; }
+#ping-monitor-chart { display: block; width: 100%; height: 100%; }
+.ping-monitor-summary { margin-top: 8px; color: #b9c7bd; font-size: 11px; }
 .port-scan-address {
   display: grid;
   grid-template-columns: minmax(130px, 1fr) 2fr;
@@ -813,7 +844,7 @@ footer {
   .search-row { flex-wrap: wrap; }
   .nameserver-control { grid-template-columns: 1fr; }
   .nameserver-control > span { grid-column: 1; }
-  .scan-extra-control { grid-template-columns: 1fr; }
+  .scan-extra-control, .ping-monitor-control { grid-template-columns: 1fr; }
   .scan-extra-control > span { grid-column: 1; }
   .port-scan-address { grid-template-columns: 1fr; }
   .account-card { padding: 21px 17px; }

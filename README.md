@@ -19,7 +19,7 @@ small Docker container with no application dependencies.
 - **Reverse lookup**: PTR records for IPv4/IPv6, with IP WHOIS data.
 - **Whois**: RDAP registration data for domains and IPs (registrar, dates, status, network range, ASN, contacts) and a nameserver comparison.
 - **MAC lookup**: vendor, OUI block and address type.
-- **Ping**: ICMP (4 echo requests) or HTTP/HTTPS GET check.
+- **Ping**: ICMP (4 echo requests) or HTTP/HTTPS GET check; optional live single-host monitoring at 3-second intervals, with latency chart and optional up/down sounds.
 - **Ping scan**: one echo request to every host in a list or CIDR block.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side.
 - **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
@@ -227,8 +227,14 @@ Several tools send data to external services; these are listed under
 - **Port scans** always require a signed-in account. Private/local targets follow
   the role setting (default: allowed for Admins, not Users); other reserved
   addresses are always skipped. Only scan systems you are authorized to test.
+- **Live Ping monitoring** requires a signed-in user and checks one host every
+  3 seconds for up to 5 minutes (100 samples maximum). It plots latency and
+  availability, stops when the page is hidden or the user stops it, and can play
+  a tone when the host changes between up and down. Server-side limits also enforce
+  the sample interval and maximum volume per user. Monitor only systems you are
+  authorized to check.
 - **Nmap** is disabled until an administrator adds authorized CIDR ranges under
-  Settings → Port scans. Targets are resolved by the server and must match an
+  Settings → Port scans (up to 254 IPv4/IPv6 CIDRs). Targets are resolved by the server and must match an
   allowlisted range; one address is scanned per request, with one concurrent scan
   and fixed timeouts. Available profiles are TCP connect on the top 20 or 100 ports,
   or light service detection on the top 20 ports. The scanner does not accept custom

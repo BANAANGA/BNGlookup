@@ -22,6 +22,17 @@ const multiTraceInput = document.querySelector("#multi-trace-input");
 const bulkTargetsHint = document.querySelector("#bulk-targets-hint");
 const pingMethodControl = document.querySelector("#ping-method-control");
 const pingMethodInput = document.querySelector("#ping-method-input");
+const pingMonitorControl = document.querySelector("#ping-monitor-control");
+const pingMonitorStart = document.querySelector("#ping-monitor-start");
+const pingMonitorStop = document.querySelector("#ping-monitor-stop");
+const pingMonitorSound = document.querySelector("#ping-monitor-sound");
+const pingMonitorHint = document.querySelector("#ping-monitor-hint");
+const pingMonitorPanel = document.querySelector("#ping-monitor-panel");
+const pingMonitorTarget = document.querySelector("#ping-monitor-target");
+const pingMonitorState = document.querySelector("#ping-monitor-state");
+const pingMonitorStatus = document.querySelector("#ping-monitor-status");
+const pingMonitorSummary = document.querySelector("#ping-monitor-summary");
+const pingMonitorChart = document.querySelector("#ping-monitor-chart");
 const resultPanel = document.querySelector("#result");
 const errorMessage = document.querySelector("#error-message");
 const submitButton = document.querySelector("#submit-button");
@@ -50,6 +61,14 @@ const clientPtr = document.querySelector("#client-ptr");
 const clientWhois = document.querySelector("#client-whois");
 let mode = "auto";
 let authState = null;
+let pingMonitorActive = false;
+let pingMonitorTimer = null;
+let pingMonitorStartedAt = 0;
+let pingMonitorTargetValue = "";
+let pingMonitorSamples = [];
+let pingMonitorPreviousState = null;
+let pingMonitorAbortController = null;
+let pingMonitorAudioContext = null;
 
 async function readApiResponse(response) {
   const body = await response.text();
@@ -128,6 +147,7 @@ function submitLabel(currentMode) {
 }
 
 function setMode(nextMode) {
+  if (mode !== nextMode) stopPingMonitor("Monitoring stopped because the lookup mode changed.");
   mode = nextMode;
   const automatic = mode === "auto";
   const reverse = mode === "reverse";
@@ -173,6 +193,12 @@ function setMode(nextMode) {
   nameserverControl.hidden = !supportsNameserver;
   if (!isAdmin) nameserverInput.value = "";
   pingMethodControl.hidden = !ping;
+  pingMonitorControl.hidden = !ping;
+  pingMonitorStart.disabled = pingMonitorActive || !authState?.user;
+  pingMonitorStop.disabled = !pingMonitorActive;
+  pingMonitorHint.textContent = authState?.user
+    ? "One sample every 3 seconds; monitoring stops after 5 minutes or 100 samples."
+    : "Sign in to use live monitoring. One sample every 3 seconds; maximum 5 minutes.";
   portScanControl.hidden = !scan || !authState?.user;
   customPortsControl.hidden = !customPortScan;
   bulkTargetsControl.hidden = !(bulkPortScan || pingScan);
@@ -827,6 +853,237 @@ function renderPingResult(data) {
   resultPanel.hidden = false;
 }
 
+function drawPingMonitorChart() {
+  const bounds = pingMonitorChart.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return;
+  const ratio = window.devicePixelRatio || 1;
+  pingMonitorChart.width = Math.round(bounds.width * ratio);
+  pingMonitorChart.height = Math.round(bounds.height * ratio);
+  const context = pingMonitorChart.getContext("2d");
+  context.scale(ratio, ratio);
+  const width = bounds.width;
+  const height = bounds.height;
+  const padding = { top: 14, right: 12, bottom: 30, left: 48 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const latencies = pingMonitorSamples.map((sample) => sample.latency).filter(Number.isFinite);
+  const maxLatency = Math.max(100, ...latencies) * 1.15;
+  context.clearRect(0, 0, width, height);
+  context.font = "11px sans-serif";
+  context.textAlign = "right";
+  context.textBaseline = "middle";
+  context.strokeStyle = "#343434";
+  context.fillStyle = "#999";
+  for (let index = 0; index <= 4; index += 1) {
+    const y = padding.top + chartHeight * index / 4;
+    const label = `${(maxLatency * (4 - index) / 4).toFixed(0)} ms`;
+    context.beginPath();
+    context.moveTo(padding.left, y);
+    context.lineTo(width - padding.right, y);
+    context.stroke();
+    context.fillText(label, padding.left - 7, y);
+  }
+  context.textAlign = "center";
+  context.textBaseline = "top";
+  context.fillText("oldest", padding.left, height - padding.bottom + 8);
+  context.fillText("latest", width - padding.right, height - padding.bottom + 8);
+  if (pingMonitorSamples.length < 1) return;
+  const xAt = (index) => padding.left + (pingMonitorSamples.length < 2
+    ? chartWidth
+    : chartWidth * index / (pingMonitorSamples.length - 1));
+  const yAt = (latency) => padding.top + chartHeight * (1 - latency / maxLatency);
+  let segmentOpen = false;
+  pingMonitorSamples.forEach((sample, index) => {
+    if (!Number.isFinite(sample.latency)) {
+      segmentOpen = false;
+      return;
+    }
+    const x = xAt(index);
+    const y = yAt(sample.latency);
+    if (!segmentOpen) {
+      context.beginPath();
+      context.moveTo(x, y);
+      segmentOpen = true;
+    } else {
+      context.lineTo(x, y);
+    }
+  });
+  context.strokeStyle = "#65d993";
+  context.lineWidth = 2;
+  context.stroke();
+  pingMonitorSamples.forEach((sample, index) => {
+    const x = xAt(index);
+    const y = Number.isFinite(sample.latency) ? yAt(sample.latency) : height - padding.bottom;
+    context.beginPath();
+    context.arc(x, y, 3, 0, Math.PI * 2);
+    context.fillStyle = sample.up ? "#65d993" : "#fa8390";
+    context.fill();
+  });
+  const latest = pingMonitorSamples.at(-1);
+  pingMonitorChart.setAttribute(
+    "aria-label",
+    `Latency history: ${pingMonitorSamples.length} samples; latest ${latest.up && Number.isFinite(latest.latency) ? `${latest.latency.toFixed(1)} milliseconds` : "host down"}.`,
+  );
+}
+
+function updatePingMonitorSummary() {
+  const up = pingMonitorSamples.filter((sample) => sample.up).length;
+  const down = pingMonitorSamples.length - up;
+  const latencies = pingMonitorSamples.map((sample) => sample.latency).filter(Number.isFinite);
+  const average = latencies.length
+    ? latencies.reduce((total, latency) => total + latency, 0) / latencies.length
+    : null;
+  pingMonitorSummary.textContent = `${pingMonitorSamples.length} samples · ${up} up · ${down} down · ${
+    average === null ? "no latency samples" : `average ${average.toFixed(1)} ms`
+  }`;
+  drawPingMonitorChart();
+}
+
+function playPingMonitorTone(up) {
+  if (!pingMonitorSound.checked || !pingMonitorAudioContext) return;
+  const oscillator = pingMonitorAudioContext.createOscillator();
+  const gain = pingMonitorAudioContext.createGain();
+  oscillator.frequency.value = up ? 880 : 440;
+  gain.gain.setValueAtTime(0.0001, pingMonitorAudioContext.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.12, pingMonitorAudioContext.currentTime + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, pingMonitorAudioContext.currentTime + 0.22);
+  oscillator.connect(gain);
+  gain.connect(pingMonitorAudioContext.destination);
+  oscillator.start();
+  oscillator.stop(pingMonitorAudioContext.currentTime + 0.23);
+}
+
+function stopPingMonitor(message = "Monitoring stopped.") {
+  if (pingMonitorTimer) clearTimeout(pingMonitorTimer);
+  pingMonitorTimer = null;
+  pingMonitorActive = false;
+  pingMonitorAbortController?.abort();
+  pingMonitorAbortController = null;
+  pingMonitorStart.disabled = !authState?.user;
+  pingMonitorStop.disabled = true;
+  if (!pingMonitorPanel.hidden && message) pingMonitorStatus.textContent = message;
+}
+
+async function pollPingMonitor() {
+  if (!pingMonitorActive) return;
+  if (Date.now() - pingMonitorStartedAt >= 5 * 60 * 1000 ||
+    pingMonitorSamples.length >= 100) {
+    stopPingMonitor("The 5-minute monitoring limit was reached.");
+    return;
+  }
+  const sampleNumber = pingMonitorSamples.length;
+  const requestedAt = pingMonitorStartedAt + sampleNumber * 3000;
+  pingMonitorAbortController = new AbortController();
+  let sample;
+  try {
+    const params = new URLSearchParams({
+      name: pingMonitorTargetValue,
+      method: pingMethodInput.value,
+      sample: "1",
+    });
+    const response = await fetch(`/api/ping?${params}`, {
+      credentials: "same-origin",
+      signal: pingMonitorAbortController.signal,
+    });
+    const data = await readApiResponse(response);
+    if (response.status === 401) {
+      stopPingMonitor("Sign in again to continue monitoring.");
+      return;
+    }
+    if (response.status === 429) {
+      stopPingMonitor(data.error || "The monitoring rate limit was reached.");
+      return;
+    }
+    if ([400, 403].includes(response.status)) {
+      stopPingMonitor(data.error || "This target cannot be monitored.");
+      return;
+    }
+    if (!response.ok) throw new Error(data.error || "The host check failed.");
+    const latency = data.method === "icmp"
+      ? data.times?.length
+        ? data.times.reduce((sum, time) => sum + time, 0) / data.times.length
+        : null
+      : Number.isFinite(data.responseMs) ? data.responseMs : null;
+    sample = {
+      up: Boolean(data.up),
+      latency: data.up && Number.isFinite(latency) ? latency : null,
+      address: data.address,
+      error: data.error || "",
+    };
+  } catch (error) {
+    if (!pingMonitorActive || error.name === "AbortError") return;
+    sample = { up: false, latency: null, address: "", error: error.message || "Request failed." };
+  } finally {
+    pingMonitorAbortController = null;
+  }
+  if (!pingMonitorActive) return;
+  pingMonitorSamples.push(sample);
+  if (sample.up !== pingMonitorPreviousState) {
+    if (pingMonitorPreviousState !== null) playPingMonitorTone(sample.up);
+    pingMonitorPreviousState = sample.up;
+  }
+  pingMonitorState.textContent = sample.up ? "Host is up" : "Host is down";
+  pingMonitorState.classList.toggle("success", sample.up);
+  pingMonitorState.classList.toggle("warning", !sample.up);
+  const elapsedSeconds = Math.floor((Date.now() - pingMonitorStartedAt) / 1000);
+  pingMonitorStatus.textContent = `${sample.address ? `${sample.address} · ` : ""}${
+    sample.up && Number.isFinite(sample.latency)
+      ? `${sample.latency.toFixed(1)} ms`
+      : sample.error || "No response"
+  } · ${elapsedSeconds}s elapsed · monitoring ends after 5 minutes`;
+  updatePingMonitorSummary();
+  if (pingMonitorSamples.length >= 100) {
+    stopPingMonitor("The 5-minute monitoring limit was reached.");
+    return;
+  }
+  const delay = Math.max(0, requestedAt + 3000 - Date.now());
+  pingMonitorTimer = setTimeout(pollPingMonitor, delay);
+}
+
+pingMonitorStart.addEventListener("click", async () => {
+  if (!authState?.user) {
+    pingMonitorStatus.textContent = "Sign in to use live host monitoring.";
+    pingMonitorPanel.hidden = false;
+    return;
+  }
+  if (pingMonitorActive) return;
+  pingMonitorTargetValue = input.value.trim();
+  if (!pingMonitorTargetValue) {
+    input.focus();
+    errorMessage.textContent = "Enter a domain name or IP address to monitor.";
+    errorMessage.hidden = false;
+    return;
+  }
+  if (pingMonitorSound.checked && window.AudioContext) {
+    pingMonitorAudioContext ||= new AudioContext();
+    await pingMonitorAudioContext.resume();
+  }
+  pingMonitorActive = true;
+  pingMonitorStartedAt = Date.now();
+  pingMonitorSamples = [];
+  pingMonitorPreviousState = null;
+  pingMonitorTarget.textContent = pingMonitorTargetValue;
+  pingMonitorState.textContent = "Checking…";
+  pingMonitorState.classList.remove("success");
+  pingMonitorState.classList.add("warning");
+  pingMonitorStatus.textContent = "Starting host checks…";
+  pingMonitorSummary.textContent = "No samples yet.";
+  resultPanel.hidden = true;
+  pingMonitorPanel.hidden = false;
+  pingMonitorStart.disabled = true;
+  pingMonitorStop.disabled = false;
+  drawPingMonitorChart();
+  void pollPingMonitor();
+});
+
+pingMonitorStop.addEventListener("click", () => stopPingMonitor());
+window.addEventListener("resize", drawPingMonitorChart);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && pingMonitorActive) {
+    stopPingMonitor("Monitoring stopped because the page is no longer visible.");
+  }
+});
+
 function renderPingScanResult(data) {
   const rows = data.results.map((result) => `
     <tr>
@@ -1328,6 +1585,8 @@ recordType.addEventListener("change", () => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (pingMonitorActive) stopPingMonitor("Monitoring stopped because a new lookup was started.");
+  pingMonitorPanel.hidden = true;
   let requestMode = mode;
   let lookupName = input.value.trim();
   if (mode === "auto") {

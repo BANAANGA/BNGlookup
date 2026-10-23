@@ -121,12 +121,12 @@ const featureNames = {
 };
 
 function parseNmapAllowedCidrs(value) {
-  if (typeof value !== "string" || value.length > 2048) {
-    throw new Error("Authorized Nmap networks must be a list no longer than 2,048 characters.");
+  if (typeof value !== "string" || value.length > 12288) {
+    throw new Error("Authorized Nmap networks must be a list no longer than 12,288 characters.");
   }
   const entries = [...new Set(value.split(/[,\r\n]+/).map((entry) => entry.trim()).filter(Boolean))];
-  if (entries.length > 50) {
-    throw new Error("Authorized Nmap networks may contain no more than 50 CIDRs.");
+  if (entries.length > 254) {
+    throw new Error("Authorized Nmap networks may contain no more than 254 CIDRs.");
   }
   const ranges = new net.BlockList();
   for (const entry of entries) {
@@ -3517,11 +3517,51 @@ function consumePublicLookup(request, response) {
 }
 
 const pingMethods = new Set(["icmp", "https", "http"]);
+const pingSampleHistory = new Map();
+const pingSampleIntervalMs = 3000;
+const pingSampleWindowMs = 5 * 60 * 1000;
+const pingSampleLimit = 100;
+const pingSampleConcurrencyLimit = 4;
+let pingSamplesActive = 0;
 
-function runIcmpPing(address) {
+function allowPingSample(user, target, address) {
+  const now = Date.now();
+  const key = user.id;
+  const previous = pingSampleHistory.get(key);
+  const history = (previous?.timestamps || []).filter(
+    (timestamp) => now - timestamp < pingSampleWindowMs,
+  );
+  if (history.length && (previous.target !== target || previous.address !== address)) {
+    pingSampleHistory.set(key, { ...previous, timestamps: history });
+    return "target";
+  }
+  if (history.length && now - history.at(-1) < pingSampleIntervalMs - 200) {
+    pingSampleHistory.set(key, { target, address, timestamps: history });
+    return "interval";
+  }
+  if (history.length >= pingSampleLimit) {
+    pingSampleHistory.set(key, { target, address, timestamps: history });
+    return "limit";
+  }
+  history.push(now);
+  pingSampleHistory.set(key, { target, address, timestamps: history });
+  if (pingSampleHistory.size > 10000) {
+    for (const [id, samples] of pingSampleHistory) {
+      if (!samples.timestamps.length || now - samples.timestamps.at(-1) >= pingSampleWindowMs) {
+        pingSampleHistory.delete(id);
+      }
+    }
+  }
+  return null;
+}
+
+function runIcmpPing(address, packetCount = 4) {
   const command = isIP(address) === 6 ? "ping6" : "ping";
   return new Promise((resolve) => {
-    execFile(command, ["-c", "4", "-W", "2", address], { timeout: 12000, maxBuffer: 65536 }, (error, stdout) => {
+    execFile(command, ["-c", String(packetCount), "-W", "1", address], {
+      timeout: packetCount === 1 ? 2500 : 8000,
+      maxBuffer: 65536,
+    }, (error, stdout) => {
       const output = String(stdout || "");
       const sent = output.match(/(\d+) packets transmitted/);
       const received = output.match(/(\d+) (?:packets )?received/);
@@ -3609,11 +3649,16 @@ async function pingHost(request, url, response) {
     sendJson(response, 400, { error: "Choose ICMP, HTTPS, or HTTP." });
     return;
   }
+  const sample = url.searchParams.get("sample") === "1";
+  const user = currentUser(request);
+  if (sample && !user) {
+    sendJson(response, 401, { error: "Log in to monitor a host.", loginRequired: true });
+    return;
+  }
   let target = rawName.trim();
   const bracketed = target.match(/^\[([0-9a-f:.]+)\]$/i);
   if (bracketed) target = bracketed[1];
   try {
-    const user = currentUser(request);
     const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
     let addresses;
     if (isIP(target)) {
@@ -3638,11 +3683,37 @@ async function pingHost(request, url, response) {
       sendJson(response, 400, { error: "This target resolves to a private or reserved address that cannot be checked." });
       return;
     }
+    if (sample && pingSamplesActive >= pingSampleConcurrencyLimit) {
+      sendJson(response, 503, { error: "Live monitoring is busy. Try again shortly." });
+      return;
+    }
     const address = eligible[0];
-    const result = method === "icmp"
-      ? await runIcmpPing(address)
-      : await runHttpCheck(target, address, method);
-    sendJson(response, 200, { target, address, method, ...result });
+    if (sample) {
+      const sampleError = allowPingSample(user, target, address);
+      if (sampleError === "target") {
+        sendJson(response, 409, { error: "A monitoring window can only sample the same target and resolved address." });
+        return;
+      }
+      if (sampleError) {
+        sendJson(response, 429, {
+          error: "Host monitoring is limited to one sample every 3 seconds and 100 samples per 5 minutes.",
+        });
+        return;
+      }
+    }
+    if (sample) pingSamplesActive += 1;
+    try {
+      const started = process.hrtime.bigint();
+      const result = method === "icmp"
+        ? await runIcmpPing(address, sample ? 1 : 4)
+        : await runHttpCheck(target, address, method);
+      if (sample && method !== "icmp" && result.responseMs === undefined) {
+        result.responseMs = Number(process.hrtime.bigint() - started) / 1e6;
+      }
+      sendJson(response, 200, { target, address, method, ...result });
+    } finally {
+      if (sample) pingSamplesActive = Math.max(0, pingSamplesActive - 1);
+    }
   } catch (error) {
     console.error("Ping failed:", error);
     sendJson(response, 500, { error: "Unable to complete the host check." });
@@ -4558,6 +4629,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   const feature = protectedFeatures[url.pathname];
   const requiresPortScanLogin =
     ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan"].includes(url.pathname) ||
+    (url.pathname === "/api/ping" && url.searchParams.get("sample") === "1") ||
     (url.pathname === "/api/scan" && url.searchParams.get("ports") === "common");
   if (feature && !checkFeatureAccess(request, response, feature, requiresPortScanLogin)) return;
 
