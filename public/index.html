@@ -162,7 +162,7 @@
           <div class="scan-extra-control" id="bulk-targets-control" hidden>
             <label for="bulk-targets-input">IP addresses or CIDR blocks</label>
             <textarea id="bulk-targets-input" rows="5" maxlength="8192" placeholder="e.g.&#10;8.8.8.8&#10;1.1.1.0/25" spellcheck="false"></textarea>
-            <span id="bulk-targets-hint">Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses.</span>
+            <span id="bulk-targets-hint">Separate targets with commas or new lines. IPv4 and IPv6 are supported; CIDR size follows the administrator's prefix limit and the scan is capped at 256 unique addresses.</span>
           </div>
           <div class="scan-extra-control" id="multi-trace-control" hidden>
             <label for="multi-trace-input">Domain names or IP addresses</label>
