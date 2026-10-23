@@ -15,6 +15,8 @@ const bulkTargetsControl = document.querySelector("#bulk-targets-control");
 const bulkTargetsInput = document.querySelector("#bulk-targets-input");
 const bulkPortControl = document.querySelector("#bulk-port-control");
 const bulkPortInput = document.querySelector("#bulk-port-input");
+const nmapControl = document.querySelector("#nmap-control");
+const nmapScanType = document.querySelector("#nmap-scan-type");
 const multiTraceControl = document.querySelector("#multi-trace-control");
 const multiTraceInput = document.querySelector("#multi-trace-input");
 const bulkTargetsHint = document.querySelector("#bulk-targets-hint");
@@ -116,6 +118,7 @@ function submitLabel(currentMode) {
     scan: "Magic scan",
     "custom-port": "Port scan",
     "bulk-port": "Bulk port scan",
+    nmap: "Run Nmap scan",
     mac: "Lookup MAC",
     ping: "Ping host",
     "ping-scan": "Run ping scan",
@@ -134,10 +137,11 @@ function setMode(nextMode) {
   const scan = mode === "scan";
   const customPortScan = mode === "custom-port";
   const bulkPortScan = mode === "bulk-port";
+  const nmapScan = mode === "nmap";
   const pingScan = mode === "ping-scan";
   const traceroute = mode === "traceroute";
   const multiTraceroute = mode === "multi-traceroute";
-  const portScan = customPortScan || bulkPortScan;
+  const portScan = customPortScan || bulkPortScan || nmapScan;
   const listMode = bulkPortScan || pingScan || multiTraceroute;
   const isAdmin = authState?.user?.role === "admin";
   const supportsNameserver = isAdmin && ["forward", "reverse", "scan"].includes(mode);
@@ -156,7 +160,7 @@ function setMode(nextMode) {
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
       ? "e.g. 00:1A:2B:3C:4D:5E"
-    : details || ping || traceroute
+    : details || ping || traceroute || nmapScan
       ? "e.g. example.com or 8.8.8.8"
     : automatic
       ? "Domain, IP address, or MAC address"
@@ -173,6 +177,7 @@ function setMode(nextMode) {
   customPortsControl.hidden = !customPortScan;
   bulkTargetsControl.hidden = !(bulkPortScan || pingScan);
   bulkPortControl.hidden = !bulkPortScan;
+  nmapControl.hidden = !nmapScan;
   multiTraceControl.hidden = !multiTraceroute;
   bulkTargetsHint.textContent = pingScan
     ? "Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses."
@@ -199,6 +204,8 @@ function setMode(nextMode) {
         ? "Scan a custom list or range of TCP ports on one domain or IP address."
       : bulkPortScan
         ? "Check one TCP port across an explicit list or CIDR block of IP addresses."
+        : nmapScan
+          ? "Scan one target from an administrator-approved network using a bounded Nmap profile."
       : pingScan
         ? "Send a single ICMP echo request to every address in a list or CIDR block to find which hosts are up."
       : traceroute
@@ -232,7 +239,7 @@ async function initializeAccount() {
     tabs.filter((tab) => tab !== autoTab).forEach((tab) => {
       const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
       const access = authState.featureAccess[feature] || "user";
-      const portScanRequiresUser = ["custom-port", "bulk-port", "ping-scan", "multi-traceroute"].includes(tab.dataset.mode);
+      const portScanRequiresUser = ["custom-port", "bulk-port", "ping-scan", "multi-traceroute", "nmap"].includes(tab.dataset.mode);
       const canUse = Boolean(authState.user) &&
         (access !== "admin" || authState.user.role === "admin") ||
         access === "public" && !portScanRequiresUser;
@@ -730,6 +737,47 @@ function renderPortScanResult(data, title) {
     ${data.addressesSkipped ? `<p class="detail-notice">${escapeHtml(data.addressesSkipped)} disallowed, reserved, or excess IP address(es) were skipped.</p>` : ""}
     ${results || '<p class="empty-result">No eligible IP addresses were available to scan.</p>'}
     <p class="scan-disclaimer">Only ports that accepted a TCP connection are listed. Scan only systems you are authorized to test.</p>`;
+  resultPanel.hidden = false;
+}
+
+function renderNmapResult(data) {
+  const hosts = (data.hosts || []).map((host) => {
+    const hostname = host.hostnames?.length ? ` (${host.hostnames.join(", ")})` : "";
+    const rows = (host.ports || []).map((port) => `
+      <tr>
+        <td>${escapeHtml(`${port.port}/${port.protocol}`)}</td>
+        <td>${escapeHtml(port.state)}</td>
+        <td>${escapeHtml([port.service, port.product, port.version].filter(Boolean).join(" "))}</td>
+      </tr>
+    `).join("");
+    return `
+      <section class="record-section">
+        <h3>${copyableResult(host.address || data.address)}${escapeHtml(hostname)}
+          <span class="status-badge ${host.status === "up" ? "success" : "warning"}">${escapeHtml(host.status || "unknown")}</span>
+        </h3>
+        ${rows
+          ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
+              <thead><tr><th>Port</th><th>State</th><th>Service</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table></div>`
+          : '<p class="empty-result">No ports were reported open.</p>'}
+      </section>`;
+  }).join("");
+  const openPorts = (data.hosts || []).reduce(
+    (count, host) => count + (host.ports || []).filter((port) => port.state === "open").length,
+    0,
+  );
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">NMAP SCAN</p><h2>${copyableResult(data.target)}</h2></div>
+      <span class="status-badge ${openPorts ? "success" : "warning"}">${openPorts} open</span>
+    </div>
+    <div class="scan-summary">
+      <span>Resolved target: ${copyableResult(data.address)}</span>
+      <span>${escapeHtml(data.profile)}</span>
+    </div>
+    ${hosts || '<p class="empty-result">Nmap did not return host results.</p>'}
+    <p class="scan-disclaimer">Only the administrator-approved target was scanned. Scan only systems you are authorized to test.</p>`;
   resultPanel.hidden = false;
 }
 
@@ -1313,9 +1361,10 @@ form.addEventListener("submit", async (event) => {
   const bulkPortScan = requestMode === "bulk-port";
   const pingScan = requestMode === "ping-scan";
   const multiTraceroute = requestMode === "multi-traceroute";
+  const nmapScan = requestMode === "nmap";
   const isPortScan = customPortScan || bulkPortScan;
-  const postsJson = isPortScan || pingScan || multiTraceroute;
-  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${requestMode === "scan" ? "Scanning" : isPortScan ? "Scanning ports" : pingScan ? "Pinging" : requestMode === "traceroute" || multiTraceroute ? "Tracing" : "Looking up"}</span>`;
+  const postsJson = isPortScan || pingScan || multiTraceroute || nmapScan;
+  submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${requestMode === "scan" ? "Scanning" : isPortScan || nmapScan ? "Scanning ports" : pingScan ? "Pinging" : requestMode === "traceroute" || multiTraceroute ? "Tracing" : "Looking up"}</span>`;
 
   const params = new URLSearchParams({
     name: lookupName,
@@ -1340,6 +1389,8 @@ form.addEventListener("submit", async (event) => {
       ? "/api/custom-port-scan"
       : bulkPortScan
         ? "/api/bulk-port-scan"
+        : nmapScan
+          ? "/api/nmap-scan"
         : requestMode === "details"
       ? "/api/domain-info"
         : pingScan
@@ -1373,6 +1424,15 @@ form.addEventListener("submit", async (event) => {
             port: bulkPortInput.value,
           }),
         }
+        : nmapScan
+          ? {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              target: input.value.trim(),
+              scanType: nmapScanType.value,
+            }),
+          }
         : pingScan || multiTraceroute
           ? {
             method: "POST",
@@ -1394,6 +1454,7 @@ form.addEventListener("submit", async (event) => {
     else if (pingScan) renderPingScanResult(data);
     else if (requestMode === "traceroute") renderTracerouteResult({ results: [data] }, false);
     else if (multiTraceroute) renderTracerouteResult(data, true);
+    else if (nmapScan) renderNmapResult(data);
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "scan") renderScanResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Port scan" : "Bulk port scan");

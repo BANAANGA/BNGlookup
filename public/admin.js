@@ -4,6 +4,7 @@ const featureSettings = document.querySelector("#feature-settings");
 const dnsResolverSetting = document.querySelector("#dns-resolver-setting");
 const trustedProxySetting = document.querySelector("#trusted-proxies");
 const portScanSettings = document.querySelector("#port-scan-settings");
+const nmapAllowedCidrs = document.querySelector("#nmap-allowed-cidrs");
 const userList = document.querySelector("#user-list");
 const settingsTabs = [...document.querySelectorAll(".settings-tab")];
 const siteTitleSetting = document.querySelector("#site-title");
@@ -247,6 +248,7 @@ async function initializeAdmin() {
     renderDnsResolverSetting(settings.dnsResolvers, settings.defaultDnsResolver);
     trustedProxySetting.value = settings.trustedProxies;
     renderPortScanSettings(settings.portScanPolicy);
+    nmapAllowedCidrs.value = settings.nmapAllowedCidrs;
     siteTitleSetting.value = settings.branding.title;
     const customIcon = settings.branding.iconUrl !== "/favicon.svg";
     if (customIcon && !settings.branding.iconUrl.startsWith("data:image/")) {
@@ -295,6 +297,7 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
       );
       settings.trustedProxies = trustedProxySetting.value;
     } else if (activePanel === "port-scan-panel") {
+      settings.nmapAllowedCidrs = nmapAllowedCidrs.value;
       settings.portScanPolicy = {
         maxPortsByRole: Object.fromEntries(["admin", "user"].map((role) => [
           role,

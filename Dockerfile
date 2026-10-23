@@ -3,7 +3,7 @@ FROM node:22-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 
-RUN apk add --no-cache iputils-tracepath coreutils \
+RUN apk add --no-cache iputils-tracepath coreutils nmap nmap-scripts \
  && apk upgrade --no-cache \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
