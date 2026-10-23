@@ -189,7 +189,7 @@ Several tools send data to external services; these are listed under
 | --- | --- |
 | DNS lookup | Common types or any type by name/code. `ANY` may return incomplete data. |
 | Reverse lookup | IPv4/IPv6 PTR; shows IP WHOIS. |
-| Whois | RDAP via `rdap.org`; missing ASNs come from `ipwho.is`. Contacts may be redacted. |
+| Whois | RDAP via `rdap.org`; missing ASNs are resolved through RIPE Stat, with `ipwho.is` as fallback. Contacts may be redacted. |
 | MAC lookup | Vendor data from `maclookup.app`. |
 | Ping | ICMP: 4 echo requests with loss and RTT. HTTP/HTTPS: one GET to `/` (redirects reported, not followed). |
 | Ping scan | One echo per host; list or CIDR, max 256 addresses. |

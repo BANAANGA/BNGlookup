@@ -650,24 +650,56 @@ async function fetchIpRdap(address) {
     });
   let asnError = null;
   if (asNumbers.length === 0 && isPublicAddress(address)) {
+    const errors = [];
     try {
-      const response = await fetch(`https://ipwho.is/${address}`, {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(5000),
-      });
+      const response = await fetch(
+        `https://stat.ripe.net/data/network-info/data.json?resource=${encodeURIComponent(address)}`,
+        {
+          headers: {
+            accept: "application/json",
+            "user-agent": "BNGlookup/0.1 (+https://github.com/BANAANGA/BNGlookup)",
+          },
+          signal: AbortSignal.timeout(5000),
+        },
+      );
       if (!response.ok) {
-        throw new Error(`ASN provider returned HTTP ${response.status}.`);
+        throw new Error(`RIPE Stat returned HTTP ${response.status}.`);
       }
       const result = await response.json();
-      const asn = result.success === true ? result.connection?.asn : null;
-      if (typeof asn === "string" && /^AS\d+$/i.test(asn)) {
-        asNumbers.push(asn.toUpperCase());
-      } else {
-        throw new Error("ASN provider returned no autonomous system number.");
-      }
+      const candidates = result.status === "ok" && result.data_call_status === "supported"
+        ? result.data?.asns
+        : null;
+      const ripeAsns = (Array.isArray(candidates) ? candidates : [])
+        .map((value) => String(value).replace(/^AS/i, ""))
+        .filter((value) => /^\d+$/.test(value) && Number(value) <= 4294967295)
+        .map((value) => `AS${value}`);
+      asNumbers.push(...ripeAsns);
+      if (!ripeAsns.length) throw new Error("RIPE Stat returned no autonomous system number.");
     } catch (error) {
-      asnError = error.message || "Unable to retrieve the autonomous system number.";
+      errors.push(error.message || "RIPE Stat lookup failed.");
     }
+    if (!asNumbers.length) {
+      try {
+        const response = await fetch(`https://ipwho.is/${address}`, {
+          headers: { accept: "application/json" },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!response.ok) {
+          throw new Error(`ASN provider returned HTTP ${response.status}.`);
+        }
+        const result = await response.json();
+        const asn = result.success === true ? result.connection?.asn : null;
+        const normalizedAsn = String(asn ?? "").replace(/^AS/i, "");
+        if (/^\d+$/.test(normalizedAsn) && Number(normalizedAsn) <= 4294967295) {
+          asNumbers.push(`AS${normalizedAsn}`);
+        } else {
+          throw new Error("ASN provider returned no autonomous system number.");
+        }
+      } catch (error) {
+        errors.push(error.message || "ASN provider lookup failed.");
+      }
+    }
+    if (!asNumbers.length) asnError = errors.join(" ");
   }
   const dates = {};
   for (const event of Array.isArray(data.events) ? data.events : []) {
