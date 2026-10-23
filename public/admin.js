@@ -3,6 +3,8 @@ const successPanel = document.querySelector("#admin-success");
 const featureSettings = document.querySelector("#feature-settings");
 const dnsResolverSetting = document.querySelector("#dns-resolver-setting");
 const trustedProxySetting = document.querySelector("#trusted-proxies");
+const trustCloudflareProxiesSetting = document.querySelector("#trust-cloudflare-proxies");
+const cloudflareProxyStatus = document.querySelector("#cloudflare-proxy-status");
 const portScanSettings = document.querySelector("#port-scan-settings");
 const nmapAllowedCidrs = document.querySelector("#nmap-allowed-cidrs");
 const userList = document.querySelector("#user-list");
@@ -236,6 +238,12 @@ async function loadUsers() {
   renderUsers(users);
 }
 
+function setCloudflareProxyStatus(updatedAt) {
+  cloudflareProxyStatus.textContent = updatedAt
+    ? `Cloudflare IPv4 and IPv6 ranges were last refreshed ${new Date(updatedAt).toLocaleString()}. Cloudflare Tunnel users must also trust the local cloudflared connector address.`
+    : "When enabled, official Cloudflare IPv4 and IPv6 ranges are refreshed automatically. Cloudflare Tunnel users must also trust the local cloudflared connector address.";
+}
+
 async function initializeAdmin() {
   try {
     const [settings, users, mail] = await Promise.all([
@@ -247,6 +255,8 @@ async function initializeAdmin() {
     renderFeatureSettings(settings.features, settings.featureAccess);
     renderDnsResolverSetting(settings.dnsResolvers, settings.defaultDnsResolver);
     trustedProxySetting.value = settings.trustedProxies;
+    trustCloudflareProxiesSetting.checked = settings.trustCloudflareProxies;
+    setCloudflareProxyStatus(settings.cloudflareProxyUpdatedAt);
     renderPortScanSettings(settings.portScanPolicy);
     nmapAllowedCidrs.value = settings.nmapAllowedCidrs;
     siteTitleSetting.value = settings.branding.title;
@@ -296,6 +306,7 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
         [...featureSettings.querySelectorAll("select")].map((select) => [select.name, select.value]),
       );
       settings.trustedProxies = trustedProxySetting.value;
+      settings.trustCloudflareProxies = trustCloudflareProxiesSetting.checked;
     } else if (activePanel === "port-scan-panel") {
       settings.nmapAllowedCidrs = nmapAllowedCidrs.value;
       settings.portScanPolicy = {
@@ -311,10 +322,13 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
     } else {
       throw new Error("Select a settings category first.");
     }
-    await api("/api/admin/settings", {
+    const savedSettings = await api("/api/admin/settings", {
       method: "PUT",
       body: JSON.stringify(settings),
     });
+    if (activePanel === "access-panel") {
+      setCloudflareProxyStatus(savedSettings.cloudflareProxyUpdatedAt);
+    }
     if (activePanel === "general-panel") {
       await window.applySiteBranding();
       if (resetSiteIconSetting.checked) {

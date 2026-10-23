@@ -539,6 +539,15 @@ h1 {
   font-size: 12px;
 }
 .feature-setting select { width: 190px; }
+.form-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 16px 0 6px;
+  color: #ddd;
+  font-size: 12px;
+}
+.form-checkbox input { accent-color: #54d88f; }
 .admin-card > form > textarea {
   width: 100%;
   min-height: 96px;
