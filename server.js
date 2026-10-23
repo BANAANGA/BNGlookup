@@ -3127,6 +3127,19 @@ function runSinglePing(address) {
   });
 }
 
+const heavyJobLimits = { traceroute: 8, pingScan: 2 };
+const heavyJobsActive = { traceroute: 0, pingScan: 0 };
+
+function acquireHeavyJob(kind) {
+  if (heavyJobsActive[kind] >= heavyJobLimits[kind]) return false;
+  heavyJobsActive[kind] += 1;
+  return true;
+}
+
+function releaseHeavyJob(kind) {
+  heavyJobsActive[kind] = Math.max(0, heavyJobsActive[kind] - 1);
+}
+
 async function runPingScan(request, response) {
   try {
     const user = currentUser(request);
@@ -3136,15 +3149,20 @@ async function runPingScan(request, response) {
     const allowLocal = getPortScanPolicy().localScanByRole[user.role];
     const eligible = addresses.filter((address) => isScannableAddress(address, allowLocal));
     request.logDetails = JSON.stringify({ targets: addresses.slice(0, 256) });
+    if (!acquireHeavyJob("pingScan")) throw invalidScanRequest("The server is busy with other ping scans. Try again shortly.", 503);
     const results = new Array(eligible.length);
     let next = 0;
-    await Promise.all(Array.from({ length: Math.min(32, eligible.length) }, async () => {
-      while (next < eligible.length) {
-        const index = next;
-        next += 1;
-        results[index] = await runSinglePing(eligible[index]);
-      }
-    }));
+    try {
+      await Promise.all(Array.from({ length: Math.min(32, eligible.length) }, async () => {
+        while (next < eligible.length) {
+          const index = next;
+          next += 1;
+          results[index] = await runSinglePing(eligible[index]);
+        }
+      }));
+    } finally {
+      releaseHeavyJob("pingScan");
+    }
     sendJson(response, 200, {
       scanned: eligible.length,
       skipped: addresses.length - eligible.length,
@@ -3218,6 +3236,9 @@ function parseTracepath(output, destination, trim = true) {
 
 function runTraceroute(address, { onUpdate, signal } = {}) {
   const args = ["-n", "-m", String(maxTraceHops), isIP(address) === 6 ? "-6" : "-4", address];
+  if (!acquireHeavyJob("traceroute")) {
+    return Promise.resolve({ error: "The server is busy with other traceroutes. Try again shortly." });
+  }
   return new Promise((resolve) => {
     let output = "";
     let timedOut = false;
@@ -3248,6 +3269,7 @@ function runTraceroute(address, { onUpdate, signal } = {}) {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      releaseHeavyJob("traceroute");
       if (spawnFailed === "missing") {
         resolve({ error: "Traceroute is not available on this server." });
         return;
@@ -3568,6 +3590,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     url = new URL(request.url, "http://localhost");
   } catch {
     sendJson(response, 400, { error: "Malformed request URL." });
+    return;
+  }
+  if (url.pathname === "/healthz" && (request.method === "GET" || request.method === "HEAD")) {
+    response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    response.end(request.method === "HEAD" ? undefined : "ok\n");
     return;
   }
   const challengePrefix = "/.well-known/acme-challenge/";
@@ -3906,6 +3933,25 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
 
 server.headersTimeout = 10_000;
 server.requestTimeout = 30_000;
+server.keepAliveTimeout = 5_000;
+server.maxConnections = 1024;
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+});
+
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}, shutting down.`);
+  server.close(() => process.exit(0));
+  server.closeIdleConnections?.();
+  setTimeout(() => process.exit(0), 10_000).unref();
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
 server.listen(port, host, () => {
   console.log(`DNS lookup listening on ${host}:${port}`);
 });

@@ -293,6 +293,12 @@ requests get HSTS and Secure cookies.
   Security Policy plus security headers are sent.
 - Only an explicit list of static files is served. State-changing requests need a
   same-origin `Origin` header.
+- The Compose files run the container hardened: non-root user, read-only root
+  filesystem (only `/data` and `/tmp` are writable), all Linux capabilities
+  dropped, `no-new-privileges`, PID and memory limits, and a health check
+  (`/healthz`). The app shuts down gracefully on `SIGTERM`.
+- Expensive jobs are capped server-wide (8 concurrent traceroutes, 2 ping scans),
+  and connections, header sizes and request timeouts are bounded.
 - Use HTTPS (set `COOKIE_SECURE=true` behind a proxy) and network-level access
   controls; do not expose the service over an untrusted network without them.
 
