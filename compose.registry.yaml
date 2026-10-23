@@ -17,6 +17,16 @@ services:
     volumes:
       - app_data:/data
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    init: true
 
 volumes:
   app_data:
