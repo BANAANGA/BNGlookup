@@ -20,6 +20,7 @@ small Docker container with no application dependencies.
 - **Whois**: RDAP registration data for domains and IPs (registrar, dates, status, network range, ASN, contacts) and a nameserver comparison.
 - **MAC lookup**: vendor, OUI block and address type.
 - **Ping**: ICMP (4 echo requests) or HTTP/HTTPS GET check; optional live single-host monitoring at 3-second intervals, with latency chart and optional up/down sounds.
+- **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status.
 - **Ping scan**: one echo request to every host in a list or CIDR block.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side.
 - **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
@@ -193,6 +194,7 @@ Several tools send data to external services; these are listed under
 | Whois | RDAP via `rdap.org`; missing ASNs are resolved through RIPE Stat, with `ipwho.is` as fallback. Contacts may be redacted. |
 | MAC lookup | Vendor data from `maclookup.app`. |
 | Ping | ICMP: 4 echo requests with loss and RTT. HTTP/HTTPS: one GET to `/` (redirects reported, not followed). |
+| SSLscan | One TLS handshake to a host and port (default 443); reports the negotiated TLS protocol, cipher, peer certificate chain and certificate verification result. |
 | Ping scan | One echo per host; list or CIDR, max 256 addresses. |
 | Traceroute | `tracepath` (UDP), up to 20 hops, 45 s limit; live updates. |
 | Multi traceroute | Up to 10 targets, 4 at a time; hop comparison table. |
@@ -212,6 +214,9 @@ Several tools send data to external services; these are listed under
   settings; if your runtime disables unprivileged ICMP, add `cap_add: [NET_RAW]`
   to the Compose service. Traceroute needs no extra privileges (the image installs
   `iputils-tracepath` and `coreutils`); silent routers appear as "no reply".
+- **SSLscan**: checks one host and port at a time and is subject to the same
+  private/reserved-address policy as other host checks. It does not enumerate
+  protocol versions or cipher suites, or test for TLS vulnerabilities.
 - **Live traceroute API**: `GET /api/traceroute?name=…&stream=1` and
   `POST /api/multi-traceroute` with `"stream": true` return newline-delimited JSON events.
 - **Magic scan** checks A, AAAA, CAA, CNAME, HTTPS, MX, NS, SOA, SRV and TXT for the
@@ -252,7 +257,7 @@ Several tools send data to external services; these are listed under
 
 | Feature | Default access |
 | --- | --- |
-| DNS lookup, Reverse lookup, Whois, MAC lookup, Ping, Traceroute | Logged-in users |
+| DNS lookup, Reverse lookup, Whois, MAC lookup, Ping, SSLscan, Traceroute | Logged-in users |
 | Magic scan, Ping scan, Multi traceroute, Port scan, Bulk port scan, Nmap | Administrators |
 
 - Ping scan, Multi traceroute, both port scans and Nmap need a login even if set to Public.

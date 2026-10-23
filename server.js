@@ -1,5 +1,6 @@
 const http = require("node:http");
 const https = require("node:https");
+const tls = require("node:tls");
 const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -104,6 +105,7 @@ const featureAccessDefaults = {
   "custom-port": "admin",
   "bulk-port": "admin",
   nmap: "admin",
+  sslscan: "user",
 };
 const featureNames = {
   forward: "DNS lookup",
@@ -118,6 +120,7 @@ const featureNames = {
   "custom-port": "Port scan",
   "bulk-port": "Bulk port scan",
   nmap: "Nmap scan (authorized CIDRs only)",
+  sslscan: "SSL/TLS handshake and certificate check",
 };
 
 function parseNmapAllowedCidrs(value) {
@@ -3720,6 +3723,125 @@ async function pingHost(request, url, response) {
   }
 }
 
+function describeTlsCertificate(certificate) {
+  const describeName = (name) => Object.entries(name || {})
+    .map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(", ") : value}`)
+    .join(", ");
+  return {
+    subject: describeName(certificate.subject),
+    issuer: describeName(certificate.issuer),
+    subjectAltName: certificate.subjectaltname || "",
+    validFrom: certificate.valid_from || "",
+    validTo: certificate.valid_to || "",
+    serialNumber: certificate.serialNumber || "",
+    fingerprint256: certificate.fingerprint256 || "",
+  };
+}
+
+function runTlsHandshake(hostname, address, port) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+    const socket = tls.connect({
+      host: hostname,
+      port,
+      servername: isIP(hostname) ? undefined : hostname,
+      rejectUnauthorized: false,
+      lookup: (_host, options, callback) => {
+        if (options?.all) callback(null, [{ address, family: isIP(address) }]);
+        else callback(null, address, isIP(address));
+      },
+    });
+    socket.setTimeout(8000, () => finish({ handshake: false, error: "The TLS handshake timed out." }));
+    socket.once("secureConnect", () => {
+      const chain = [];
+      const seen = new Set();
+      let certificate = socket.getPeerCertificate(true);
+      while (certificate?.raw && chain.length < 10) {
+        const fingerprint = certificate.fingerprint256 || certificate.serialNumber;
+        if (!fingerprint || seen.has(fingerprint)) break;
+        seen.add(fingerprint);
+        chain.push(describeTlsCertificate(certificate));
+        const issuer = certificate.issuerCertificate;
+        if (!issuer || issuer === certificate) break;
+        certificate = issuer;
+      }
+      finish({
+        handshake: true,
+        authorized: socket.authorized,
+        authorizationError: socket.authorized ? null : String(socket.authorizationError || "Certificate is not trusted."),
+        protocol: socket.getProtocol(),
+        cipher: socket.getCipher(),
+        certificateChain: chain,
+      });
+    });
+    socket.once("error", (error) => finish({
+      handshake: false,
+      error: error.code ? `TLS handshake failed (${error.code}).` : "TLS handshake failed.",
+    }));
+  });
+}
+
+async function sslScanHost(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const rawPort = queryInput(url, "port", 5, response);
+  if (rawPort === null) return;
+  const port = rawPort ? Number(rawPort) : 443;
+  if ((rawPort && !/^\d{1,5}$/.test(rawPort)) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    sendJson(response, 400, { error: "Enter a TCP port between 1 and 65535." });
+    return;
+  }
+  let target = rawName.trim();
+  const bracketed = target.match(/^\[([0-9a-f:.]+)\]$/i);
+  if (bracketed) target = bracketed[1];
+  try {
+    const user = currentUser(request);
+    const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+    let addresses;
+    if (isIP(target)) {
+      addresses = [target];
+    } else {
+      const domain = normalizeDomain(target);
+      if (!domain) {
+        sendJson(response, 400, { error: "Enter a valid domain name or IP address." });
+        return;
+      }
+      target = domain;
+      try {
+        addresses = (await resolveHost(domain, { all: true, verbatim: true })).map((entry) => entry.address);
+      } catch {
+        sendJson(response, 200, { target, port, handshake: false, error: "The host name could not be resolved." });
+        return;
+      }
+    }
+    const eligible = addresses.filter((address) => isScannableAddress(address, allowLocal));
+    eligible.sort((left, right) => isIP(left) - isIP(right));
+    if (!eligible.length) {
+      sendJson(response, 400, { error: "This target resolves to a private or reserved address that cannot be checked." });
+      return;
+    }
+    if (!acquireHeavyJob("sslscan")) {
+      sendJson(response, 503, { error: "The server is busy with other TLS checks. Try again shortly." });
+      return;
+    }
+    try {
+      const result = await runTlsHandshake(target, eligible[0], port);
+      sendJson(response, 200, { target, address: eligible[0], port, ...result });
+    } finally {
+      releaseHeavyJob("sslscan");
+    }
+  } catch (error) {
+    console.error("SSL/TLS check failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the SSL/TLS check." });
+  }
+}
+
 function runSinglePing(address) {
   const command = isIP(address) === 6 ? "ping6" : "ping";
   return new Promise((resolve) => {
@@ -3730,8 +3852,8 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1 };
-const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4 };
+const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0 };
 
 function acquireHeavyJob(kind) {
   if (heavyJobsActive[kind] >= heavyJobLimits[kind]) return false;
@@ -4454,6 +4576,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/nmap-scan": { method: "POST", action: "Nmap scan" },
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
+    "/api/sslscan": { method: "GET", action: "SSL/TLS check", keys: ["name", "port"] },
     "/api/ping-scan": { method: "POST", action: "Ping scan" },
     "/api/traceroute": { method: "GET", action: "Traceroute", keys: ["name"] },
     "/api/multi-traceroute": { method: "POST", action: "Multi traceroute" },
@@ -4622,6 +4745,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/nmap-scan": "nmap",
     "/api/mac-lookup": "mac",
     "/api/ping": "ping",
+    "/api/sslscan": "sslscan",
     "/api/ping-scan": "ping-scan",
     "/api/traceroute": "traceroute",
     "/api/multi-traceroute": "multi-traceroute",
@@ -4693,6 +4817,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     pingHost(request, url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/sslscan") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void sslScanHost(request, url, response);
     return;
   }
 
