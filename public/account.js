@@ -1,5 +1,6 @@
 const setupForm = document.querySelector("#setup-form");
 const loginForm = document.querySelector("#login-form");
+const changeForm = document.querySelector("#change-form");
 const errorMessage = document.querySelector("#auth-error");
 
 function showAuthError(message) {
@@ -19,7 +20,7 @@ async function submitAccountForm(form, endpoint, includePasswordConfirmation = f
     event.preventDefault();
     errorMessage.hidden = true;
     const values = Object.fromEntries(new FormData(form));
-    if (includePasswordConfirmation && values.password !== values.confirmPassword) {
+    if (includePasswordConfirmation && (values.password ?? values.newPassword) !== values.confirmPassword) {
       showAuthError("The passwords do not match.");
       return;
     }
@@ -34,7 +35,15 @@ async function submitAccountForm(form, endpoint, includePasswordConfirmation = f
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Unable to sign in.");
-      window.location.assign(endpoint.endsWith("/setup") ? "/admin.html" : safeNextPath());
+      if (result.mustChangePassword) {
+        window.location.assign("/change-password.html");
+        return;
+      }
+      window.location.assign(
+        endpoint.endsWith("/setup") ? "/admin.html"
+          : endpoint.endsWith("/change-password") ? (result.role === "admin" ? "/admin.html" : "/")
+            : safeNextPath(),
+      );
     } catch (error) {
       showAuthError(error.message || "Unable to complete the request.");
     } finally {
@@ -45,3 +54,4 @@ async function submitAccountForm(form, endpoint, includePasswordConfirmation = f
 
 if (setupForm) submitAccountForm(setupForm, "/api/auth/setup", true);
 if (loginForm) submitAccountForm(loginForm, "/api/auth/login");
+if (changeForm) submitAccountForm(changeForm, "/api/auth/change-password", true);

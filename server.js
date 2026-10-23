@@ -64,6 +64,7 @@ const staticFiles = new Set([
   "/index.html",
   "/setup.html",
   "/login.html",
+  "/change-password.html",
   "/admin.html",
   "/admin-logs.html",
   "/admin-stats.html",
@@ -165,6 +166,10 @@ database.exec(`
     WHERE id NOT IN (SELECT id FROM admin_logs ORDER BY id DESC LIMIT 20000);
   END;
 `);
+if (!database.prepare("PRAGMA table_info(users)").all()
+  .some((column) => column.name === "must_change_password")) {
+  database.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0");
+}
 database.prepare("UPDATE admin_logs SET action = 'Port scan' WHERE action = 'Port scan'").run();
 database.prepare(`
   INSERT OR IGNORE INTO app_settings (key, value) VALUES ('trusted_proxies', ?)
@@ -2265,12 +2270,13 @@ function readCookie(request, name) {
   return "";
 }
 
-function currentUser(request) {
+function currentUser(request, { allowPending = false } = {}) {
   const token = readCookie(request, sessionCookieName);
   if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   const session = database.prepare(`
-    SELECT users.id, users.username, users.role, user_sessions.expires_at
+    SELECT users.id, users.username, users.role, users.must_change_password,
+      user_sessions.expires_at
     FROM user_sessions JOIN users ON users.id = user_sessions.user_id
     WHERE user_sessions.token_hash = ? AND users.active = 1
   `).get(tokenHash);
@@ -2279,7 +2285,13 @@ function currentUser(request) {
     database.prepare("DELETE FROM user_sessions WHERE token_hash = ?").run(tokenHash);
     return null;
   }
-  return { id: session.id, username: session.username, role: session.role };
+  if (session.must_change_password && !allowPending) return null;
+  return {
+    id: session.id,
+    username: session.username,
+    role: session.role,
+    mustChangePassword: Boolean(session.must_change_password),
+  };
 }
 
 function cookieSecureAttribute(response) {
@@ -2474,7 +2486,7 @@ async function handleLogin(request, response) {
     : "";
   const password = typeof body.password === "string" ? body.password : "";
   const user = database.prepare(`
-    SELECT id, username, password_hash, password_salt, role
+    SELECT id, username, password_hash, password_salt, role, must_change_password
     FROM users WHERE username = ? AND active = 1
   `).get(username);
   const storedHash = user?.password_hash || "00".repeat(64);
@@ -2493,8 +2505,58 @@ async function handleLogin(request, response) {
   recordAdminLog("login", request, "Login successful", "", 200, user.username);
   sendJson(response, 200, {
     user: { username: user.username, role: user.role },
+    mustChangePassword: Boolean(user.must_change_password),
     featureAccess: getFeatureAccess(),
   });
+}
+
+async function handleChangePassword(request, response) {
+  if (!enforceSameOrigin(request, response)) return;
+  const user = currentUser(request, { allowPending: true });
+  if (!user) {
+    sendJson(response, 401, { error: "Log in to continue." });
+    return;
+  }
+  if (!allowAuthAttempt(request)) {
+    sendJson(response, 429, { error: "Too many attempts. Try again in 15 minutes." });
+    return;
+  }
+  const body = await readAuthBody(request, response);
+  if (!body) return;
+  const current = typeof body.currentPassword === "string" ? body.currentPassword : "";
+  if (typeof body.newPassword !== "string" || body.newPassword !== body.confirmPassword) {
+    sendJson(response, 400, { error: "The new passwords do not match." });
+    return;
+  }
+  if (!validatePassword(body.newPassword)) {
+    sendJson(response, 400, { error: "Password must be between 12 and 128 characters." });
+    return;
+  }
+  if (body.newPassword === current) {
+    sendJson(response, 400, { error: "Choose a password different from the current one." });
+    return;
+  }
+  const row = database.prepare(
+    "SELECT password_hash, password_salt FROM users WHERE id = ? AND active = 1",
+  ).get(user.id);
+  const supplied = await scrypt(current.length <= 128 ? current : "", row.password_salt, 64);
+  const stored = Buffer.from(row.password_hash, "hex");
+  if (current.length > 128 || stored.length !== supplied.length ||
+    !crypto.timingSafeEqual(stored, supplied)) {
+    recordAdminLog("login", request, "Password change failed", "", 401, user.username);
+    sendJson(response, 401, { error: "The current password is incorrect." });
+    return;
+  }
+  const credentials = await hashPassword(body.newPassword);
+  database.prepare(`
+    UPDATE users SET password_hash = ?, password_salt = ?, must_change_password = 0
+    WHERE id = ?
+  `).run(credentials.hash, credentials.salt, user.id);
+  database.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(user.id);
+  resetAuthAttempts(request);
+  await establishSession(user.id, response);
+  recordAdminLog("login", request, "Password changed", "", 200, user.username);
+  sendJson(response, 200, { changed: true, role: user.role });
 }
 
 function handleLogout(request, response) {
@@ -2696,8 +2758,8 @@ function handleAdminUsers(request, response) {
     const credentials = await hashPassword(body.password);
     try {
       database.prepare(`
-        INSERT INTO users (username, password_hash, password_salt, role)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO users (username, password_hash, password_salt, role, must_change_password)
+        VALUES (?, ?, ?, ?, 1)
       `).run(body.username, credentials.hash, credentials.salt, body.role);
       recordAdminLog(
         "audit",
@@ -2770,9 +2832,10 @@ function handleAdminUser(request, response, userId) {
     if (hasPassword) {
       const credentials = await hashPassword(body.password);
       database.prepare(`
-        UPDATE users SET role = ?, active = ?, password_hash = ?, password_salt = ?
+        UPDATE users SET role = ?, active = ?, password_hash = ?, password_salt = ?,
+          must_change_password = ?
         WHERE id = ?
-      `).run(role, active, credentials.hash, credentials.salt, userId);
+      `).run(role, active, credentials.hash, credentials.salt, userId === admin.id ? 0 : 1, userId);
     } else {
       database.prepare("UPDATE users SET role = ?, active = ? WHERE id = ?")
         .run(role, active, userId);
@@ -3866,6 +3929,18 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/auth/change-password") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void handleChangePassword(request, response).catch((error) => {
+      console.error("Password change failed:", error);
+      sendJson(response, 500, { error: "Unable to change password." });
+    });
+    return;
+  }
+
   if (url.pathname === "/api/auth/logout") {
     if (request.method !== "POST") {
       sendJson(response, 405, { error: "Method not allowed." });
@@ -4045,8 +4120,19 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     sendRedirect(response, "/setup.html");
     return;
   }
+  if (url.pathname === "/change-password.html") {
+    const user = currentUser(request, { allowPending: true });
+    if (!user) {
+      sendRedirect(response, appSetupRequired() ? "/setup.html" : "/login.html");
+      return;
+    }
+  }
   if (url.pathname === "/login.html") {
     const user = currentUser(request);
+    if (!user && currentUser(request, { allowPending: true })) {
+      sendRedirect(response, "/change-password.html");
+      return;
+    }
     if (user) {
       sendRedirect(response, user.role === "admin" ? "/admin.html" : "/");
       return;
@@ -4061,6 +4147,10 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     const user = currentUser(request);
+    if (!user && currentUser(request, { allowPending: true })) {
+      sendRedirect(response, "/change-password.html");
+      return;
+    }
     if (!user) {
       const nextPath = encodeURIComponent(url.pathname);
       sendRedirect(response, `/login.html?next=${nextPath}`);
