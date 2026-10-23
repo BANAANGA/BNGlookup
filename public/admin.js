@@ -142,7 +142,7 @@ function renderPortScanSettings(policy) {
       <legend>Bulk port scan CIDR limits</legend>
       <label for="bulk-cidr-prefix-ipv4">Largest IPv4 CIDR</label>
       <select id="bulk-cidr-prefix-ipv4" name="largestBulkCidrPrefixIpv4">
-        ${Array.from({ length: 9 }, (_, index) => 24 + index).map((prefix) => `
+        ${Array.from({ length: 9 }, (_, index) => 16 + index).map((prefix) => `
           <option value="${prefix}" ${policy.largestBulkCidrPrefix.ipv4 === prefix ? "selected" : ""}>
             /${prefix} (${2 ** (32 - prefix)} addresses max)
           </option>
