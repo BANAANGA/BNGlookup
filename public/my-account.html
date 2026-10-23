@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101810">
+    <title>My account · BNGlookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/branding.js" defer></script>
+    <script src="/my-account.js" defer></script>
+  </head>
+  <body>
+    <main class="page account-page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Home">
+          <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
+          <span class="brand-name">DNSLookup</span>
+        </a>
+      </header>
+      <section class="account-card">
+        <p class="eyebrow">ACCOUNT</p>
+        <h1>My account</h1>
+        <p class="account-description">Add an optional email address to receive lookup results by email.</p>
+        <form id="change-form" class="accoun<form id="email-form" class="account-form">
+          <label for="email">Email address (optional)</label>
+          <input id="email" name="email" type="email" maxlength="254" autocomplete="email">
+          <p class="form-hint" id="mail-hint"></p>
+          <p class="error-message" id="auth-error" role="alert" hidden></p>
+          <p class="success-message" id="auth-success" role="status" hidden></p>
+          <button class="submit-button" type="submit"><span>Save</span><span aria-hidden="true">→</span></button>
+        </form>
+        <p class="form-hint"><a href="/">← Back to lookup</a></p>dy>
+</html>
