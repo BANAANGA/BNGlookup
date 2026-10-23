@@ -3558,6 +3558,16 @@ async function lookup(request, url, response) {
   });
 }
 
+// TLS 1.2 suites: forward-secret AEAD only (no CBC). TLS 1.3 suites are unaffected.
+const tlsCiphers = [
+  "ECDHE-ECDSA-AES256-GCM-SHA384",
+  "ECDHE-RSA-AES256-GCM-SHA384",
+  "ECDHE-ECDSA-CHACHA20-POLY1305",
+  "ECDHE-RSA-CHACHA20-POLY1305",
+  "ECDHE-ECDSA-AES128-GCM-SHA256",
+  "ECDHE-RSA-AES128-GCM-SHA256",
+].join(":");
+
 const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) => {
   response.setHeader("content-security-policy", [
     "default-src 'self'",
@@ -3963,7 +3973,7 @@ function applyTlsCertificate(credentials) {
   }
   httpsError = null;
   const secureServer = https.createServer(
-    { ...credentials, minVersion: "TLSv1.2", maxHeaderSize: 8192 },
+    { ...credentials, minVersion: "TLSv1.2", ciphers: tlsCiphers, honorCipherOrder: true, maxHeaderSize: 8192 },
     (request, response) => server.emit("request", request, response),
   );
   secureServer.headersTimeout = 10_000;
