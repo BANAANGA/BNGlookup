@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101810">
+    <title>Dashboard · BNGlookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/branding.js" defer></script>
+    <script src="/admin-dashboard.js" defer></script>
+  </head>
+  <body>
+    <main class="page account-page admin-page stats-page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Home">
+          <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
+          <span class="brand-name">DNSLookup</span>
+        </a>
+        <nav class="account-nav" aria-label="Account"><button id="admin-logout" type="button">Log out</button></nav>
+      </header>
+      <nav class="mode-tabs main-tabs" aria-label="Main navigation">
+        <div class="tab-group">
+          <a class="mode-tab" href="/"><span aria-hidden="true">⌕</span> Auto lookup</a>
+          <a class="mode-tab" href="/?mode=forward"><span aria-hidden="true">⌕</span> DNS lookup</a>
+          <a class="mode-tab" href="/?mode=reverse"><span aria-hidden="true">↶</span> Reverse lookup</a>
+          <a class="mode-tab" href="/?mode=details"><span aria-hidden="true">ⓘ</span> Whois</a>
+          <a class="mode-tab" href="/?mode=mac"><span aria-hidden="true">◇</span> MAC lookup</a>
+          <a class="mode-tab" href="/?mode=ping"><span aria-hidden="true">◉</span> Ping</a>
+          <a class="mode-tab" href="/?mode=ping-scan"><span aria-hidden="true">◎</span> Ping scan</a>
+          <a class="mode-tab" href="/?mode=traceroute"><span aria-hidden="true">⤳</span> Traceroute</a>
+          <a class="mode-tab" href="/?mode=multi-traceroute"><span aria-hidden="true">⇶</span> Multi traceroute</a>
+          <a class="mode-tab" href="/?mode=scan"><span aria-hidden="true">⌕</span> Magic scan</a>
+          <a class="mode-tab" href="/?mode=custom-port"><span aria-hidden="true">⚙</span> Port scan</a>
+          <a class="mode-tab" href="/?mode=bulk-port"><span aria-hidden="true">⇢</span> Bulk port scan</a>
+        </div>
+        <div class="tab-group admin-tab-group">
+          <a class="mode-tab active" aria-current="page" href="/admin-dashboard.html"><span aria-hidden="true">◫</span> Dashboard</a>
+          <a class="mode-tab" href="/admin-stats.html"><span aria-hidden="true">▤</span> Stats</a>
+          <a class="mode-tab" href="/admin-logs.html"><span aria-hidden="true">≣</span> Logs</a>
+          <a class="mode-tab" href="/admin.html"><span aria-hidden="true">⚙</span> Admin</a>
+        </div>
+      </nav>
+      <form class="quick-search" action="/" method="get" role="search" aria-label="Quick lookup">
+        <div class="input-wrap">
+          <span class="input-icon" aria-hidden="true">⌕</span>
+          <input name="q" type="text" maxlength="2048" placeholder="Domain, IP address, or MAC address" autocomplete="off" spellcheck="false" aria-label="Lookup" required>
+        </div>
+        <button class="submit-button" type="submit"><span>Lookup</span><span aria-hidden="true">→</span></button>
+      </form>
+      <section class="admin-heading">
+        <p class="eyebrow">ADMINISTRATION</p>
+        <h1>Server dashboard</h1>
+        <p class="account-description">Live resource usage, activity and the latest queries. Updates every 3 seconds.</p>
+      </section>
+      <p class="error-message" id="dash-error" role="alert" hidden></p>
+      <p class="logs-status" id="dash-status" role="status">Loading…</p>
+      <section class="stats-cards dash-gauges" aria-label="Resource usage">
+        <article class="stats-card"><span>CPU usage</span><strong id="g-cpu">—</strong><div class="gauge"><i id="b-cpu"></i></div><small id="s-cpu"></small></article>
+        <article class="stats-card"><span id="l-mem">Memory usage</span><strong id="g-mem">—</strong><div class="gauge"><i id="b-mem"></i></div><small id="s-mem"></small></article>
+        <article class="stats-card"><span>Storage (data volume)</span><strong id="g-disk">—</strong><div class="gauge"><i id="b-disk"></i></div><small id="s-disk"></small></article>
+        <article class="stats-card"><span>System load</span><strong id="g-load">—</strong><div class="gauge"><i id="b-load"></i></div><small id="s-load"></small></article>
+      </section>
+      <section class="stats-cards" aria-label="Activity">
+        <article class="stats-card"><span>Queries (24 h)</span><strong id="a-queries">—</strong><small id="a-hour"></small></article>
+        <article class="stats-card"><span>Visitors (24 h)</span><strong id="a-visitors">—</strong><small>Unique client IPs</small></article>
+        <article class="stats-card"><span>Failed requests (24 h)</span><strong id="a-failures">—</strong><small id="a-logins"></small></article>
+        <article class="stats-card"><span>Users / sessions</span><strong id="a-users">—</strong><small id="a-logs"></small></article>
+      </section>
+      <section class="stats-grid dash-grid">
+        <article class="account-card admin-card stats-panel">
+          <h2>System</h2>
+          <div class="detail-list" id="dash-system"></div>
+        </article>
+        <article class="account-card admin-card stats-panel">
+          <h2>Top tools (24 h)</h2>
+          <div id="dash-top" class="stats-top-queries"></div>
+        </article>
+      </section>
+      <section class="account-card admin-card stats-panel dash-latest">
+        <h2>Latest queries</h2>
+        <div class="logs-table-wrap">
+          <table class="dns-results-table logs-table">
+            <thead><tr><th>Time (UTC)</th><th>User</th><th>Client IP</th><th>Tool</th><th>Query</th><th>Status</th></tr></thead>
+            <tbody id="dash-latest"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

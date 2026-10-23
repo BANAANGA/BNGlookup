@@ -28,6 +28,7 @@ small Docker container with no application dependencies.
 **Administration**
 
 - First-run setup, user roles, per-feature access (public / users / admins), daily public quota.
+- Live **Dashboard** (CPU, memory, storage, load, activity, top tools, latest queries; refreshes every 3 s).
 - Stats, Logs and Admin tabs; searchable, sortable, click-to-copy result tables.
 - Selectable DNS-over-HTTPS resolver, per-query nameserver, trusted proxies, port-scan limits.
 - Custom site title and icon.
@@ -241,6 +242,8 @@ Several tools send data to external services; these are listed under
 - Ping scan, Multi traceroute and both port scans need a login even if set to Public.
 - Public features are limited to 15 lookups per client IP per UTC day (stored in
   SQLite); logged-in users are exempt.
+- **Dashboard** shows live CPU, memory (container cgroup limit when set), data-volume
+  storage, system load, 24 h activity and the latest queries. Admin only.
 - **Logs** show login attempts, admin actions and lookup/scan requests (latest 200
   per tab; up to 20,000 records kept). **Stats** summarize 7, 30 or 90 days of
   query logs (visitors, failures, daily charts, query types, top names). Treat

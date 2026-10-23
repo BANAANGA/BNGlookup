@@ -2,6 +2,7 @@ const http = require("node:http");
 const https = require("node:https");
 const { execFile, spawn } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { isIP } = require("node:net");
 const dgram = require("node:dgram");
@@ -66,12 +67,14 @@ const staticFiles = new Set([
   "/admin.html",
   "/admin-logs.html",
   "/admin-stats.html",
+  "/admin-dashboard.html",
   "/styles.css",
   "/app.js",
   "/account.js",
   "/admin.js",
   "/admin-logs.js",
   "/admin-stats.js",
+  "/admin-dashboard.js",
   "/branding.js",
   "/favicon.svg",
   "/logo.svg",
@@ -2824,6 +2827,129 @@ function handleAdminLogs(request, url, response) {
   sendJson(response, 200, { logs });
 }
 
+let cpuSample = { idle: 0, total: 0, processMicros: 0, at: Date.now() };
+const cpuUsage = { system: 0, process: 0 };
+
+function sampleCpu() {
+  let idle = 0;
+  let total = 0;
+  for (const { times } of os.cpus()) {
+    idle += times.idle;
+    total += times.user + times.nice + times.sys + times.idle + times.irq;
+  }
+  const usage = process.cpuUsage();
+  const processMicros = usage.user + usage.system;
+  const now = Date.now();
+  if (cpuSample.total && total > cpuSample.total) {
+    cpuUsage.system = Math.round((1 - (idle - cpuSample.idle) / (total - cpuSample.total)) * 1000) / 10;
+    const elapsedMicros = (now - cpuSample.at) * 1000 * Math.max(1, os.cpus().length);
+    cpuUsage.process = Math.round(Math.min(100, ((processMicros - cpuSample.processMicros) / elapsedMicros) * 100) * 10) / 10;
+  }
+  cpuSample = { idle, total, processMicros, at: now };
+}
+sampleCpu();
+setInterval(sampleCpu, 2000).unref();
+
+function readNumberFile(file) {
+  try {
+    const value = fs.readFileSync(file, "utf8").trim();
+    return /^\d+$/.test(value) ? Number(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function memoryInfo() {
+  const hostTotal = os.totalmem();
+  const limit = readNumberFile("/sys/fs/cgroup/memory.max");
+  const used = readNumberFile("/sys/fs/cgroup/memory.current");
+  if (limit && used !== null && limit < hostTotal) {
+    return { scope: "container", total: limit, used: Math.min(used, limit) };
+  }
+  if (used !== null) return { scope: "container", total: hostTotal, used };
+  return { scope: "host", total: hostTotal, used: hostTotal - os.freemem() };
+}
+
+function handleAdminSystem(request, response) {
+  if (!requireAdmin(request, response)) return;
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  const memory = memoryInfo();
+  const processMemory = process.memoryUsage();
+  let disk = null;
+  try {
+    const stats = fs.statfsSync(dataDir);
+    const total = stats.blocks * stats.bsize;
+    const free = stats.bavail * stats.bsize;
+    disk = { total, used: total - free, free };
+  } catch {
+    disk = null;
+  }
+  const fileSize = (file) => {
+    try {
+      return fs.statSync(file).size;
+    } catch {
+      return 0;
+    }
+  };
+  const databasePath = path.join(dataDir, "bnglookup.sqlite");
+  const since = (hours) => new Date(Date.now() - hours * 3600_000).toISOString().slice(0, 19).replace("T", " ");
+  const day = database.prepare(`
+    SELECT COUNT(*) AS queries, COUNT(DISTINCT client_ip) AS visitors,
+      SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS failures
+    FROM admin_logs WHERE category = 'query' AND created_at >= ?
+  `).get(since(24));
+  const hour = database.prepare(
+    "SELECT COUNT(*) AS queries FROM admin_logs WHERE category = 'query' AND created_at >= ?",
+  ).get(since(1));
+  const loginFailures = database.prepare(
+    "SELECT COUNT(*) AS count FROM admin_logs WHERE category = 'login' AND status_code >= 400 AND created_at >= ?",
+  ).get(since(24));
+  const counts = {
+    users: database.prepare("SELECT COUNT(*) AS count FROM users").get().count,
+    sessions: database.prepare("SELECT COUNT(*) AS count FROM user_sessions").get().count,
+    logs: database.prepare("SELECT COUNT(*) AS count FROM admin_logs").get().count,
+  };
+  const topActions = database.prepare(`
+    SELECT action, COUNT(*) AS count FROM admin_logs
+    WHERE category = 'query' AND created_at >= ?
+    GROUP BY action ORDER BY count DESC LIMIT 5
+  `).all(since(24));
+  const latest = database.prepare(`
+    SELECT id, created_at AS timestamp, username, client_ip AS clientIp, action, details,
+      status_code AS statusCode
+    FROM admin_logs WHERE category = 'query' ORDER BY id DESC LIMIT 15
+  `).all();
+  sendJson(response, 200, {
+    time: new Date().toISOString(),
+    uptimeSeconds: Math.round(process.uptime()),
+    systemUptimeSeconds: Math.round(os.uptime()),
+    node: process.version,
+    platform: `${os.type()} ${os.arch()}`,
+    cpu: { cores: os.cpus().length, system: cpuUsage.system, process: cpuUsage.process },
+    load: os.loadavg().map((value) => Math.round(value * 100) / 100),
+    memory: {
+      ...memory,
+      process: { rss: processMemory.rss, heapUsed: processMemory.heapUsed, heapTotal: processMemory.heapTotal },
+    },
+    disk,
+    database: { size: fileSize(databasePath) + fileSize(`${databasePath}-wal`) },
+    stats: {
+      queries24h: day.queries,
+      visitors24h: day.visitors,
+      failures24h: day.failures || 0,
+      queriesLastHour: hour.queries,
+      loginFailures24h: loginFailures.count,
+      heavyJobs: { ...heavyJobsActive },
+      ...counts,
+    },
+    topActions,
+    latest,
+  });
+}
+
 function handleAdminStats(request, url, response) {
   if (!requireAdmin(request, response)) return;
   if (request.method !== "GET") {
@@ -3765,6 +3891,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/admin/system") {
+    handleAdminSystem(request, response);
+    return;
+  }
+
   if (url.pathname === "/api/admin/stats") {
     handleAdminStats(request, url, response);
     return;
@@ -3923,7 +4054,8 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   }
   if (url.pathname === "/admin.html" ||
     url.pathname === "/admin-logs.html" ||
-    url.pathname === "/admin-stats.html") {
+    url.pathname === "/admin-stats.html" ||
+    url.pathname === "/admin-dashboard.html") {
     if (appSetupRequired()) {
       sendRedirect(response, "/setup.html");
       return;
