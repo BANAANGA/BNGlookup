@@ -25,7 +25,7 @@ small Docker container with no application dependencies.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side.
 - **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
 - **Port scan / Bulk port scan**: custom TCP ports on one target, or one port across many addresses.
-- **Nmap**: bounded TCP connect profiles for one target at a time, restricted to administrator-approved CIDRs.
+- **Nmap**: bounded TCP connect profiles for one target at a time, restricted to administrator-approved CIDRs and exact client IPs from successful logins (30-day expiry).
 
 **Administration**
 
@@ -201,7 +201,7 @@ Several tools send data to external services; these are listed under
 | Magic scan | Default tab. See below. |
 | Port scan | Ports and ranges (`22,80,443,8000-8010`) on one target; max ports per role (default Admin 100, User 25); up to 8 resolved IPs. |
 | Bulk port scan | One TCP port across a list or CIDR blocks; max 256 unique addresses. |
-| Nmap | One IP or hostname within an administrator-approved CIDR; top 20/100 TCP connect or light service detection profiles. No arbitrary Nmap flags or range scans. |
+| Nmap | One IP or hostname within an administrator-approved CIDR or an exact IP observed at successful login (automatic entries expire after 30 days); top 20/100 TCP connect or light service detection. No arbitrary flags or range scans. |
 
 **Notes**
 
@@ -238,13 +238,18 @@ Several tools send data to external services; these are listed under
   a tone when the host changes between up and down. Server-side limits also enforce
   the sample interval and maximum volume per user. Monitor only systems you are
   authorized to check.
-- **Nmap** is disabled until an administrator adds authorized CIDR ranges under
-  Settings → Port scans (up to 254 IPv4/IPv6 CIDRs). Targets are resolved by the server and must match an
-  allowlisted range; one address is scanned per request, with one concurrent scan
-  and fixed timeouts. Available profiles are TCP connect on the top 20 or 100 ports,
-  or light service detection on the top 20 ports. The scanner does not accept custom
-  command-line flags, target lists, or CIDR scans. Only add networks you own or have
-  explicit authorization to assess.
+- **Nmap** accepts administrator-configured CIDRs and automatically adds a user's
+  observed client IP after successful login as an exact `/32` (IPv4) or `/128`
+  (IPv6) host entry (the observed address follows Trusted reverse proxy settings).
+  Automatic entries expire after 30 days; a repeat login refreshes expiry.
+  The combined allowlist is capped at 254 entries, preserving
+  manual CIDRs and replacing the oldest automatic entry when full. Targets are
+  resolved by the server and must match an allowlisted range. One address is
+  scanned per request, with one concurrent scan and fixed timeouts. Available
+  profiles are TCP connect on the top 20 or 100 ports, or light service detection
+  on the top 20 ports. The scanner does not accept custom command-line flags,
+  target lists, or CIDR scans. Only add networks you own or have explicit
+  authorization to assess.
 - **Result tables** are searchable and sortable; click a value to copy it.
 
 ## Accounts and access

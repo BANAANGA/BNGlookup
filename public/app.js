@@ -240,7 +240,7 @@ function setMode(nextMode) {
       : bulkPortScan
         ? "Check one TCP port across an explicit list or CIDR block of IP addresses."
         : nmapScan
-          ? "Scan one target from an administrator-approved network using a bounded Nmap profile."
+          ? "Scan one target from an administrator-approved network or a host IP captured at login using a bounded Nmap profile."
       : pingScan
         ? "Send a single ICMP echo request to every address in a list or CIDR block to find which hosts are up."
       : traceroute
@@ -812,7 +812,7 @@ function renderNmapResult(data) {
       <span>${escapeHtml(data.profile)}</span>
     </div>
     ${hosts || '<p class="empty-result">Nmap did not return host results.</p>'}
-    <p class="scan-disclaimer">Only the administrator-approved target was scanned. Scan only systems you are authorized to test.</p>`;
+    <p class="scan-disclaimer">Only the authorized target was scanned. Scan only systems you are authorized to test.</p>`;
   resultPanel.hidden = false;
 }
 

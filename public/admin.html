@@ -106,9 +106,13 @@
             <p class="form-hint">Port scans always require an account, even when the feature is marked Public. Private/local targets are enabled for administrators by default and remain unavailable to users until enabled here. Limits apply to unique TCP ports per target.</p>
             <div id="port-scan-settings" class="port-scan-settings"></div>
             <h2 class="policy-heading">Nmap authorized networks</h2>
-            <p class="form-hint">Nmap remains disabled until you add network ranges that you own or are authorized to assess. One IPv4 or IPv6 CIDR per line; maximum 254. Targets must resolve into one of these ranges. IPv4 ranges must be /8–/32 and IPv6 ranges /32–/128.</p>
+            <p class="form-hint">Nmap remains disabled until an administrator adds authorized CIDR ranges or a user signs in. Successful logins add the observed client IP as one exact host (/32 or /128) for 30 days. The observed IP follows the Trusted reverse proxies setting. The combined allowlist is limited to 254 entries; when full, the oldest automatic entry is replaced. Manual CIDRs are never replaced.</p>
             <label for="nmap-allowed-cidrs">Authorized CIDR ranges</label>
             <textarea id="nmap-allowed-cidrs" rows="5" maxlength="12288" placeholder="192.168.10.0/24&#10;2001:db8:1234::/48" spellcheck="false"></textarea>
+            <p class="form-hint">Manual ranges: up to 254 IPv4 /8–/32 or IPv6 /32–/128 entries.</p>
+            <h3>Automatically added login IPs</h3>
+            <p class="form-hint" id="nmap-login-ip-status" role="status"></p>
+            <div id="nmap-login-ip-list" class="nmap-login-ip-list"></div>
             <button class="submit-button" type="submit"><span>Save port scan settings</span><span aria-hidden="true">→</span></button>
           </section>
         </form>

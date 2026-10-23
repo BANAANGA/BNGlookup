@@ -548,6 +548,19 @@ h1 {
   font-size: 12px;
 }
 .form-checkbox input { accent-color: #54d88f; }
+.nmap-login-ip-list { display: grid; gap: 6px; margin-top: 8px; }
+.nmap-login-ip {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #292929;
+  border-radius: 5px;
+  color: #929292;
+  font-size: 11px;
+}
+.nmap-login-ip > * { min-width: 0; overflow-wrap: anywhere; }
+.nmap-login-ip strong { color: #d8e8dd; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .admin-card > form > textarea {
   width: 100%;
   min-height: 96px;
