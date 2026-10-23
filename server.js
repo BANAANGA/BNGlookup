@@ -103,6 +103,7 @@ const featureAccessDefaults = {
   scan: "admin",
   "custom-port": "admin",
   "bulk-port": "admin",
+  nmap: "admin",
 };
 const featureNames = {
   forward: "DNS lookup",
@@ -116,7 +117,32 @@ const featureNames = {
   scan: "Magic scan",
   "custom-port": "Port scan",
   "bulk-port": "Bulk port scan",
+  nmap: "Nmap scan (authorized CIDRs only)",
 };
+
+function parseNmapAllowedCidrs(value) {
+  if (typeof value !== "string" || value.length > 2048) {
+    throw new Error("Authorized Nmap networks must be a list no longer than 2,048 characters.");
+  }
+  const entries = [...new Set(value.split(/[,\r\n]+/).map((entry) => entry.trim()).filter(Boolean))];
+  if (entries.length > 50) {
+    throw new Error("Authorized Nmap networks may contain no more than 50 CIDRs.");
+  }
+  const ranges = new net.BlockList();
+  for (const entry of entries) {
+    const [address, prefixText, ...extra] = entry.split("/");
+    const family = isIP(address);
+    const maxPrefix = family === 4 ? 32 : 128;
+    const minPrefix = family === 4 ? 8 : 32;
+    const prefix = prefixText === undefined ? maxPrefix : Number(prefixText);
+    if (!family || extra.length || !Number.isInteger(prefix) ||
+      prefix < minPrefix || prefix > maxPrefix) {
+      throw new Error(`Invalid authorized network CIDR: ${entry}. Use IPv4 /8–/32 or IPv6 /32–/128.`);
+    }
+    ranges.addSubnet(address, prefix, family === 4 ? "ipv4" : "ipv6");
+  }
+  return { entries, ranges };
+}
 const portScanPolicyDefaults = {
   maxPortsByRole: { admin: 100, user: 25 },
   localScanByRole: { admin: true, user: false },
@@ -2094,6 +2120,17 @@ function getPortScanPolicy() {
   }
 }
 
+function getNmapAllowedCidrs() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'nmap_allowed_cidrs'").get();
+  if (!row) return { entries: [], ranges: new net.BlockList() };
+  try {
+    return parseNmapAllowedCidrs(row.value);
+  } catch (error) {
+    console.error("Stored Nmap network allowlist is invalid:", error.message);
+    return { entries: [], ranges: new net.BlockList() };
+  }
+}
+
 function getDefaultResolverId() {
   const row = database.prepare("SELECT value FROM app_settings WHERE key = 'default_dns_resolver'").get();
   if (row && (Object.hasOwn(dnsResolvers, row.value) || (row.value === "custom" && customDohEndpoint))) {
@@ -2634,6 +2671,7 @@ function handleAdminSettings(request, response) {
       featureAccess: getFeatureAccess(),
       features: featureNames,
       portScanPolicy: getPortScanPolicy(),
+      nmapAllowedCidrs: getNmapAllowedCidrs().entries.join("\n"),
       defaultDnsResolver: getDefaultResolverId(),
       dnsResolvers: getDnsResolverOptions(),
       trustedProxies: trustedProxyEntries.join("\n"),
@@ -2652,6 +2690,15 @@ function handleAdminSettings(request, response) {
     const portScanPolicy = Object.hasOwn(body, "portScanPolicy")
       ? body.portScanPolicy
       : getPortScanPolicy();
+    let nmapAllowedCidrs = getNmapAllowedCidrs();
+    if (Object.hasOwn(body, "nmapAllowedCidrs")) {
+      try {
+        nmapAllowedCidrs = parseNmapAllowedCidrs(body.nmapAllowedCidrs);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+        return;
+      }
+    }
     const defaultDnsResolver = Object.hasOwn(body, "defaultDnsResolver")
       ? body.defaultDnsResolver
       : getDefaultResolverId();
@@ -2722,6 +2769,9 @@ function handleAdminSettings(request, response) {
       if (Object.hasOwn(body, "portScanPolicy")) {
         saveSetting.run("port_scan_policy", JSON.stringify(portScanPolicy));
       }
+      if (Object.hasOwn(body, "nmapAllowedCidrs")) {
+        saveSetting.run("nmap_allowed_cidrs", nmapAllowedCidrs.entries.join("\n"));
+      }
       if (Object.hasOwn(body, "defaultDnsResolver")) {
         saveSetting.run("default_dns_resolver", defaultDnsResolver);
       }
@@ -2756,6 +2806,7 @@ function handleAdminSettings(request, response) {
     sendJson(response, 200, {
       featureAccess: access,
       portScanPolicy,
+      nmapAllowedCidrs: nmapAllowedCidrs.entries.join("\n"),
       defaultDnsResolver,
       trustedProxies: trustedProxyEntries.join("\n"),
       branding: getSiteBranding(),
@@ -3404,7 +3455,7 @@ function checkFeatureAccess(request, response, feature, requireLogin = false) {
   const access = getFeatureAccess()[feature] || "admin";
   const user = currentUser(request);
   if (access === "public" && (!requireLogin || user)) {
-    const expectedMethod = ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute"]
+    const expectedMethod = ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan"]
       .includes(new URL(request.url, "http://localhost").pathname)
       ? "POST"
       : "GET";
@@ -3608,8 +3659,8 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2 };
-const heavyJobsActive = { traceroute: 0, pingScan: 0 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1 };
+const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0 };
 
 function acquireHeavyJob(kind) {
   if (heavyJobsActive[kind] >= heavyJobLimits[kind]) return false;
@@ -3619,6 +3670,190 @@ function acquireHeavyJob(kind) {
 
 function releaseHeavyJob(kind) {
   heavyJobsActive[kind] = Math.max(0, heavyJobsActive[kind] - 1);
+}
+
+const nmapProfiles = {
+  "tcp-top-20": {
+    label: "TCP connect — top 20 ports",
+    options: ["-sT", "--top-ports", "20"],
+    timeoutMs: 45000,
+  },
+  "tcp-top-100": {
+    label: "TCP connect — top 100 ports",
+    options: ["-sT", "--top-ports", "100"],
+    timeoutMs: 60000,
+  },
+  "service-top-20": {
+    label: "Service detection — top 20 ports (light)",
+    options: ["-sT", "-sV", "--version-light", "--top-ports", "20"],
+    timeoutMs: 60000,
+  },
+};
+
+function nmapAllowedAddress(address, allowlist) {
+  const family = isIP(address);
+  return family !== 0 &&
+    allowlist.ranges.check(address, family === 4 ? "ipv4" : "ipv6");
+}
+
+function runNmap(address, profile) {
+  const args = [
+    ...profile.options,
+    "-Pn",
+    "-n",
+    "-T2",
+    "--max-retries",
+    "1",
+    "--host-timeout",
+    `${Math.floor(profile.timeoutMs / 1000)}s`,
+    "-oX",
+    "-",
+    address,
+  ];
+  return new Promise((resolve, reject) => {
+    const child = spawn("nmap", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+    let failure = null;
+    const timer = setTimeout(() => {
+      failure = new Error("The Nmap scan exceeded its time limit.");
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 1500).unref();
+    }, profile.timeoutMs + 3000);
+    const finish = (error, value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    child.stdout.on("data", (chunk) => {
+      if (stdout.length + chunk.length > 256 * 1024) {
+        failure = new Error("Nmap output exceeded the allowed size.");
+        child.kill("SIGTERM");
+        return;
+      }
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < 8192) stderr += chunk.toString().slice(0, 8192 - stderr.length);
+    });
+    child.on("error", (error) => {
+      failure = new Error(error.code === "ENOENT"
+        ? "Nmap is unavailable on this server."
+        : "Nmap could not be started.");
+    });
+    child.on("close", (code) => {
+      if (failure) {
+        finish(failure);
+        return;
+      }
+      if (code !== 0) {
+        finish(new Error(stderr.trim().slice(0, 300) || `Nmap exited with code ${code}.`));
+        return;
+      }
+      finish(null, stdout);
+    });
+  });
+}
+
+function nmapXmlAttribute(tag, name) {
+  const match = tag.match(new RegExp(`(?:^|\\s)${name}="([^"]*)"`));
+  return match ? match[1].replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&") : "";
+}
+
+function parseNmapXml(xml) {
+  const hosts = [];
+  for (const hostXml of xml.match(/<host\b[\s\S]*?<\/host>/g) || []) {
+    const statusTag = hostXml.match(/<status\b[^>]*>/)?.[0] || "";
+    const addressTag = hostXml.match(/<address\b[^>]*>/)?.[0] || "";
+    const hostnames = [...hostXml.matchAll(/<hostname\b[^>]*>/g)]
+      .map(([tag]) => nmapXmlAttribute(tag, "name"))
+      .filter(Boolean);
+    const ports = [];
+    for (const portXml of hostXml.match(/<port\b[\s\S]*?<\/port>/g) || []) {
+      const portTag = portXml.match(/<port\b[^>]*>/)?.[0] || "";
+      const stateTag = portXml.match(/<state\b[^>]*>/)?.[0] || "";
+      const serviceTag = portXml.match(/<service\b[^>]*>/)?.[0] || "";
+      ports.push({
+        port: nmapXmlAttribute(portTag, "portid"),
+        protocol: nmapXmlAttribute(portTag, "protocol"),
+        state: nmapXmlAttribute(stateTag, "state"),
+        service: nmapXmlAttribute(serviceTag, "name"),
+        product: nmapXmlAttribute(serviceTag, "product"),
+        version: nmapXmlAttribute(serviceTag, "version"),
+      });
+    }
+    hosts.push({
+      address: nmapXmlAttribute(addressTag, "addr"),
+      status: nmapXmlAttribute(statusTag, "state"),
+      hostnames,
+      ports,
+    });
+  }
+  return hosts;
+}
+
+async function handleNmapScan(request, response) {
+  try {
+    if (!enforceSameOrigin(request, response)) return;
+    const user = currentUser(request);
+    if (!user) throw invalidScanRequest("Log in to run an Nmap scan.", 401);
+    const body = await readJsonRequest(request);
+    const rawTarget = typeof body.target === "string" ? body.target.trim() : "";
+    const profile = nmapProfiles[body.scanType];
+    if (!rawTarget || rawTarget.length > 253 || /[\\s,\\/\\\\]/.test(rawTarget)) {
+      throw invalidScanRequest("Enter one IP address or hostname. CIDR ranges and target lists are not accepted.");
+    }
+    if (!profile) throw invalidScanRequest("Choose one of the available Nmap scan profiles.");
+    const allowlist = getNmapAllowedCidrs();
+    if (!allowlist.entries.length) {
+      throw invalidScanRequest("Nmap is disabled until an administrator configures authorized CIDR ranges.", 403);
+    }
+    let target = rawTarget.replace(/^\\[|\\]$/g, "");
+    let addresses;
+    if (isIP(target)) {
+      addresses = [target];
+    } else {
+      target = normalizeDomain(target);
+      if (!target) throw invalidScanRequest("Enter a valid IP address or hostname.");
+      try {
+        addresses = (await resolveHost(target, { all: true, verbatim: true }))
+          .map((entry) => entry.address);
+      } catch {
+        throw invalidScanRequest("The hostname could not be resolved.");
+      }
+    }
+    const address = addresses.find((candidate) => nmapAllowedAddress(candidate, allowlist));
+    if (!address) {
+      throw invalidScanRequest("The target does not resolve to an address in an administrator-approved CIDR range.", 403);
+    }
+    if (!acquireHeavyJob("nmap")) {
+      throw invalidScanRequest("An Nmap scan is already running. Try again shortly.", 503);
+    }
+    request.logDetails = JSON.stringify({ target, address, scanType: body.scanType });
+    try {
+      const xml = await runNmap(address, profile);
+      sendJson(response, 200, {
+        target,
+        address,
+        scanType: body.scanType,
+        profile: profile.label,
+        hosts: parseNmapXml(xml),
+      });
+    } finally {
+      releaseHeavyJob("nmap");
+    }
+  } catch (error) {
+    if (error.statusCode) {
+      sendJson(response, error.statusCode, { error: error.message });
+      return;
+    }
+    console.error("Nmap scan failed:", error);
+    sendJson(response, 500, { error: error.message || "Unable to complete the Nmap scan." });
+  }
 }
 
 async function runPingScan(request, response) {
@@ -4145,6 +4380,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/scan": { method: "GET", action: "Magic scan", keys: ["name", "ports"] },
     "/api/custom-port-scan": { method: "POST", action: "Port scan" },
     "/api/bulk-port-scan": { method: "POST", action: "Bulk port scan" },
+    "/api/nmap-scan": { method: "POST", action: "Nmap scan" },
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
     "/api/ping-scan": { method: "POST", action: "Ping scan" },
@@ -4312,6 +4548,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/scan": "scan",
     "/api/custom-port-scan": "custom-port",
     "/api/bulk-port-scan": "bulk-port",
+    "/api/nmap-scan": "nmap",
     "/api/mac-lookup": "mac",
     "/api/ping": "ping",
     "/api/ping-scan": "ping-scan",
@@ -4320,7 +4557,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   };
   const feature = protectedFeatures[url.pathname];
   const requiresPortScanLogin =
-    ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute"].includes(url.pathname) ||
+    ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan"].includes(url.pathname) ||
     (url.pathname === "/api/scan" && url.searchParams.get("ports") === "common");
   if (feature && !checkFeatureAccess(request, response, feature, requiresPortScanLogin)) return;
 
@@ -4366,6 +4603,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     runBulkPortScan(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/nmap-scan") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void handleNmapScan(request, response);
     return;
   }
 

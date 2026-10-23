@@ -65,6 +65,9 @@
           <button class="mode-tab" id="bulk-port-tab" type="button" role="tab" aria-selected="false" data-mode="bulk-port" hidden>
             <span aria-hidden="true">⇢</span> Bulk port scan
           </button>
+          <button class="mode-tab" id="nmap-tab" type="button" role="tab" aria-selected="false" data-mode="nmap" hidden>
+            <span aria-hidden="true">⌖</span> Nmap
+          </button>
                   </div>
           <div class="tab-group admin-tab-group" id="admin-tabs" hidden>
             <a class="mode-tab" href="/admin-dashboard.html"><span aria-hidden="true">◫</span> Dashboard</a>
@@ -153,6 +156,15 @@
             <label for="bulk-port-input">TCP port to scan</label>
             <input id="bulk-port-input" type="number" min="1" max="65535" placeholder="e.g. 443" inputmode="numeric">
             <span>Scans one port on up to 256 IPs. Local targets require permission for your role; other reserved addresses are skipped.</span>
+          </div>
+          <div class="scan-extra-control scan-port-control" id="nmap-control" hidden>
+            <label for="nmap-scan-type">Scan type</label>
+            <select id="nmap-scan-type">
+              <option value="tcp-top-20">TCP connect — top 20 ports</option>
+              <option value="tcp-top-100">TCP connect — top 100 ports</option>
+              <option value="service-top-20">Light service detection — top 20 ports</option>
+            </select>
+            <span>Nmap runs against one IP or hostname at a time. The resolved address must be in a network range authorized by an administrator. No custom command-line arguments or CIDR scans are accepted.</span>
           </div>
           <p class="hint auto-detect-hint" id="auto-detect-hint">Enter a domain for DNS, an IP address for reverse DNS, or a MAC address for vendor details.</p>
           <p class="hint" id="form-hint">Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.</p>

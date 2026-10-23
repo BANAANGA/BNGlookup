@@ -24,6 +24,7 @@ small Docker container with no application dependencies.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side.
 - **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
 - **Port scan / Bulk port scan**: custom TCP ports on one target, or one port across many addresses.
+- **Nmap**: bounded TCP connect profiles for one target at a time, restricted to administrator-approved CIDRs.
 
 **Administration**
 
@@ -198,6 +199,7 @@ Several tools send data to external services; these are listed under
 | Magic scan | Default tab. See below. |
 | Port scan | Ports and ranges (`22,80,443,8000-8010`) on one target; max ports per role (default Admin 100, User 25); up to 8 resolved IPs. |
 | Bulk port scan | One TCP port across a list or CIDR blocks; max 256 unique addresses. |
+| Nmap | One IP or hostname within an administrator-approved CIDR; top 20/100 TCP connect or light service detection profiles. No arbitrary Nmap flags or range scans. |
 
 **Notes**
 
@@ -225,6 +227,13 @@ Several tools send data to external services; these are listed under
 - **Port scans** always require a signed-in account. Private/local targets follow
   the role setting (default: allowed for Admins, not Users); other reserved
   addresses are always skipped. Only scan systems you are authorized to test.
+- **Nmap** is disabled until an administrator adds authorized CIDR ranges under
+  Settings → Port scans. Targets are resolved by the server and must match an
+  allowlisted range; one address is scanned per request, with one concurrent scan
+  and fixed timeouts. Available profiles are TCP connect on the top 20 or 100 ports,
+  or light service detection on the top 20 ports. The scanner does not accept custom
+  command-line flags, target lists, or CIDR scans. Only add networks you own or have
+  explicit authorization to assess.
 - **Result tables** are searchable and sortable; click a value to copy it.
 
 ## Accounts and access
@@ -238,9 +247,9 @@ Several tools send data to external services; these are listed under
 | Feature | Default access |
 | --- | --- |
 | DNS lookup, Reverse lookup, Whois, MAC lookup, Ping, Traceroute | Logged-in users |
-| Magic scan, Ping scan, Multi traceroute, Port scan, Bulk port scan | Administrators |
+| Magic scan, Ping scan, Multi traceroute, Port scan, Bulk port scan, Nmap | Administrators |
 
-- Ping scan, Multi traceroute and both port scans need a login even if set to Public.
+- Ping scan, Multi traceroute, both port scans and Nmap need a login even if set to Public.
 - Public features are limited to 15 lookups per client IP per UTC day (stored in
   SQLite); logged-in users are exempt.
 - New accounts and admin password resets require a **password change on first login**;
