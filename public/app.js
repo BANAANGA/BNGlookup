@@ -279,7 +279,7 @@ function setMode(nextMode) {
       : dig
         ? "Run a dig command: [@server] name [type] [class] with +options such as +short, +dnssec, +trace, +tcp, +nsid or +subnet=, and the flags -t, -c, -x, -p, -4, -6. Without @server the server's own resolver is used."
       : scan
-        ? "Scan DNS records, cloud-provider hostnames, SPF, and DKIM. Optionally choose the nameserver."
+        ? "Scan DNS records, cloud-provider hostnames, SPF, and DKIM. Optionally choose the nameserver. You can paste a full URL; only its domain is scanned."
       : customPortScan
         ? "Scan a custom list or range of TCP ports on one domain or IP address."
       : bulkPortScan
@@ -293,6 +293,7 @@ function setMode(nextMode) {
       : multiTraceroute
         ? "Trace the path to several hosts at once and compare the routes."
         : "Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.";
+  delete formHint.dataset.defaultText;
   submitButton.innerHTML = `<span>${submitLabel(mode)}</span><span aria-hidden="true">→</span>`;
   errorMessage.hidden = true;
   resultPanel.hidden = true;
@@ -2019,6 +2020,21 @@ async function appendIpRegistration(ip) {
   }
 }
 
+// Reduces a pasted URL (scheme, credentials, port, path, query, fragment) to its host name or IP.
+function hostFromInput(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text);
+  if (!hasScheme && /^\[?[0-9a-f:.]+\]?$/i.test(text) && text.includes(":")) return text.replace(/^\[(.*)\]$/, "$1");
+  try {
+    const parsed = new URL(hasScheme ? text : `http://${text}`);
+    if (parsed.hostname) return parsed.hostname.replace(/^\[(.*)\]$/, "$1").replace(/\.$/, "").toLowerCase();
+  } catch {
+    return text;
+  }
+  return text;
+}
+
 function detectAutomaticLookup(value) {
   const candidate = value.trim();
   const macPattern = /^(?:[0-9a-f]{12}|(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|(?:[0-9a-f]{2}-){5}[0-9a-f]{2}|(?:[0-9a-f]{4}\.){2}[0-9a-f]{4})$/i;
@@ -2131,6 +2147,22 @@ form.addEventListener("submit", async (event) => {
   pingMonitorPanel.hidden = true;
   let requestMode = mode;
   let lookupName = input.value.trim();
+  if (mode === "scan") {
+    const host = hostFromInput(lookupName);
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":")) {
+      errorMessage.textContent = "Magic scan works on domain names. For an IP address, use Auto lookup or Reverse lookup.";
+      errorMessage.hidden = false;
+      return;
+    }
+    formHint.dataset.defaultText ||= formHint.textContent;
+    if (host && host !== lookupName) {
+      formHint.textContent = `Scanning ${host} (taken from the URL you entered).`;
+      input.value = host;
+      lookupName = host;
+    } else {
+      formHint.textContent = formHint.dataset.defaultText;
+    }
+  }
   if (mode === "auto") {
     try {
       ({ mode: requestMode, name: lookupName } = detectAutomaticLookup(lookupName));
