@@ -114,6 +114,7 @@ const featureAccessDefaults = {
   sslscan: "user",
   dig: "user",
   blocklist: "user",
+  propagation: "user",
 };
 const featureNames = {
   forward: "DNS lookup",
@@ -131,6 +132,7 @@ const featureNames = {
   sslscan: "SSL/TLS handshake and certificate check",
   dig: "Custom dig command",
   blocklist: "Blocklist (DNSBL) check in auto lookup",
+  propagation: "DNS propagation check",
 };
 
 function parseNmapAllowedCidrs(value) {
@@ -189,6 +191,17 @@ database.exec(`
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS shared_results (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL,
+    title TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS shared_results_user ON shared_results(user_id, created_at);
+  CREATE INDEX IF NOT EXISTS shared_results_expiry ON shared_results(expires_at);
   CREATE TABLE IF NOT EXISTS public_lookup_usage (
     client_hash TEXT NOT NULL,
     utc_date TEXT NOT NULL,
@@ -1287,8 +1300,7 @@ function queryDohOverHttp2(url, timeoutMs) {
   });
 }
 
-async function queryDohDns(name, type, { dnssec = false, checkingDisabled = false } = {}) {
-  const resolver = getDnsResolver();
+async function queryDohDns(name, type, { dnssec = false, checkingDisabled = false, resolver = getDnsResolver() } = {}) {
   if (resolver.format === "json") {
     const queryUrl = new URL(resolver.endpoint);
     queryUrl.searchParams.set("name", name);
@@ -1515,6 +1527,353 @@ async function checkDnssec(domain) {
     signatures,
     issues,
   };
+}
+
+function txtRecordText(data) {
+  const chunks = [...String(data || "").matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((match) => {
+    try {
+      return JSON.parse(`"${match[1]}"`);
+    } catch {
+      return match[1];
+    }
+  });
+  return chunks.length ? chunks.join("") : String(data || "");
+}
+
+async function queryTxtRecords(name) {
+  const data = await queryDohDns(name, "TXT");
+  return {
+    status: data.status,
+    records: data.answers
+      .filter((answer) => answer.type === 16 || answer.typeName === "TXT")
+      .map((answer) => txtRecordText(answer.data)),
+  };
+}
+
+function parseTagList(record) {
+  const tags = {};
+  for (const part of record.split(";")) {
+    const index = part.indexOf("=");
+    if (index < 0) continue;
+    const key = part.slice(0, index).trim().toLowerCase();
+    if (key && !(key in tags)) tags[key] = part.slice(index + 1).trim();
+  }
+  return tags;
+}
+
+async function analyzeDmarc(domain) {
+  const { records } = await queryTxtRecords(`_dmarc.${domain}`);
+  const dmarc = records.filter((record) => /^v\s*=\s*DMARC1\b/i.test(record.trim()));
+  const issues = [];
+  if (!dmarc.length) {
+    issues.push({ severity: "high", message: "No DMARC record at _dmarc. Receivers get no policy for mail that fails SPF and DKIM, and you get no reports." });
+    return { found: false, record: null, tags: {}, issues };
+  }
+  if (dmarc.length > 1) issues.push({ severity: "high", message: "More than one DMARC record is published; receivers will ignore DMARC entirely." });
+  const tags = parseTagList(dmarc[0]);
+  const policy = (tags.p || "").toLowerCase();
+  if (!["none", "quarantine", "reject"].includes(policy)) {
+    issues.push({ severity: "high", message: "The DMARC record has no valid p= policy (none, quarantine or reject)." });
+  } else if (policy === "none") {
+    issues.push({ severity: "medium", message: "Policy p=none only monitors; spoofed mail is still delivered. Move to quarantine or reject once reports look clean." });
+  }
+  const subdomainPolicy = (tags.sp || "").toLowerCase();
+  if (subdomainPolicy === "none" && policy && policy !== "none") {
+    issues.push({ severity: "low", message: "Subdomains use sp=none, so they can be spoofed even though the domain itself is protected." });
+  }
+  if (tags.pct && Number(tags.pct) < 100) {
+    issues.push({ severity: "low", message: `The policy only applies to ${tags.pct}% of failing mail (pct=${tags.pct}).` });
+  }
+  if (!tags.rua) issues.push({ severity: "low", message: "No rua= address, so you receive no aggregate reports about who sends mail as your domain." });
+  return { found: true, record: dmarc[0], tags, policy: policy || null, issues };
+}
+
+function fetchPinnedHttps(hostname, address, requestPath, { timeoutMs = 6000, maxBytes = 65536 } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = https.get({
+      host: hostname,
+      servername: hostname,
+      path: requestPath,
+      headers: { "user-agent": "BNGlookup-mail-check" },
+      lookup: (_host, options, callback) => {
+        if (options?.all) callback(null, [{ address, family: isIP(address) }]);
+        else callback(null, address, isIP(address));
+      },
+      timeout: timeoutMs,
+    }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        body += chunk;
+        if (body.length > maxBytes) request.destroy(new Error("The response is too large."));
+      });
+      response.on("end", () => resolve({ status: response.statusCode, contentType: String(response.headers["content-type"] || ""), body }));
+    });
+    request.on("timeout", () => request.destroy(Object.assign(new Error("The request timed out."), { name: "TimeoutError" })));
+    request.on("error", reject);
+  });
+}
+
+async function analyzeMtaSts(domain, mxHosts) {
+  const { records } = await queryTxtRecords(`_mta-sts.${domain}`);
+  const txt = records.filter((record) => /^v\s*=\s*STSv1\b/i.test(record.trim()));
+  const issues = [];
+  if (!txt.length) return { found: false, record: null, policy: null, issues };
+  const result = { found: true, record: txt[0], id: parseTagList(txt[0]).id || null, policy: null, issues };
+  if (txt.length > 1) issues.push({ severity: "high", message: "More than one MTA-STS TXT record is published; senders will ignore MTA-STS." });
+  const policyHost = `mta-sts.${domain}`;
+  let address;
+  try {
+    const answers = (await queryDohDns(policyHost, "A")).answers.filter((answer) => answer.type === 1 || answer.typeName === "A");
+    address = answers.map((answer) => answer.data).find((value) => isPublicAddress(value));
+  } catch {
+    address = null;
+  }
+  if (!address) {
+    issues.push({ severity: "high", message: `${policyHost} does not resolve to a public IPv4 address, so senders cannot fetch the policy.` });
+    return result;
+  }
+  try {
+    const response = await fetchPinnedHttps(policyHost, address, "/.well-known/mta-sts.txt");
+    if (response.status !== 200) {
+      issues.push({ severity: "high", message: `The policy file returned HTTP ${response.status}.` });
+      return result;
+    }
+    if (!/^text\/plain\b/i.test(response.contentType)) {
+      issues.push({ severity: "medium", message: `The policy file is served as "${response.contentType || "no content type"}" instead of text/plain.` });
+    }
+    const fields = { mx: [] };
+    for (const line of response.body.split(/\r?\n/)) {
+      const index = line.indexOf(":");
+      if (index < 0) continue;
+      const key = line.slice(0, index).trim().toLowerCase();
+      const value = line.slice(index + 1).trim();
+      if (key === "mx") fields.mx.push(value.toLowerCase());
+      else if (key) fields[key] = value;
+    }
+    result.policy = { version: fields.version || null, mode: fields.mode || null, maxAge: Number(fields.max_age) || null, mx: fields.mx };
+    if (fields.version !== "STSv1") issues.push({ severity: "high", message: "The policy file does not start with version: STSv1." });
+    if (fields.mode === "testing") issues.push({ severity: "medium", message: "MTA-STS is in testing mode; senders report failures but still deliver over insecure connections." });
+    else if (fields.mode === "none") issues.push({ severity: "medium", message: "MTA-STS mode is none, which disables the policy." });
+    else if (fields.mode !== "enforce") issues.push({ severity: "high", message: "The policy has no valid mode (enforce, testing or none)." });
+    if (!result.policy.maxAge) issues.push({ severity: "high", message: "The policy has no valid max_age." });
+    else if (result.policy.maxAge < 86400) issues.push({ severity: "low", message: `max_age is only ${result.policy.maxAge} seconds; at least a week (604800) is recommended.` });
+    const matches = (host, pattern) => pattern.startsWith("*.")
+      ? host.endsWith(pattern.slice(1)) && host.split(".").length === pattern.split(".").length
+      : host === pattern;
+    const uncovered = mxHosts.filter((host) => !fields.mx.some((pattern) => matches(host, pattern)));
+    if (uncovered.length) issues.push({ severity: "high", message: `These MX hosts are not covered by the policy's mx: lines, so mail to them would fail under enforce: ${uncovered.join(", ")}.` });
+  } catch (error) {
+    issues.push({
+      severity: "high",
+      message: error.code && /CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS/.test(error.code)
+        ? `The policy host's HTTPS certificate is not valid (${error.code}); senders will not trust the policy.`
+        : `The policy file could not be fetched (${error.name === "TimeoutError" ? "timed out" : error.code || error.message}).`,
+    });
+  }
+  return result;
+}
+
+async function analyzeTlsRpt(domain) {
+  const { records } = await queryTxtRecords(`_smtp._tls.${domain}`);
+  const txt = records.filter((record) => /^v\s*=\s*TLSRPTv1\b/i.test(record.trim()));
+  if (!txt.length) return { found: false, record: null, issues: [] };
+  const tags = parseTagList(txt[0]);
+  const issues = [];
+  if (!tags.rua) issues.push({ severity: "medium", message: "The TLS-RPT record has no rua= destination for reports." });
+  if (txt.length > 1) issues.push({ severity: "medium", message: "More than one TLS-RPT record is published." });
+  return { found: true, record: txt[0], rua: tags.rua || null, issues };
+}
+
+async function analyzeSpf(domain) {
+  let queries = 0;
+  const maxQueries = 30;
+  const tree = [];
+  const issues = [];
+  async function spfRecordFor(name) {
+    queries += 1;
+    const { records } = await queryTxtRecords(name);
+    return records.filter((record) => /^v=spf1(\s|$)/i.test(record.trim()));
+  }
+  async function evaluate(name, depth) {
+    const records = await spfRecordFor(name);
+    if (records.length !== 1) return { name, record: records[0] || null, lookups: 0, error: records.length ? "multiple SPF records" : "no SPF record" };
+    const terms = records[0].trim().split(/\s+/).slice(1);
+    let lookups = 0;
+    const children = [];
+    for (const term of terms) {
+      const mechanism = term.replace(/^[+\-~?]/, "").toLowerCase();
+      const [kind, argument] = mechanism.split(/[:=]/);
+      if (["include", "a", "mx", "ptr", "exists", "redirect"].includes(kind)) lookups += 1;
+      if ((kind === "include" || kind === "redirect") && argument && !argument.includes("%") && depth < 10 && queries < maxQueries) {
+        const child = await evaluate(argument, depth + 1);
+        lookups += child.lookups;
+        children.push({ ...child, via: kind });
+      }
+      if (kind === "ptr") issues.push({ severity: "low", message: `${name} uses the ptr mechanism, which RFC 7208 says not to use.` });
+    }
+    return { name, record: records[0], lookups, children };
+  }
+  const rootRecords = await spfRecordFor(domain);
+  if (!rootRecords.length) {
+    return { found: false, record: null, lookups: 0, tree, issues: [{ severity: "medium", message: "No SPF record on the domain; receivers cannot tell which servers may send its mail." }] };
+  }
+  if (rootRecords.length > 1) {
+    return { found: true, record: rootRecords[0], lookups: null, tree, issues: [{ severity: "high", message: "More than one SPF record is published, which is a permanent error (SPF fails for all mail)." }] };
+  }
+  queries = 0;
+  const root = await evaluate(domain, 0);
+  const all = root.record.trim().split(/\s+/).find((term) => /^[+\-~?]?all$/i.test(term));
+  if (!all && !/\sredirect=/i.test(root.record)) issues.push({ severity: "medium", message: "The SPF record has no all mechanism, so unlisted senders get a neutral result." });
+  else if (all && /^\+?all$/i.test(all)) issues.push({ severity: "high", message: "+all allows every server on the internet to send as this domain." });
+  else if (all && /^\?all$/i.test(all)) issues.push({ severity: "medium", message: "?all is neutral and gives no protection." });
+  if (root.lookups > 10) issues.push({ severity: "high", message: `SPF needs ${root.lookups} DNS lookups; the limit is 10, so evaluation fails with a permanent error.` });
+  else if (root.lookups >= 8) issues.push({ severity: "low", message: `SPF uses ${root.lookups} of 10 allowed DNS lookups; little room is left for new includes.` });
+  const flatten = (node, depth = 0) => [{ name: node.name, via: node.via || null, lookups: node.lookups, error: node.error || null, depth }, ...(node.children || []).flatMap((child) => flatten(child, depth + 1))];
+  return { found: true, record: root.record, all: all || null, lookups: root.lookups, tree: flatten(root), issues, truncated: queries >= maxQueries };
+}
+
+async function analyzeMailSecurity(domain) {
+  const settle = (promise) => promise.catch((error) => ({ error: error.name === "TimeoutError" ? "The DNS provider timed out." : "The check could not be completed." }));
+  let mxHosts = [];
+  try {
+    mxHosts = (await queryDohDns(domain, "MX")).answers
+      .filter((answer) => answer.type === 15 || answer.typeName === "MX")
+      .map((answer) => String(answer.data).split(" ").pop().replace(/\.$/, "").toLowerCase())
+      .filter(Boolean);
+  } catch {
+    mxHosts = [];
+  }
+  const [dmarc, mtaSts, tlsRpt, spf] = await Promise.all([
+    settle(analyzeDmarc(domain)),
+    settle(analyzeMtaSts(domain, mxHosts)),
+    settle(analyzeTlsRpt(domain)),
+    settle(analyzeSpf(domain)),
+  ]);
+  return { mxHosts, dmarc, mtaSts, tlsRpt, spf };
+}
+
+const propagationTypes = new Set(["A", "AAAA", "CAA", "CNAME", "DNSKEY", "DS", "HTTPS", "MX", "NS", "PTR", "SOA", "SRV", "SVCB", "TLSA", "TXT"]);
+
+function propagationAnswerKey(type, answers) {
+  const typeCode = dnsTypeCodes[type];
+  return answers
+    .filter((answer) => answer.type === typeCode || answer.typeName === type)
+    .map((answer) => {
+      const value = String(answer.data).trim();
+      return type === "SOA"
+        ? value.split(/\s+/).slice(0, 3).join(" ").toLowerCase()
+        : type === "TXT" ? txtRecordText(value) : value.toLowerCase().replace(/\.$/, "").replace(/\.(\s|$)/g, "$1");
+    })
+    .sort();
+}
+
+async function findAuthoritativeServers(name) {
+  const labels = name.replace(/\.$/, "").split(".");
+  for (let index = 0; index < labels.length - 1; index += 1) {
+    const zone = labels.slice(index).join(".");
+    let data;
+    try {
+      data = await queryDohDns(zone, "NS");
+    } catch {
+      continue;
+    }
+    const hosts = data.answers
+      .filter((answer) => (answer.type === 2 || answer.typeName === "NS") && String(answer.name).toLowerCase().replace(/\.$/, "") === zone.toLowerCase())
+      .map((answer) => String(answer.data).replace(/\.$/, "").toLowerCase());
+    if (!hosts.length) continue;
+    const servers = await Promise.all(hosts.slice(0, 6).map(async (host) => {
+      try {
+        const addresses = (await queryDohDns(host, "A")).answers
+          .filter((answer) => answer.type === 1 || answer.typeName === "A")
+          .map((answer) => answer.data);
+        return { host, address: addresses.find((address) => isPublicAddress(address)) || null, skipped: addresses.length > 0 && !addresses.some((address) => isPublicAddress(address)) };
+      } catch {
+        return { host, address: null, skipped: false };
+      }
+    }));
+    return { zone, servers };
+  }
+  return { zone: null, servers: [] };
+}
+
+async function propagationCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  const rawType = queryInput(url, "type", 16, response);
+  if (rawName === null || rawType === null) return;
+  const type = (rawType || "A").trim().toUpperCase();
+  const name = rawName.trim().replace(/\.$/, "").toLowerCase();
+  if (!propagationTypes.has(type)) {
+    sendJson(response, 400, { error: `Choose one of: ${[...propagationTypes].join(", ")}.` });
+    return;
+  }
+  if (!name || !validDnsName(name)) {
+    sendJson(response, 400, { error: "Enter a valid DNS name." });
+    return;
+  }
+  const started = Date.now();
+  const publicResolvers = [
+    ...Object.entries(dnsResolvers).map(([id, resolver]) => ({ id, ...resolver, format: "wire" })),
+    ...(customDohEndpoint ? [{ id: "custom", label: "Custom DoH", endpoint: customDohEndpoint, format: "json" }] : []),
+  ];
+  const describe = (data) => ({
+    status: data.statusText,
+    answers: propagationAnswerKey(type, data.answers),
+    ttl: data.answers.length ? Math.min(...data.answers.map((answer) => Number(answer.TTL) || 0)) : null,
+  });
+  const failure = (error) => ({
+    status: "ERROR",
+    answers: [],
+    ttl: null,
+    error: error.name === "TimeoutError" || /timeout/i.test(error.message || "")
+      ? "Timed out"
+      : /ENOTFOUND|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|canceled/i.test(error.message || "")
+        ? "Resolver unreachable"
+        : (error.message || "Query failed").slice(0, 120),
+  });
+  const [publicResults, authority] = await Promise.all([
+    Promise.all(publicResolvers.map(async (resolver) => {
+      try {
+        return { source: resolver.label, kind: "resolver", ...describe(await queryDohDns(name, type, { resolver })) };
+      } catch (error) {
+        return { source: resolver.label, kind: "resolver", ...failure(error) };
+      }
+    })),
+    findAuthoritativeServers(name),
+  ]);
+  const authoritativeResults = await Promise.all(authority.servers.map(async (server) => {
+    const source = `${server.host}${server.address ? ` (${server.address})` : ""}`;
+    if (!server.address) {
+      return { source, kind: "authoritative", status: "SKIPPED", answers: [], ttl: null, error: server.skipped ? "Private or reserved address; not queried" : "No IPv4 address" };
+    }
+    try {
+      return { source, kind: "authoritative", ...describe(await directDnsLookup(name, type, { address: server.address, family: 4, port: 53 })) };
+    } catch (error) {
+      return { source, kind: "authoritative", ...failure(error) };
+    }
+  }));
+  const results = [...publicResults, ...authoritativeResults];
+  const groups = new Map();
+  for (const result of results.filter((entry) => !["ERROR", "SKIPPED"].includes(entry.status))) {
+    const key = `${result.status}|${result.answers.join("\n")}`;
+    groups.set(key, (groups.get(key) || 0) + 1);
+  }
+  const ranked = [...groups.entries()].sort((left, right) => right[1] - left[1]);
+  const groupIndex = new Map(ranked.map(([key], index) => [key, index]));
+  for (const result of results) {
+    const key = `${result.status}|${result.answers.join("\n")}`;
+    result.group = groupIndex.has(key) ? groupIndex.get(key) : null;
+  }
+  sendJson(response, 200, {
+    name,
+    type,
+    zone: authority.zone,
+    consistent: ranked.length <= 1,
+    distinctAnswers: ranked.length,
+    answered: results.filter((result) => result.group !== null).length,
+    results,
+    durationMs: Date.now() - started,
+  });
 }
 
 const ipBlocklists = [
@@ -2579,6 +2938,10 @@ async function bulkScan(request, url, response) {
     maxPorts: portScanPolicy.maxPortsByRole[user.role],
     allowLocal: portScanPolicy.localScanByRole[user.role],
   } : { maxPorts: 0, allowLocal: false };
+  const mailSecurityPromise = analyzeMailSecurity(domain).catch((error) => {
+    console.error("Mail security check failed:", error.message);
+    return null;
+  });
   const blocklistPromise = checkBlocklists({ addresses: rootAddresses, domain }).catch((error) => {
     console.error("Blocklist check failed:", error.message);
     return null;
@@ -2608,6 +2971,7 @@ async function bulkScan(request, url, response) {
       rootSpfFound: spfRecords.some((record) => record.name === domain),
       dkimSelectorsChecked: dkimRecords.length,
       dkimRecords: dkimRecords.filter((entry) => entry.records.length),
+      ...(await mailSecurityPromise),
     },
     portScan,
     ipGeolocations: await fetchIpGeolocations(addresses),
@@ -4265,6 +4629,127 @@ function handleAdminAbout(request, response) {
     recordAdminLog("audit", request, "About page updated", `${content.length} characters`, 200, admin.username);
     sendJson(response, 200, { ...saved, custom: true, defaultContent: defaultAboutContent, limit: aboutContentLimit });
   });
+}
+
+const shareableModes = new Set([
+  "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
+  "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec",
+]);
+const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
+
+function pruneSharedResults() {
+  database.prepare("DELETE FROM shared_results WHERE expires_at <= ?").run(Date.now());
+}
+
+function describeShare(row) {
+  return {
+    id: row.id,
+    url: `/?share=${row.id}`,
+    mode: row.mode,
+    title: row.title,
+    createdAt: new Date(row.created_at).toISOString(),
+    expiresAt: new Date(row.expires_at).toISOString(),
+  };
+}
+
+async function handleShares(request, url, response) {
+  const id = url.pathname.slice("/api/shares/".length);
+  const user = currentUser(request);
+  if (url.pathname.startsWith("/api/shares/")) {
+    if (!/^[A-Za-z0-9_-]{22}$/.test(id)) {
+      sendJson(response, 404, { error: "This shared result does not exist or has expired." });
+      return;
+    }
+    pruneSharedResults();
+    const row = database.prepare("SELECT * FROM shared_results WHERE id = ?").get(id);
+    if (request.method === "GET") {
+      if (!row) {
+        sendJson(response, 404, { error: "This shared result does not exist or has expired." });
+        return;
+      }
+      let data;
+      try {
+        data = JSON.parse(row.payload);
+      } catch {
+        sendJson(response, 500, { error: "This shared result is damaged." });
+        return;
+      }
+      response.setHeader("x-robots-tag", "noindex");
+      sendJson(response, 200, { ...describeShare(row), data });
+      return;
+    }
+    if (request.method === "DELETE") {
+      if (!user) {
+        sendJson(response, 401, { error: "Log in to continue.", loginRequired: true });
+        return;
+      }
+      if (!enforceSameOrigin(request, response)) return;
+      if (!row || (row.user_id !== user.id && user.role !== "admin")) {
+        sendJson(response, 404, { error: "This shared result does not exist or has expired." });
+        return;
+      }
+      database.prepare("DELETE FROM shared_results WHERE id = ?").run(id);
+      recordAdminLog("audit", request, "Shared result deleted", `${row.mode}: ${row.title}`, 200, user.username);
+      sendJson(response, 200, { deleted: true });
+      return;
+    }
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!user) {
+    sendJson(response, 401, { error: "Log in to share results.", loginRequired: true });
+    return;
+  }
+  pruneSharedResults();
+  if (request.method === "GET") {
+    const rows = database.prepare("SELECT id, mode, title, created_at, expires_at FROM shared_results WHERE user_id = ? ORDER BY created_at DESC").all(user.id);
+    sendJson(response, 200, { shares: rows.map(describeShare) });
+    return;
+  }
+  if (request.method !== "POST") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  let body;
+  try {
+    body = await readJsonRequest(request, shareLimits.payloadBytes + 4096);
+  } catch (error) {
+    sendJson(response, error.statusCode || 400, { error: error.message });
+    return;
+  }
+  const mode = typeof body.mode === "string" ? body.mode : "";
+  const title = typeof body.title === "string" ? body.title.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200) : "";
+  if (!shareableModes.has(mode) || !title || !body.data || typeof body.data !== "object") {
+    sendJson(response, 400, { error: "This result cannot be shared." });
+    return;
+  }
+  const payload = JSON.stringify(body.data);
+  if (Buffer.byteLength(payload) > shareLimits.payloadBytes) {
+    sendJson(response, 413, { error: "This result is too large to share (limit 1 MB)." });
+    return;
+  }
+  const count = database.prepare("SELECT COUNT(*) AS count FROM shared_results WHERE user_id = ?").get(user.id).count;
+  if (count >= shareLimits.perUser) {
+    sendJson(response, 429, { error: `You already have ${shareLimits.perUser} shared results. Delete some on the My account page first.` });
+    return;
+  }
+  const now = Date.now();
+  const row = {
+    id: crypto.randomBytes(16).toString("base64url").slice(0, 22),
+    user_id: user.id,
+    mode,
+    title,
+    payload,
+    created_at: now,
+    expires_at: now + shareLimits.lifetimeMs,
+  };
+  database.prepare(`
+    INSERT INTO shared_results (id, user_id, mode, title, payload, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(row.id, row.user_id, row.mode, row.title, row.payload, row.created_at, row.expires_at);
+  recordAdminLog("audit", request, "Result shared", `${mode}: ${title}`, 200, user.username);
+  sendJson(response, 201, describeShare(row));
 }
 
 function handleAdminSystem(request, response) {
@@ -6112,6 +6597,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
     "/api/dig": { method: "GET", action: "Dig command", keys: ["command"] },
     "/api/blocklist": { method: "GET", action: "Blocklist check", keys: ["name"] },
+    "/api/propagation": { method: "GET", action: "Propagation check", keys: ["name", "type"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
     "/api/sslscan": { method: "GET", action: "SSL/TLS check", keys: ["name", "port"] },
     "/api/tls-grade": { method: "POST", action: "TLS test and grade" },
@@ -6144,6 +6630,14 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     handleAuthStatus(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/shares" || url.pathname.startsWith("/api/shares/")) {
+    void handleShares(request, url, response).catch((error) => {
+      console.error("Shared result request failed:", error);
+      sendJson(response, 500, { error: "Unable to complete the request." });
+    });
     return;
   }
 
@@ -6300,6 +6794,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/mac-lookup": "mac",
     "/api/dig": "dig",
     "/api/blocklist": "blocklist",
+    "/api/propagation": "propagation",
     "/api/ping": "ping",
     "/api/sslscan": "sslscan",
     "/api/tls-grade": "sslscan",
@@ -6428,6 +6923,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     runMultiTraceroute(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/propagation") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void propagationCheck(request, url, response);
     return;
   }
 

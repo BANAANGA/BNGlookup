@@ -1208,3 +1208,27 @@ footer a:hover { color: #e4ffef; }
 .blocklist-section h4 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 0 6px; color: #b9c7bd; font-size: 12px; }
 .blocklist-table a { color: #d8f5e2; }
 .blocklist-append { margin-top: 16px; }
+.mail-security-grid { margin-top: 14px; }
+.spf-tree { margin: 4px 0 8px; padding-left: 16px; color: #ddd; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.spf-tree li { margin: 2px 0; }
+.spf-tree .spf-depth-1 { margin-left: 14px; }
+.spf-tree .spf-depth-2 { margin-left: 28px; }
+.spf-tree .spf-depth-3 { margin-left: 42px; }
+.spf-tree .spf-depth-4 { margin-left: 56px; }
+.spf-tree .spf-depth-5 { margin-left: 70px; }
+.spf-tree .spf-depth-6 { margin-left: 84px; }
+.propagation-table tr.group-alt td { background: #1f170a; }
+.propagation-table tr.group-alt td:first-child { box-shadow: inset 3px 0 #b27317; }
+.propagation-table tr.group-main td:first-child { box-shadow: inset 3px 0 #28583b; }
+.share-results { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; }
+.share-results button { padding: 7px 11px; border: 1px solid #28583b; border-radius: 6px; color: #e4ffef; background: #14251a; font-size: 12px; cursor: pointer; }
+.share-results button:disabled { opacity: .55; cursor: wait; }
+.share-results input { flex: 1 1 320px; min-width: 0; padding: 7px 9px; border: 1px solid #292929; border-radius: 6px; color: #d8f5e2; background: #0d0d0d; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.share-results span { color: #a0a0a0; font-size: 11px; }
+.share-banner { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 14px; padding: 10px 12px; border: 1px solid #28583b; border-radius: 8px; color: #d8f5e2; background: #14251a; font-size: 13px; }
+.share-banner span { color: #a0a0a0; font-size: 11px; }
+.share-list { display: grid; gap: 8px; margin-bottom: 14px; }
+.share-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border: 1px solid #292929; border-radius: 8px; }
+.share-row a { color: #d8f5e2; font-size: 13px; overflow-wrap: anywhere; }
+.share-row span { display: block; margin-top: 3px; color: #8a8a8a; font-size: 11px; }
+.share-row button { flex: none; padding: 5px 9px; border: 1px solid #5a2a2a; border-radius: 6px; color: #ffb4b4; background: #2c1515; font-size: 11px; cursor: pointer; }
