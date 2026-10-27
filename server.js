@@ -110,6 +110,7 @@ const featureAccessDefaults = {
   "bulk-port": "admin",
   nmap: "admin",
   sslscan: "user",
+  dig: "user",
 };
 const featureNames = {
   forward: "DNS lookup",
@@ -125,6 +126,7 @@ const featureNames = {
   "bulk-port": "Bulk port scan",
   nmap: "Nmap scan (authorized targets only)",
   sslscan: "SSL/TLS handshake and certificate check",
+  dig: "Custom dig command",
 };
 
 function parseNmapAllowedCidrs(value) {
@@ -4618,8 +4620,8 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2 };
-const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0, zmap: 0, tlsGrade: 0 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8 };
+const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0, zmap: 0, tlsGrade: 0, dig: 0 };
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
 
@@ -5192,6 +5194,214 @@ async function runMultiTraceroute(request, response) {
   }
 }
 
+const digBooleanOptions = new Set([
+  "aaflag", "aaonly", "additional", "adflag", "all", "answer", "authority", "besteffort", "cdflag", "class",
+  "cmd", "comments", "cookie", "crypto", "dnssec", "edns", "expire", "header-only", "identify", "idnin",
+  "idnout", "ignore", "multiline", "nsid", "nssearch", "onesoa", "qr", "question", "raflag", "rdflag",
+  "rec", "recurse", "rrcomments", "short", "showsearch", "stats", "tcflag", "tcp", "trace", "ttlid",
+  "ttlunits", "unknownformat", "vc", "yaml", "zflag",
+]);
+const digValueOptions = {
+  bufsize: /^\d{1,5}$/,
+  edns: /^\d{1,3}$/,
+  opcode: /^(?:\d{1,2}|query|iquery|status|notify|update)$/i,
+  padding: /^\d{1,3}$/,
+  qid: /^\d{1,5}$/,
+  retry: /^[0-2]$/,
+  split: /^\d{1,3}$/,
+  subnet: /^[0-9a-f.:]{1,45}(?:\/\d{1,3})?$/i,
+  time: /^(?:[1-9]|10)$/,
+  tries: /^[1-3]$/,
+};
+const digRecordClasses = new Set(["IN", "CH", "HS", "ANY", "NONE"]);
+const digRecordTypes = new Set([
+  "A", "AAAA", "AFSDB", "ANY", "APL", "AXFR", "CAA", "CDNSKEY", "CDS", "CERT", "CNAME", "CSYNC", "DHCID",
+  "DLV", "DNAME", "DNSKEY", "DS", "EUI48", "EUI64", "HINFO", "HIP", "HTTPS", "IPSECKEY", "IXFR", "KEY",
+  "KX", "LOC", "MX", "NAPTR", "NS", "NSEC", "NSEC3", "NSEC3PARAM", "NULL", "OPENPGPKEY", "PTR", "RP",
+  "RRSIG", "SIG", "SMIMEA", "SOA", "SPF", "SRV", "SSHFP", "SVCB", "TA", "TKEY", "TLSA", "TSIG", "TXT",
+  "URI", "ZONEMD",
+]);
+const digOutputLimit = 256 * 1024;
+
+function isDigRecordType(token) {
+  const upper = token.toUpperCase();
+  return digRecordTypes.has(upper) || /^TYPE\d{1,5}$/.test(upper) || /^IXFR=\d{1,10}$/.test(upper);
+}
+
+async function parseDigCommand(input, allowLocal) {
+  const text = String(input || "").trim();
+  if (!text) throw invalidScanRequest("Enter a dig command, for example: example.com MX +short");
+  if (text.length > 512) throw invalidScanRequest("The dig command must not exceed 512 characters.");
+  const tokens = text.split(/\s+/);
+  if (tokens[0].toLowerCase() === "dig") tokens.shift();
+  if (tokens.length > 24) throw invalidScanRequest("The dig command has too many arguments.");
+  const args = [];
+  let server = null;
+  let name = null;
+  let type = null;
+  let recordClass = null;
+  let reverse = false;
+  const setName = (value) => {
+    if (name !== null) throw invalidScanRequest("Only one query name is allowed per dig command.");
+    const normalized = value === "." ? "." : value.replace(/\.$/, "");
+    if (normalized !== "." && !validDnsName(normalized)) throw invalidScanRequest(`Invalid query name: ${value}`);
+    name = value;
+  };
+  const setType = (value) => {
+    if (type !== null) throw invalidScanRequest("Only one record type is allowed per dig command.");
+    if (!isDigRecordType(value)) throw invalidScanRequest(`Unsupported record type: ${value}`);
+    type = value.toUpperCase();
+  };
+  const setClass = (value) => {
+    if (recordClass !== null) throw invalidScanRequest("Only one query class is allowed per dig command.");
+    if (!digRecordClasses.has(value.toUpperCase())) throw invalidScanRequest(`Unsupported query class: ${value}`);
+    recordClass = value.toUpperCase();
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!/^[A-Za-z0-9.:_@+=\/\-\[\]*]+$/.test(token)) {
+      throw invalidScanRequest(`Unsupported characters in argument: ${token.slice(0, 40)}`);
+    }
+    const next = () => {
+      index += 1;
+      if (index >= tokens.length) throw invalidScanRequest(`The ${token} option needs a value.`);
+      return tokens[index];
+    };
+    if (token.startsWith("@")) {
+      if (server) throw invalidScanRequest("Only one @server is allowed.");
+      server = token.slice(1).replace(/^\[(.*)\]$/, "$1");
+      if (!server) throw invalidScanRequest("Enter a nameserver after @.");
+    } else if (token.startsWith("+")) {
+      const match = token.slice(1).toLowerCase().match(/^(no)?([a-z-]+)(?:=(.*))?$/);
+      if (!match) throw invalidScanRequest(`Unsupported dig option: ${token}`);
+      const [, negated, option, value] = match;
+      if (value === undefined && digBooleanOptions.has(option)) {
+        args.push(`+${negated || ""}${option}`);
+      } else if (value !== undefined && !negated && digValueOptions[option]?.test(value)) {
+        args.push(`+${option}=${value}`);
+      } else if (option in digValueOptions && value !== undefined) {
+        throw invalidScanRequest(`Invalid value for +${option}: ${value}`);
+      } else {
+        throw invalidScanRequest(`Unsupported dig option: ${token}`);
+      }
+    } else if (token === "-4" || token === "-6" || token === "-u") {
+      args.push(token);
+    } else if (token === "-t") {
+      setType(next());
+    } else if (token === "-c") {
+      setClass(next());
+    } else if (token === "-q") {
+      setName(next());
+    } else if (token === "-x") {
+      const address = next();
+      if (!isIP(address)) throw invalidScanRequest("The -x option needs an IPv4 or IPv6 address.");
+      if (name !== null) throw invalidScanRequest("Only one query name is allowed per dig command.");
+      name = address;
+      reverse = true;
+    } else if (token === "-p") {
+      const port = next();
+      if (!/^\d{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
+        throw invalidScanRequest("The -p option needs a port between 1 and 65535.");
+      }
+      args.push("-p", port);
+    } else if (token.startsWith("-")) {
+      throw invalidScanRequest(`Unsupported dig flag: ${token}. Allowed flags: -t, -c, -q, -x, -p, -4, -6, -u.`);
+    } else if (name !== null && type === null && isDigRecordType(token)) {
+      setType(token);
+    } else if (name !== null && recordClass === null && digRecordClasses.has(token.toUpperCase())) {
+      setClass(token);
+    } else if (name === null && type === null && isDigRecordType(token) && !token.includes(".")) {
+      setType(token);
+    } else if (name !== null) {
+      throw invalidScanRequest(`Unrecognized argument: ${token}. Expected a record type, class or option, and only one query name.`);
+    } else {
+      setName(token);
+    }
+  }
+  if (name === null && type !== null && type !== "NS") name = ".";
+  let serverAddress = null;
+  if (server) {
+    let addresses;
+    if (isIP(server)) {
+      addresses = [server];
+    } else {
+      const domain = normalizeDomain(server);
+      if (!domain) throw invalidScanRequest(`Invalid nameserver: ${server}`);
+      try {
+        addresses = (await resolveHost(domain, { all: true, verbatim: true })).map((entry) => entry.address);
+      } catch {
+        throw invalidScanRequest(`The nameserver ${server} could not be resolved.`);
+      }
+    }
+    serverAddress = addresses.find((address) => isScannableAddress(address, allowLocal));
+    if (!serverAddress) {
+      throw invalidScanRequest("This nameserver is a private or reserved address that your role may not query.");
+    }
+  }
+  const queryArgs = [
+    ...(serverAddress ? [`@${serverAddress}`] : []),
+    ...(reverse ? ["-x", name] : name !== null ? ["-q", name] : []),
+    ...(type ? ["-t", type] : []),
+    ...(recordClass ? ["-c", recordClass] : []),
+    ...args,
+  ];
+  const display = [
+    "dig",
+    ...(server ? [`@${server}`] : []),
+    ...(reverse ? ["-x", name] : name !== null ? [name] : []),
+    ...(type ? [type] : []),
+    ...(recordClass ? [recordClass] : []),
+    ...args,
+  ].join(" ");
+  return { args: queryArgs, display, server, serverAddress };
+}
+
+async function digCommand(request, url, response) {
+  const rawCommand = queryInput(url, "command", 512, response);
+  if (rawCommand === null) return;
+  try {
+    const user = currentUser(request);
+    const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+    const parsed = await parseDigCommand(rawCommand, allowLocal);
+    if (!acquireHeavyJob("dig")) throw invalidScanRequest("The server is busy with other dig commands. Try again shortly.", 503);
+    const started = Date.now();
+    let result;
+    try {
+      result = await new Promise((resolve) => {
+        execFile("dig", ["-r", ...parsed.args], { timeout: 30000, maxBuffer: digOutputLimit, killSignal: "SIGKILL" }, (error, stdout, stderr) => {
+          resolve({ error, stdout: String(stdout || ""), stderr: String(stderr || "") });
+        });
+      });
+    } finally {
+      releaseHeavyJob("dig");
+    }
+    if (result.error?.code === "ENOENT") {
+      sendJson(response, 503, { error: "dig is not installed on this server." });
+      return;
+    }
+    const truncated = result.error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+    const timedOut = Boolean(result.error?.killed) && !truncated;
+    const output = `${result.stdout}${result.stderr ? `\n${result.stderr}` : ""}`.slice(0, digOutputLimit);
+    const status = output.match(/status: ([A-Z]+)/)?.[1] || null;
+    sendJson(response, 200, {
+      command: parsed.display,
+      serverAddress: parsed.serverAddress,
+      output,
+      status,
+      exitCode: typeof result.error?.code === "number" ? result.error.code : result.error ? null : 0,
+      durationMs: Date.now() - started,
+      truncated,
+      timedOut,
+    });
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    if (statusCode === 500) console.error("dig failed:", error);
+    sendJson(response, statusCode, {
+      error: statusCode === 500 ? "Unable to run the dig command." : error.message,
+    });
+  }
+}
+
 async function macLookup(url, response) {
   const rawInput = queryInput(url, "name", 32, response);
   if (rawInput === null) return;
@@ -5460,6 +5670,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/bulk-port-scan": { method: "POST", action: "Bulk port scan" },
     "/api/nmap-scan": { method: "POST", action: "Nmap scan" },
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
+    "/api/dig": { method: "GET", action: "Dig command", keys: ["command"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
     "/api/sslscan": { method: "GET", action: "SSL/TLS check", keys: ["name", "port"] },
     "/api/tls-grade": { method: "POST", action: "TLS test and grade" },
@@ -5636,6 +5847,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/nmap-scan": "nmap",
     "/api/nmap-status": "nmap",
     "/api/mac-lookup": "mac",
+    "/api/dig": "dig",
     "/api/ping": "ping",
     "/api/sslscan": "sslscan",
     "/api/tls-grade": "sslscan",
@@ -5763,6 +5975,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     runMultiTraceroute(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/dig") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void digCommand(request, url, response);
     return;
   }
 

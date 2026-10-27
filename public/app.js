@@ -149,6 +149,7 @@ function submitLabel(currentMode) {
     "bulk-port": "Bulk port scan",
     nmap: "Run Nmap scan",
     mac: "Lookup MAC",
+    dig: "Run dig",
     ping: "Ping host",
     sslscan: "Check SSL/TLS",
     "ping-scan": "Run ping scan",
@@ -164,6 +165,7 @@ function setMode(nextMode) {
   const reverse = mode === "reverse";
   const details = mode === "details";
   const mac = mode === "mac";
+  const dig = mode === "dig";
   const ping = mode === "ping";
   const sslscan = mode === "sslscan";
   const scan = mode === "scan";
@@ -187,8 +189,10 @@ function setMode(nextMode) {
   input.required = !listMode;
   nameLabel.textContent = automatic
     ? "Search"
-    : reverse ? "IP address" : mac ? "MAC address" : "Domain name or IP address";
-  input.placeholder = reverse
+    : reverse ? "IP address" : mac ? "MAC address" : dig ? "dig command" : "Domain name or IP address";
+  input.placeholder = dig
+    ? "e.g. @1.1.1.1 example.com MX +dnssec"
+    : reverse
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
       ? "e.g. 00:1A:2B:3C:4D:5E"
@@ -199,9 +203,10 @@ function setMode(nextMode) {
     : customPortScan
       ? "e.g. example.com or 8.8.8.8"
       : "e.g. example.com";
-  input.autocomplete = reverse || mac || portScan ? "off" : "url";
-  typeControl.hidden = automatic || reverse || details || mac || ping || sslscan || traceroute || listMode || scan || portScan;
-  customType.hidden = automatic || reverse || details || mac || ping || sslscan || traceroute || listMode || scan || portScan || recordType.value !== "custom";
+  input.autocomplete = reverse || mac || dig || portScan ? "off" : "url";
+  input.classList.toggle("dig-input", dig);
+  typeControl.hidden = automatic || reverse || details || mac || dig || ping || sslscan || traceroute || listMode || scan || portScan;
+  customType.hidden = automatic || reverse || details || mac || dig || ping || sslscan || traceroute || listMode || scan || portScan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
   if (!isAdmin) nameserverInput.value = "";
   pingMethodControl.hidden = !ping;
@@ -244,6 +249,8 @@ function setMode(nextMode) {
         ? "Test one TLS handshake and inspect the remote server's negotiated protocol, cipher, certificate chain, and trust status."
       : mac
         ? "Find the registered hardware vendor and MAC address type."
+      : dig
+        ? "Run a dig command: [@server] name [type] [class] with +options such as +short, +dnssec, +trace, +tcp, +nsid or +subnet=, and the flags -t, -c, -x, -p, -4, -6. Without @server the server's own resolver is used."
       : scan
         ? "Scan DNS records, cloud-provider hostnames, SPF, and DKIM. Optionally choose the nameserver."
       : customPortScan
@@ -1512,6 +1519,31 @@ async function streamTraceroute(multiple) {
   draw();
 }
 
+function renderDigResult(data) {
+  const ok = data.status === "NOERROR";
+  const badge = data.timedOut
+    ? '<span class="status-badge warning">Timed out</span>'
+    : data.status
+      ? `<span class="status-badge ${ok ? "success" : "warning"}">${escapeHtml(data.status)}</span>`
+      : `<span class="status-badge ${data.exitCode === 0 ? "success" : "warning"}">${data.exitCode === 0 ? "Done" : "Failed"}</span>`;
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">DIG</p><h2 class="dig-command">${copyableResult(data.command)}</h2></div>
+      ${badge}
+    </div>
+    <div class="scan-summary">
+      <span>${escapeHtml(data.serverAddress ? `Nameserver ${data.serverAddress}` : "Server's default resolver")}</span>
+      <span>${escapeHtml(`${data.durationMs} ms`)}</span>
+    </div>
+    <div class="dig-output-wrap">
+      <button class="dig-copy" type="button" data-copy-value="${escapeHtml(data.output)}">Copy output</button>
+      <pre class="dig-output">${escapeHtml(data.output || "(no output)")}</pre>
+    </div>
+    ${data.truncated ? '<p class="detail-notice">The output was longer than 256 KB and was cut off.</p>' : ""}
+    ${data.timedOut ? '<p class="detail-notice">dig did not finish within 30 seconds and was stopped.</p>' : ""}`;
+  resultPanel.hidden = false;
+}
+
 function renderMacResult(data) {
   const addressType = data.multicast ? "Multicast address" : "Unicast address";
   const administration = data.locallyAdministered
@@ -1921,6 +1953,10 @@ form.addEventListener("submit", async (event) => {
   });
   if (requestMode === "ping") params.set("method", pingMethodInput.value);
   if (requestMode === "sslscan") params.set("port", sslScanPort.value.trim());
+  if (requestMode === "dig") {
+    [...params.keys()].forEach((key) => params.delete(key));
+    params.set("command", lookupName);
+  }
   if (requestMode === "scan" && portScanInput.checked) {
     params.set("ports", "common");
   }
@@ -1950,6 +1986,8 @@ form.addEventListener("submit", async (event) => {
         ? "/api/ping"
         : requestMode === "mac"
         ? "/api/mac-lookup"
+        : requestMode === "dig"
+        ? "/api/dig"
         : requestMode === "scan"
         ? "/api/scan"
         : "/api/lookup";
@@ -2015,6 +2053,7 @@ form.addEventListener("submit", async (event) => {
       renderNmapResult(data);
     }
     else if (requestMode === "mac") renderMacResult(data);
+    else if (requestMode === "dig") renderDigResult(data);
     else if (requestMode === "scan") renderScanResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Port scan" : "Bulk port scan");
     else {

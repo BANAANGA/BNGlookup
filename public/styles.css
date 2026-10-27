@@ -1150,3 +1150,32 @@ footer a:hover { color: #e4ffef; }
   background: #2a2112;
   font-size: 12px;
 }
+.dig-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.dig-command .copy-result { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; }
+.dig-output-wrap { position: relative; margin-top: 14px; }
+.dig-output {
+  margin: 0;
+  padding: 14px;
+  max-height: 70vh;
+  overflow: auto;
+  border: 1px solid #292929;
+  border-radius: 8px;
+  color: #d8f5e2;
+  background: #0d0d0d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+.dig-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 8px;
+  border: 1px solid #28583b;
+  border-radius: 6px;
+  color: #e4ffef;
+  background: #14251a;
+  font-size: 10px;
+  cursor: pointer;
+}
