@@ -966,8 +966,12 @@ body {
 .mode-tab { color: #858585; }
 .mode-tab.active { color: #70e2a5; }
 .mode-tab.active::after { background: #54d88f; }
-.client-info { border-color: #28583b; color: #9fb8a7; background: #12281a; }
-.client-info strong, #client-ptr, #client-whois { color: #d8e8dd; }
+.client-info { margin-top: 28px; border: 1px dashed #34557f; color: #8fb0d8; background: #0e1622; }
+.client-info strong, #client-ptr, #client-whois { color: #dbe7f7; }
+.client-info-heading { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0 0 4px; color: #b9d2f2; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.client-info-note { color: #6f8db3; font-size: 10px; font-weight: 400; letter-spacing: 0; text-transform: none; }
+.client-info .client-whois-table th, .client-info .client-whois-table td { border-bottom-color: #1e3150; }
+.client-info .client-whois-table th { color: #7f9fc6; }
 .field-label { color: #c5c5c5; }
 .input-wrap, .type-control select, .custom-type {
   color: #e8e8e8;
