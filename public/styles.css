@@ -1205,3 +1205,6 @@ footer a:hover { color: #e4ffef; }
 .about-preview { padding: 16px; border: 1px solid #292929; border-radius: 8px; background: #0d0d0d; }
 .about-form textarea { width: 100%; min-height: 280px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .about-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.blocklist-section h4 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 0 6px; color: #b9c7bd; font-size: 12px; }
+.blocklist-table a { color: #d8f5e2; }
+.blocklist-append { margin-top: 16px; }
