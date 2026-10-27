@@ -4305,6 +4305,86 @@ async function sslScanHost(request, url, response) {
   }
 }
 
+const sslLabsEmail = (process.env.SSLLABS_EMAIL || "").trim();
+const sslLabsApi = process.env.SSLLABS_API || "https://api.ssllabs.com/api/v4";
+
+function describeSslLabsHost(host, data) {
+  return {
+    host,
+    status: data.status,
+    statusMessage: data.statusMessage || null,
+    testTime: Number.isFinite(data.testTime) ? data.testTime : null,
+    reportUrl: `https://www.ssllabs.com/ssltest/analyze.html?d=${encodeURIComponent(host)}&hideResults=on`,
+    endpoints: (Array.isArray(data.endpoints) ? data.endpoints : []).slice(0, 16).map((endpoint) => ({
+      ipAddress: endpoint.ipAddress || null,
+      serverName: endpoint.serverName || null,
+      grade: endpoint.grade || null,
+      gradeTrustIgnored: endpoint.gradeTrustIgnored || null,
+      hasWarnings: Boolean(endpoint.hasWarnings),
+      isExceptional: Boolean(endpoint.isExceptional),
+      statusMessage: endpoint.statusMessage || null,
+      statusDetailsMessage: endpoint.statusDetailsMessage || null,
+      progress: Number.isFinite(endpoint.progress) ? endpoint.progress : null,
+      eta: Number.isFinite(endpoint.eta) ? endpoint.eta : null,
+    })),
+  };
+}
+
+async function sslLabsAssessment(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  if (!sslLabsEmail) {
+    sendJson(response, 503, { error: "SSL Labs grading is not configured on this server. An administrator must set SSLLABS_EMAIL." });
+    return;
+  }
+  const host = isIP(rawName.trim()) ? null : normalizeDomain(rawName);
+  if (!host) {
+    sendJson(response, 400, { error: "SSL Labs only grades public host names, not IP addresses." });
+    return;
+  }
+  const params = new URLSearchParams({ host, publish: "off", all: "done" });
+  if (url.searchParams.get("start") === "1") {
+    if (url.searchParams.get("fresh") === "1") params.set("startNew", "on");
+    else {
+      params.set("fromCache", "on");
+      params.set("maxAge", "24");
+    }
+  }
+  try {
+    const upstream = await fetch(`${sslLabsApi}/analyze?${params}`, {
+      headers: { accept: "application/json", email: sslLabsEmail },
+      signal: AbortSignal.timeout(20000),
+    });
+    const data = await upstream.json().catch(() => ({}));
+    if (upstream.status === 429) {
+      sendJson(response, 429, { error: "SSL Labs is rate limiting this server. Try again in a few minutes." });
+      return;
+    }
+    if (upstream.status === 503 || upstream.status === 529) {
+      sendJson(response, 503, { error: "SSL Labs is unavailable or overloaded. Try again later." });
+      return;
+    }
+    if (!upstream.ok) {
+      const message = Array.isArray(data.errors) && typeof data.errors[0]?.message === "string"
+        ? data.errors[0].message.slice(0, 300)
+        : `HTTP ${upstream.status}`;
+      if (upstream.status >= 500) console.error(`SSL Labs request failed: ${message}`);
+      sendJson(response, 502, { error: `SSL Labs rejected the request: ${message}` });
+      return;
+    }
+    if (typeof data.status !== "string") {
+      sendJson(response, 502, { error: "SSL Labs returned an invalid response." });
+      return;
+    }
+    sendJson(response, 200, describeSslLabsHost(host, data));
+  } catch (error) {
+    console.error("SSL Labs request failed:", error.message);
+    sendJson(response, 502, {
+      error: error.name === "TimeoutError" ? "SSL Labs did not respond in time." : "Unable to reach SSL Labs.",
+    });
+  }
+}
+
 function runSinglePing(address) {
   const command = isIP(address) === 6 ? "ping6" : "ping";
   return new Promise((resolve) => {
@@ -5159,12 +5239,14 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
     "/api/sslscan": { method: "GET", action: "SSL/TLS check", keys: ["name", "port"] },
+    "/api/ssllabs": { method: "GET", action: "SSL Labs assessment", keys: ["name", "fresh"], only: ["start", "1"] },
     "/api/ping-scan": { method: "POST", action: "Ping scan" },
     "/api/traceroute": { method: "GET", action: "Traceroute", keys: ["name"] },
     "/api/multi-traceroute": { method: "POST", action: "Multi traceroute" },
   };
   const queryLogRoute = queryLogRoutes[url.pathname];
-  if (queryLogRoute && request.method === queryLogRoute.method) {
+  if (queryLogRoute && request.method === queryLogRoute.method &&
+    (!queryLogRoute.only || url.searchParams.get(queryLogRoute.only[0]) === queryLogRoute.only[1])) {
     request.logUsername = currentUser(request)?.username || null;
     request.logClientAddress = getClientAddress(request);
     request.logDetails = JSON.stringify(Object.fromEntries(
@@ -5329,6 +5411,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/mac-lookup": "mac",
     "/api/ping": "ping",
     "/api/sslscan": "sslscan",
+    "/api/ssllabs": "sslscan",
     "/api/ping-scan": "ping-scan",
     "/api/traceroute": "traceroute",
     "/api/multi-traceroute": "multi-traceroute",
@@ -5336,6 +5419,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   const feature = protectedFeatures[url.pathname];
   const requiresPortScanLogin =
     ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan", "/api/nmap-status"].includes(url.pathname) ||
+    url.pathname === "/api/ssllabs" ||
     (url.pathname === "/api/ping" && url.searchParams.get("sample") === "1") ||
     (url.pathname === "/api/scan" && url.searchParams.get("ports") === "common");
   if (feature && !checkFeatureAccess(request, response, feature, requiresPortScanLogin)) return;
@@ -5418,6 +5502,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     void sslScanHost(request, url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/ssllabs") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void sslLabsAssessment(request, url, response);
     return;
   }
 

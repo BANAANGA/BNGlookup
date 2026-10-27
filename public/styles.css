@@ -1095,3 +1095,20 @@ body {
 .user-row .user-email { min-width: 0; }
 #account-name { color: inherit; text-decoration: none; }
 #account-name:hover, #account-name:focus-visible { text-decoration: underline; }
+.status-badge.danger { color: #ffb4b4; background: #2c1515; }
+.ssllabs-grade {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  font-family: Manrope, sans-serif;
+  font-size: 18px;
+  font-weight: 800;
+  color: #f0cb86;
+  background: #2a2112;
+}
+.ssllabs-grade.success { color: #a9e5c5; background: #14251b; }
+.ssllabs-grade.danger { color: #ffb4b4; background: #2c1515; }
+.port-scan-control label + label { margin-top: 2px; }

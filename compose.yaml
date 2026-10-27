@@ -12,6 +12,7 @@ services:
       DATA_DIR: /data
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
       TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
+      SSLLABS_EMAIL: "${SSLLABS_EMAIL:-}"
     volumes:
       - app_data:/data
     restart: unless-stopped
