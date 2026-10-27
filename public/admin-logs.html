@@ -57,8 +57,24 @@
         <p class="account-description">Review recent login attempts, administrator changes, and lookup activity.</p>
       </section>
       <p class="error-message" id="logs-error" role="alert" hidden></p>
-      <p class="form-hint logs-retention">Showing the latest 200 entries in each tab. Logs are stored in the application database; query entries include the client IP and submitted lookup details.</p>
+      <p class="form-hint logs-retention">Shows the latest 200 matching entries per tab; search covers all stored entries (up to 20,000). Logs are stored in the application database; query entries include the client IP and submitted lookup details.</p>
       <section class="account-card admin-card logs-card">
+        <form class="logs-search" id="logs-search" role="search" aria-label="Search logs">
+          <div class="input-wrap logs-search-text">
+            <span class="input-icon" aria-hidden="true">⌕</span>
+            <input id="logs-search-input" name="q" type="search" maxlength="200" placeholder="Search user, IP, action or details (all words must match)" autocomplete="off" spellcheck="false" aria-label="Search text">
+          </div>
+          <label class="logs-filter">Result
+            <select id="logs-status-filter" name="status">
+              <option value="">All</option>
+              <option value="success">Success (&lt; 400)</option>
+              <option value="failure">Failed (≥ 400)</option>
+            </select>
+          </label>
+          <label class="logs-filter">From <input id="logs-from" name="from" type="date"></label>
+          <label class="logs-filter">To <input id="logs-to" name="to" type="date"></label>
+          <button class="dash-version-check" id="logs-clear" type="button">Clear</button>
+        </form>
         <div class="logs-tabs" role="tablist" aria-label="Log categories">
           <button class="logs-tab active" id="login-tab" type="button" role="tab" aria-selected="true" aria-controls="login-panel" data-category="login">Login logs</button>
           <button class="logs-tab" id="audit-tab" type="button" role="tab" aria-selected="false" aria-controls="audit-panel" data-category="audit" tabindex="-1">Audit logs</button>
@@ -89,6 +105,7 @@
             </table>
           </div>
         </section>
+        <button class="dash-version-check logs-more" id="logs-more" type="button" hidden>Load older entries</button>
       </section>
     </main>
   </body>

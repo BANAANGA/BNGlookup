@@ -4414,15 +4414,64 @@ function handleAdminLogs(request, url, response) {
     sendJson(response, 400, { error: "Log limit must be between 1 and 500." });
     return;
   }
+  const search = (url.searchParams.get("q") || "").trim();
+  const outcome = url.searchParams.get("status") || "";
+  const from = url.searchParams.get("from") || "";
+  const to = url.searchParams.get("to") || "";
+  const before = url.searchParams.get("before") || "";
+  if (search.length > 200) {
+    sendJson(response, 400, { error: "The search text must not exceed 200 characters." });
+    return;
+  }
+  if (!["", "success", "failure"].includes(outcome)) {
+    sendJson(response, 400, { error: "Status must be success or failure." });
+    return;
+  }
+  const validDate = (value) => !value || (/^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)));
+  if (!validDate(from) || !validDate(to)) {
+    sendJson(response, 400, { error: "Dates must use the YYYY-MM-DD format." });
+    return;
+  }
+  if (before && !/^\d{1,15}$/.test(before)) {
+    sendJson(response, 400, { error: "Invalid page cursor." });
+    return;
+  }
+  const conditions = ["category = ?"];
+  const params = [category];
+  // Every word must appear in the user, client IP, action or details (case-insensitive).
+  for (const term of search.split(/\s+/).filter(Boolean).slice(0, 8)) {
+    const pattern = `%${term.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
+    conditions.push("(COALESCE(username, '') LIKE ? ESCAPE '\\' OR COALESCE(client_ip, '') LIKE ? ESCAPE '\\' OR action LIKE ? ESCAPE '\\' OR COALESCE(details, '') LIKE ? ESCAPE '\\')");
+    params.push(pattern, pattern, pattern, pattern);
+  }
+  if (outcome === "success") conditions.push("status_code < 400");
+  if (outcome === "failure") conditions.push("status_code >= 400");
+  if (from) {
+    conditions.push("created_at >= ?");
+    params.push(`${from} 00:00:00`);
+  }
+  if (to) {
+    conditions.push("created_at <= ?");
+    params.push(`${to} 23:59:59`);
+  }
+  const where = conditions.join(" AND ");
+  const total = database.prepare(`SELECT COUNT(*) AS count FROM admin_logs WHERE ${where}`).get(...params).count;
+  const pageConditions = before ? `${where} AND id < ?` : where;
+  const pageParams = before ? [...params, Number(before)] : params;
   const logs = database.prepare(`
     SELECT id, created_at AS timestamp, username, client_ip AS clientIp,
       action, details, status_code AS statusCode
     FROM admin_logs
-    WHERE category = ?
+    WHERE ${pageConditions}
     ORDER BY id DESC
     LIMIT ?
-  `).all(category, Number(rawLimit));
-  sendJson(response, 200, { logs });
+  `).all(...pageParams, Number(rawLimit));
+  sendJson(response, 200, {
+    logs,
+    total,
+    filtered: conditions.length > 1,
+    nextBefore: logs.length === Number(rawLimit) ? logs.at(-1).id : null,
+  });
 }
 
 let cpuSample = { idle: 0, total: 0, processMicros: 0, at: Date.now() };
