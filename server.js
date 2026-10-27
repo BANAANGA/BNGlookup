@@ -12,7 +12,7 @@ const http2 = require("node:http2");
 const crypto = require("node:crypto");
 const { promisify } = require("node:util");
 const { DatabaseSync } = require("node:sqlite");
-const { lookup: resolveHost } = require("node:dns/promises");
+const { lookup: resolveHost, Resolver: DnsResolver } = require("node:dns/promises");
 const { domainToASCII } = require("node:url");
 const { createAcmeManager } = require("./acme");
 const { sendMail, validAddress } = require("./mail");
@@ -113,6 +113,7 @@ const featureAccessDefaults = {
   nmap: "admin",
   sslscan: "user",
   dig: "user",
+  blocklist: "user",
 };
 const featureNames = {
   forward: "DNS lookup",
@@ -129,6 +130,7 @@ const featureNames = {
   nmap: "Nmap scan (authorized targets only)",
   sslscan: "SSL/TLS handshake and certificate check",
   dig: "Custom dig command",
+  blocklist: "Blocklist (DNSBL) check in auto lookup",
 };
 
 function parseNmapAllowedCidrs(value) {
@@ -1515,6 +1517,152 @@ async function checkDnssec(domain) {
   };
 }
 
+const ipBlocklists = [
+  { zone: "zen.spamhaus.org", name: "Spamhaus ZEN", info: "https://check.spamhaus.org/", kind: "spamhaus" },
+  { zone: "bl.spamcop.net", name: "SpamCop", info: "https://www.spamcop.net/bl.shtml" },
+  { zone: "b.barracudacentral.org", name: "Barracuda", info: "https://www.barracudacentral.org/lookups" },
+  { zone: "psbl.surriel.com", name: "PSBL", info: "https://psbl.org/" },
+  { zone: "dnsbl-1.uceprotect.net", name: "UCEPROTECT Level 1", info: "https://www.uceprotect.net/en/rblcheck.php" },
+  { zone: "dnsbl.dronebl.org", name: "DroneBL", info: "https://dronebl.org/lookup" },
+  { zone: "ix.dnsbl.manitu.net", name: "NiX Spam", info: "https://www.nixspam.net/" },
+  { zone: "bl.mailspike.net", name: "Mailspike", info: "https://mailspike.org/" },
+  { zone: "truncate.gbudb.net", name: "GBUdb Truncate", info: "https://www.gbudb.com/" },
+  { zone: "spam.dnsbl.anonmails.de", name: "Anonmails", info: "https://anonmails.de/dnsbl.php" },
+  { zone: "db.wpbl.info", name: "WPBL", info: "https://www.wpbl.info/" },
+  { zone: "all.s5h.net", name: "s5h.net", info: "https://www.usenix.org.uk/content/rbl.html" },
+];
+const domainBlocklists = [
+  { zone: "dbl.spamhaus.org", name: "Spamhaus DBL", info: "https://check.spamhaus.org/", kind: "spamhaus" },
+  { zone: "multi.uribl.com", name: "URIBL", info: "https://admin.uribl.com/", kind: "uribl" },
+  { zone: "multi.surbl.org", name: "SURBL", info: "https://www.surbl.org/surbl-analysis", kind: "surbl" },
+  { zone: "dbl.nordspam.com", name: "NordSpam DBL", info: "https://www.nordspam.com/" },
+];
+const blocklistAddressLimit = 4;
+let blocklistResolver = null;
+
+function getBlocklistResolver() {
+  if (blocklistResolver) return blocklistResolver;
+  blocklistResolver = new DnsResolver({ timeout: 4000, tries: 1 });
+  const servers = (process.env.BLOCKLIST_RESOLVER || "").split(/[\s,]+/).filter(Boolean);
+  if (servers.length) {
+    try {
+      blocklistResolver.setServers(servers);
+    } catch (error) {
+      console.error(`Ignoring invalid BLOCKLIST_RESOLVER: ${error.message}`);
+    }
+  }
+  return blocklistResolver;
+}
+
+// Blocklists answer with 127.x codes; some use reserved codes to say a query was refused
+// (for example because it came through a large public resolver) rather than listed.
+function interpretBlocklistAnswer(list, codes) {
+  if (codes.some((code) => !code.startsWith("127."))) {
+    return { status: "error", detail: "Unexpected answer; the resolver may rewrite NXDOMAIN responses." };
+  }
+  if (list.kind === "spamhaus" && codes.some((code) => code.startsWith("127.255.255."))) {
+    return { status: "refused", detail: "Spamhaus refused the query (public or high-volume resolver). Set BLOCKLIST_RESOLVER to a private resolver or a Spamhaus DQS mirror." };
+  }
+  if ((list.kind === "uribl" || list.kind === "surbl") && codes.includes("127.0.0.1")) {
+    return { status: "refused", detail: `${list.name} refused the query (public or high-volume resolver).` };
+  }
+  return { status: "listed" };
+}
+
+async function queryBlocklist(list, queryName) {
+  const resolver = getBlocklistResolver();
+  try {
+    const codes = await resolver.resolve4(`${queryName}.${list.zone}`);
+    const result = interpretBlocklistAnswer(list, codes);
+    let reason = null;
+    if (result.status === "listed") {
+      try {
+        reason = (await resolver.resolveTxt(`${queryName}.${list.zone}`)).map((parts) => parts.join("")).join(" ").slice(0, 300) || null;
+      } catch {
+        reason = null;
+      }
+    }
+    return { name: list.name, zone: list.zone, info: list.info, codes, reason, ...result };
+  } catch (error) {
+    if (error.code === "ENOTFOUND" || error.code === "ENODATA") {
+      return { name: list.name, zone: list.zone, info: list.info, status: "clean" };
+    }
+    return {
+      name: list.name,
+      zone: list.zone,
+      info: list.info,
+      status: "error",
+      detail: error.code === "ETIMEOUT" ? "The blocklist did not answer in time." : `Lookup failed (${error.code || "error"}).`,
+    };
+  }
+}
+
+function summarizeBlocklistResults(results) {
+  return {
+    listed: results.filter((result) => result.status === "listed").length,
+    clean: results.filter((result) => result.status === "clean").length,
+    unavailable: results.filter((result) => result.status === "refused" || result.status === "error").length,
+    checked: results.length,
+  };
+}
+
+async function checkBlocklists({ addresses = [], domain = null }) {
+  const ipv4 = [...new Set(addresses)].filter((address) => isIP(address) === 4 && isPublicAddress(address));
+  const skipped = [...new Set(addresses)].filter((address) => !ipv4.includes(address));
+  const targets = ipv4.slice(0, blocklistAddressLimit);
+  const [ipResults, domainLists] = await Promise.all([
+    Promise.all(targets.map(async (address) => {
+      const reversed = address.split(".").reverse().join(".");
+      const lists = await Promise.all(ipBlocklists.map((list) => queryBlocklist(list, reversed)));
+      return { address, ...summarizeBlocklistResults(lists), lists };
+    })),
+    domain ? Promise.all(domainBlocklists.map((list) => queryBlocklist(list, domain))) : Promise.resolve(null),
+  ]);
+  return {
+    resolver: process.env.BLOCKLIST_RESOLVER ? "custom resolver (BLOCKLIST_RESOLVER)" : "the server's system resolver",
+    ips: ipResults,
+    domain: domainLists ? { domain, ...summarizeBlocklistResults(domainLists), lists: domainLists } : null,
+    skipped: [...skipped, ...ipv4.slice(blocklistAddressLimit)],
+  };
+}
+
+async function blocklistLookup(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const name = rawName.trim().replace(/^\[(.*)\]$/, "$1");
+  try {
+    if (isIP(name)) {
+      if (!isPublicAddress(name)) {
+        sendJson(response, 400, { error: "Blocklists only cover public IP addresses." });
+        return;
+      }
+      if (isIP(name) === 6) {
+        sendJson(response, 200, { ips: [], domain: null, skipped: [name], ipv6: true });
+        return;
+      }
+      sendJson(response, 200, await checkBlocklists({ addresses: [name] }));
+      return;
+    }
+    const domain = normalizeDomain(name);
+    if (!domain) {
+      sendJson(response, 400, { error: "Enter a valid domain name or public IP address." });
+      return;
+    }
+    let addresses = [];
+    try {
+      addresses = (await queryDohDns(domain, "A")).answers
+        .filter((answer) => answer.type === 1 || answer.typeName === "A")
+        .map((answer) => answer.data);
+    } catch {
+      addresses = [];
+    }
+    sendJson(response, 200, await checkBlocklists({ addresses, domain }));
+  } catch (error) {
+    console.error("Blocklist check failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the blocklist check." });
+  }
+}
+
 async function fetchPtr(address, nameserver = null) {
   if (nameserver) return directDnsLookup(reverseName(address), "PTR", nameserver);
   const data = await queryDohDns(reverseName(address), "PTR");
@@ -2431,6 +2579,10 @@ async function bulkScan(request, url, response) {
     maxPorts: portScanPolicy.maxPortsByRole[user.role],
     allowLocal: portScanPolicy.localScanByRole[user.role],
   } : { maxPorts: 0, allowLocal: false };
+  const blocklistPromise = checkBlocklists({ addresses: rootAddresses, domain }).catch((error) => {
+    console.error("Blocklist check failed:", error.message);
+    return null;
+  });
   const portScan = portScanOption === "common"
     ? await scanCommonTcpPorts(domain, rootAddresses, rolePolicy)
     : null;
@@ -2450,6 +2602,7 @@ async function bulkScan(request, url, response) {
     registration: registrationResult.registration,
     registrationError: registrationResult.error,
     dnssec: await dnssecPromise,
+    blocklists: await blocklistPromise,
     emailSecurity: {
       spfRecords,
       rootSpfFound: spfRecords.some((record) => record.name === domain),
@@ -5958,6 +6111,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/nmap-scan": { method: "POST", action: "Nmap scan" },
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
     "/api/dig": { method: "GET", action: "Dig command", keys: ["command"] },
+    "/api/blocklist": { method: "GET", action: "Blocklist check", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
     "/api/sslscan": { method: "GET", action: "SSL/TLS check", keys: ["name", "port"] },
     "/api/tls-grade": { method: "POST", action: "TLS test and grade" },
@@ -6145,6 +6299,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/nmap-status": "nmap",
     "/api/mac-lookup": "mac",
     "/api/dig": "dig",
+    "/api/blocklist": "blocklist",
     "/api/ping": "ping",
     "/api/sslscan": "sslscan",
     "/api/tls-grade": "sslscan",
@@ -6156,6 +6311,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   const requiresPortScanLogin =
     ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan", "/api/nmap-status"].includes(url.pathname) ||
     url.pathname === "/api/tls-grade" ||
+    url.pathname === "/api/blocklist" ||
     (url.pathname === "/api/ping" && url.searchParams.get("sample") === "1") ||
     (url.pathname === "/api/scan" && url.searchParams.get("ports") === "common");
   if (feature && !checkFeatureAccess(request, response, feature, requiresPortScanLogin)) return;
@@ -6272,6 +6428,15 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     runMultiTraceroute(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/blocklist") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void blocklistLookup(request, url, response);
     return;
   }
 

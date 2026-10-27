@@ -24,7 +24,8 @@ small Docker container with no application dependencies.
 - **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status, plus an optional full TLS test with an SSL Labs-style A+–F grade.
 - **Ping scan**: one echo request to every host in a list or CIDR block.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side, with optional PTR (reverse DNS) lookup for every hop.
-- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
+- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, blocklists (DNSBL), SPF, DKIM, certificate-transparency names, geolocation, optional port check.
+- **Blocklist check**: Magic scan and Auto lookup check domains and public IPv4 addresses against common spam/abuse blocklists.
 - **Port scan / Bulk port scan**: custom TCP ports on one target, or one port across many addresses.
 - **Nmap**: bounded TCP profiles for one authorized target at a time, with live status and elapsed time.
 
@@ -252,6 +253,18 @@ Several tools send data to external services; these are listed under
   about deprecated algorithms, SHA-1 DS digests, mismatched DS records and
   signatures that are expired or expire within 7 days. It does not use a custom
   nameserver, since validation needs a validating resolver.
+- **Blocklist (DNSBL) check** runs in every Magic scan and, for signed-in users,
+  below Auto lookup results for a domain or IP (feature `blocklist`). The domain
+  is checked against Spamhaus DBL, URIBL, SURBL and NordSpam DBL; up to four
+  public IPv4 addresses against Spamhaus ZEN, SpamCop, Barracuda, PSBL,
+  UCEPROTECT L1, DroneBL, NiX Spam, Mailspike, GBUdb, Anonmails, WPBL and s5h.net,
+  with the listing's TXT reason. IPv6 is not checked (few lists cover it).
+  Queries use the container's system resolver, not the DoH provider, because
+  Spamhaus, URIBL and SURBL refuse queries from large public resolvers; such
+  refusals show as **Refused**, never as clean. For reliable Spamhaus results set
+  `BLOCKLIST_RESOLVER` to your own recursive resolver (for example a local
+  Unbound) or a Spamhaus DQS mirror. The checked names are sent to the blocklist
+  operators.
 - **Magic scan** checks A, AAAA, CAA, CNAME, HTTPS, MX, NS, SOA, SRV and TXT for the
   domain, common subdomains (`www`, `mail`, `api`, `staging`, …) and provider
   verification names (AWS/SES, Azure, Google Cloud, Cloudflare, Vercel, Netlify,
@@ -360,6 +373,7 @@ Environment variables:
 | `COOKIE_SECURE=true` | Set the cookie `Secure` attribute; use behind HTTPS. |
 | `HTTPS_PORT` | HTTPS listener port (default 8443). |
 | `DOH_ENDPOINT` | Extra custom DoH JSON endpoint, offered as a resolver choice. |
+| `BLOCKLIST_RESOLVER` | DNS server(s) for blocklist checks, e.g. `192.168.1.53` or `10.0.0.2:5353`, comma-separated. Default: the container's system resolver. |
 | `UPDATE_CHECK=false` | Disable the dashboard's check for new releases (otherwise the server asks the GitHub API at most every 6 hours, only while an admin views the dashboard). |
 | `APP_VERSION`, `APP_COMMIT`, `APP_BUILD_DATE` | Build information shown on the dashboard. Set automatically by the release workflow as Docker build arguments; local builds show `dev`. |
 

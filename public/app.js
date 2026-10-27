@@ -612,6 +612,67 @@ function renderDnssecSection(check) {
     </section>`;
 }
 
+function renderBlocklistTable(lists) {
+  const labels = { listed: ["danger", "Listed"], clean: ["found", "Not listed"], refused: ["warning", "Refused"], error: ["missing", "Unavailable"] };
+  const order = { listed: 0, refused: 1, error: 2, clean: 3 };
+  const rows = [...lists].sort((left, right) => order[left.status] - order[right.status]).map((list) => {
+    const [statusClass, label] = labels[list.status] || ["missing", list.status];
+    const detail = list.status === "listed"
+      ? [list.codes?.join(", "), list.reason].filter(Boolean).join(" · ")
+      : list.detail || "";
+    return `
+      <tr>
+        <td><a href="${escapeHtml(list.info)}" target="_blank" rel="noopener noreferrer">${escapeHtml(list.name)}</a><br><span class="trace-silent">${escapeHtml(list.zone)}</span></td>
+        <td><span class="email-auth-status ${statusClass}">${escapeHtml(label)}</span></td>
+        <td>${escapeHtml(detail)}</td>
+      </tr>`;
+  }).join("");
+  return `<div class="dns-results-table-wrap"><table class="dns-results-table net-table blocklist-table">
+    <thead><tr><th>Blocklist</th><th>Status</th><th>Details</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderBlocklistSection(data) {
+  if (!data) return "";
+  const summary = (entry) => entry.listed
+    ? `<span class="email-auth-status danger">${escapeHtml(`Listed on ${entry.listed} of ${entry.checked}`)}</span>`
+    : `<span class="email-auth-status found">${escapeHtml(`Not listed (${entry.clean} of ${entry.checked} answered)`)}</span>`;
+  const domainSection = data.domain ? `
+    <h4>Domain ${copyableResult(data.domain.domain)} ${summary(data.domain)}</h4>
+    ${renderBlocklistTable(data.domain.lists)}` : "";
+  const ipSections = (data.ips || []).map((entry) => `
+    <h4>IP ${copyableResult(entry.address)} ${summary(entry)}</h4>
+    ${renderBlocklistTable(entry.lists)}`).join("");
+  const anyListed = (data.domain?.listed || 0) + (data.ips || []).reduce((total, entry) => total + entry.listed, 0);
+  const empty = !domainSection && !ipSections;
+  return `
+    <section class="email-auth blocklist-section">
+      <h3>Blocklists <span class="email-auth-status ${anyListed ? "danger" : empty ? "missing" : "found"}">${anyListed ? escapeHtml(`${anyListed} listing(s)`) : empty ? "Not checked" : "Clean"}</span></h3>
+      ${empty ? `<p class="empty-result">${data.ipv6 ? "Most blocklists only cover IPv4; IPv6 addresses are not checked." : "No public IPv4 address was available to check."}</p>` : ""}
+      ${domainSection}
+      ${ipSections}
+      ${data.skipped?.length ? `<p class="detail-notice">${escapeHtml(`Not checked: ${data.skipped.join(", ")} (only up to four public IPv4 addresses are checked).`)}</p>` : ""}
+      <p class="scan-disclaimer">Queried through ${escapeHtml(data.resolver || "the server's resolver")}. "Refused" means the blocklist operator rejected the query, usually because it came through a large public resolver, not that the address is clean.</p>
+    </section>`;
+}
+
+async function appendBlocklistCheck(name) {
+  const access = authState?.featureAccess?.blocklist || "user";
+  const permitted = Boolean(authState?.user) && (access !== "admin" || authState.user.role === "admin");
+  if (!permitted) return;
+  const section = document.createElement("div");
+  section.className = "blocklist-append";
+  section.innerHTML = '<p class="detail-notice">Checking blocklists…</p>';
+  resultPanel.append(section);
+  try {
+    const response = await fetch(`/api/blocklist?${new URLSearchParams({ name })}`, { credentials: "same-origin" });
+    const data = await readApiResponse(response);
+    if (!response.ok) throw new Error(data.error || "Blocklist check failed.");
+    if (section.isConnected) section.innerHTML = renderBlocklistSection(data);
+  } catch (error) {
+    if (section.isConnected) section.innerHTML = `<p class="detail-notice">${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function renderDnssecResult(data) {
   const check = data.dnssecCheck;
   resultPanel.innerHTML = `
@@ -804,6 +865,7 @@ function renderScanResult(data) {
       <p class="scan-disclaimer">Registration information is provided by RDAP, the modern WHOIS service. Contact details may be redacted or unavailable.</p>
     </section>
     ${renderDnssecSection(data.dnssec)}
+    ${renderBlocklistSection(data.blocklists)}
     <section class="email-auth">
       <h3>Email authentication</h3>
       <div class="email-auth-grid">
@@ -2120,6 +2182,9 @@ form.addEventListener("submit", async (event) => {
     else {
       showResult(data);
       if (requestMode === "reverse") appendIpRegistration(lookupName.replace(/^\[|\]$/g, ""));
+      if (mode === "auto" && (requestMode === "reverse" || requestMode === "forward")) {
+        void appendBlocklistCheck(lookupName.replace(/^\[|\]$/g, ""));
+      }
     }
   } catch (error) {
     if (nmapScan) {
