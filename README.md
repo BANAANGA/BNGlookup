@@ -200,7 +200,7 @@ Several tools send data to external services; these are listed under
 | Multi traceroute | Up to 10 targets, 4 at a time; hop comparison table. |
 | Magic scan | Default tab. See below. |
 | Port scan | Ports and ranges (`22,80,443,8000-8010`) on one target; max ports per role (default Admin 100, User 25); up to 8 resolved IPs. |
-| Bulk port scan | One TCP port across a list or CIDR blocks; largest CIDR prefix is admin-configurable (default IPv4 /24, IPv6 /120), with a hard cap of 256 unique addresses total. |
+| Bulk port scan | One TCP port across a list or CIDR blocks; largest CIDR prefix is admin-configurable (default IPv4 /24, IPv6 /120). TCP connect by default, capped at 256 addresses. With the optional zmap engine, IPv4 is SYN-scanned up to /16 (65,536 addresses) at an admin-set rate and only open hosts are listed; IPv6 still uses TCP connect (max 256). |
 | Nmap | One IP or hostname within an administrator-approved CIDR or an exact IP observed at successful login (automatic entries expire after 30 days); TCP top 20/100/1000 or light TCP service detection. Live status includes elapsed time. No arbitrary flags or range scans. |
 
 **Notes**
@@ -237,9 +237,19 @@ Several tools send data to external services; these are listed under
   the role setting (default: allowed for Admins, not Users); other reserved
   addresses are always skipped. Only scan systems you are authorized to test.
 - **Bulk port scan range limits**: admins can set the largest accepted IPv4 and
-  IPv6 CIDR under Settings → Port scans. Defaults are /24 and /120 respectively;
-  neither can be configured broader, and a hard cap of 256 unique addresses still
-  applies across the entire request.
+  IPv6 CIDR under Settings → Port scans. Defaults are /24 and /120; IPv4 can be
+  widened to /16 and IPv6 to /120. Without zmap a hard cap of 256 unique
+  addresses applies across the request; with zmap the cap is 65,536 IPv4 plus
+  256 IPv6 addresses. One zmap scan runs at a time.
+- **zmap engine (opt-in)**: zmap sends raw SYN packets, which needs `NET_RAW` and
+  `NET_ADMIN`. Enable it with the `compose.zmap.yaml` override
+  (`docker compose -f compose.yaml -f compose.zmap.yaml up --build -d`, or with
+  `compose.registry.yaml`). It sets `ZMAP_ENABLED=true`, adds the two
+  capabilities and removes `no-new-privileges` so the zmap binary's file
+  capabilities apply; Node still runs as the unprivileged `node` user. The send
+  rate (default 10,000 packets/s, 1,000–100,000) is under Settings → Port scans.
+  If zmap cannot detect the network, set `ZMAP_INTERFACE`, `ZMAP_GATEWAY_MAC` or
+  `ZMAP_SOURCE_IP`. High rates can trip hosting-provider abuse detection.
 - **Live Ping monitoring** requires a signed-in user and checks one host every
   3 seconds for up to 5 minutes (100 samples maximum). It plots latency and
   availability, stops when the page is hidden or the user stops it, and can play
@@ -343,7 +353,9 @@ requests get HSTS and Secure cookies.
 - The Compose files run the container hardened: non-root user, read-only root
   filesystem (only `/data` and `/tmp` are writable), all Linux capabilities
   dropped, `no-new-privileges`, PID and memory limits, and a health check
-  (`/healthz`). The app shuts down gracefully on `SIGTERM`.
+  (`/healthz`). The app shuts down gracefully on `SIGTERM`. The optional
+  `compose.zmap.yaml` relaxes this (adds `NET_RAW`/`NET_ADMIN`, drops
+  `no-new-privileges`) and should only be used when the zmap engine is wanted.
 - Expensive jobs are capped server-wide (8 concurrent traceroutes, 2 ping scans),
   and connections, header sizes and request timeouts are bounded.
 - The HTTPS listener supports TLS 1.2/1.3 with forward-secret AEAD suites only and

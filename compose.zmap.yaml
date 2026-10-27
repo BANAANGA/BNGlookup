@@ -1,0 +1,18 @@
+# Override that enables the zmap engine for Bulk port scan (IPv4 SYN scans up to /16).
+# zmap sends raw packets, so this grants NET_RAW and NET_ADMIN to the container and
+# lifts no-new-privileges so the zmap binary's file capabilities take effect. The
+# Node process itself still runs as the unprivileged "node" user without capabilities.
+# Use: docker compose -f compose.yaml -f compose.zmap.yaml up --build -d
+#  or: docker compose -f compose.registry.yaml -f compose.zmap.yaml up -d
+services:
+  dnslookup:
+    environment:
+      ZMAP_ENABLED: "true"
+      # Optional: set these if zmap cannot detect the interface or gateway itself.
+      ZMAP_INTERFACE: "${ZMAP_INTERFACE:-}"
+      ZMAP_GATEWAY_MAC: "${ZMAP_GATEWAY_MAC:-}"
+      ZMAP_SOURCE_IP: "${ZMAP_SOURCE_IP:-}"
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt: !reset []
