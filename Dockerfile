@@ -18,7 +18,7 @@ COPY --from=testssl /opt/testssl /opt/testssl
 RUN ln -s /opt/testssl/testssl.sh /usr/local/bin/testssl.sh
 
 RUN apk add --no-cache iputils-tracepath coreutils nmap nmap-scripts zmap \
-    bash procps drill libidn socat openssl xxd \
+    bash procps drill libidn socat openssl xxd bind-tools \
  && apk add --no-cache --virtual .setcap libcap-utils \
  && setcap cap_net_raw,cap_net_admin=eip "$(command -v zmap)" \
  && apk del .setcap \

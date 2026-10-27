@@ -18,6 +18,7 @@ small Docker container with no application dependencies.
 - **DNS lookup**: A, AAAA, ANY, CAA, CNAME, HTTPS, MX, NS, PTR, SOA, SRV, SSHFP, SVCB, TLSA, TXT, or any type by name/number.
 - **Reverse lookup**: PTR records for IPv4/IPv6, with IP WHOIS data.
 - **Whois**: RDAP registration data for domains and IPs (registrar, dates, status, network range, ASN, contacts) and a nameserver comparison.
+- **Dig**: run a custom `dig` command (`[@server] name [type] [class] +options`) and see the raw output.
 - **MAC lookup**: vendor, OUI block and address type.
 - **Ping**: ICMP (4 echo requests) or HTTP/HTTPS GET check; optional live single-host monitoring at 3-second intervals, with latency chart and optional up/down sounds.
 - **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status, plus an optional full TLS test with an SSL Labs-style A+–F grade.
@@ -196,6 +197,7 @@ Several tools send data to external services; these are listed under
 | DNS lookup | Common types or any type by name/code. `ANY` may return incomplete data. |
 | Reverse lookup | IPv4/IPv6 PTR; shows IP WHOIS. |
 | Whois | RDAP via `rdap.org`; missing ASNs are resolved through RIPE Stat, with `ipwho.is` as fallback. Contacts may be redacted. |
+| Dig | Runs the real `dig` binary (no shell) with one query: `@server`, name, type, class, `-t -c -q -x -p -4 -6 -u`, and an allowlist of `+options` (`+short`, `+dnssec`, `+trace`, `+tcp`, `+nsid`, `+subnet=`, `+noall +answer`, …). `+time` ≤ 10 s, `+tries` ≤ 3, 30 s overall limit, 256 KB output. File, key and bind-address flags (`-f`, `-k`, `-y`, `-b`) are rejected. A private `@server` follows the role's local-network setting; without `@server` the container's resolver is used. |
 | MAC lookup | Vendor data from `maclookup.app`. |
 | Ping | ICMP: 4 echo requests with loss and RTT. HTTP/HTTPS: one GET to `/` (redirects reported, not followed). |
 | SSLscan | One TLS handshake to a host and port (default 443); reports the negotiated TLS protocol, cipher, peer certificate chain and certificate verification result. Signed-in users can also run a full testssl.sh test (protocols, ciphers, certificate, vulnerabilities) graded with the SSL Labs rating guide. |
@@ -299,7 +301,7 @@ Several tools send data to external services; these are listed under
 
 | Feature | Default access |
 | --- | --- |
-| DNS lookup, Reverse lookup, Whois, MAC lookup, Ping, SSLscan, Traceroute | Logged-in users |
+| DNS lookup, Reverse lookup, Whois, Dig, MAC lookup, Ping, SSLscan, Traceroute | Logged-in users |
 | Magic scan, Ping scan, Multi traceroute, Port scan, Bulk port scan, Nmap | Administrators |
 
 - Ping scan, Multi traceroute, both port scans and Nmap need a login even if set to Public.
