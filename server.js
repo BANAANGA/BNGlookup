@@ -4589,7 +4589,34 @@ function startNdjson(request, response) {
   return { send, signal: controller.signal };
 }
 
-async function streamTrace(stream, index, targetInput, allowLocal) {
+async function lookupHopPtr(address) {
+  try {
+    const result = await fetchPtr(address);
+    return { names: result.answers.map((name) => String(name).replace(/\.$/, "")) };
+  } catch (error) {
+    return { names: [], error: error.message || "Unable to retrieve PTR record." };
+  }
+}
+
+async function addHopPtrNames(result) {
+  if (!result.hops?.length) return result;
+  const names = new Map();
+  const addresses = [...new Set(result.hops.map((hop) => hop.address).filter(Boolean))];
+  for (let offset = 0; offset < addresses.length; offset += 8) {
+    await Promise.all(addresses.slice(offset, offset + 8).map(async (address) => {
+      names.set(address, await lookupHopPtr(address));
+    }));
+  }
+  return {
+    ...result,
+    hops: result.hops.map((hop) => {
+      const lookup = hop.address && names.get(hop.address);
+      return lookup ? { ...hop, ptr: lookup.names, ...(lookup.error ? { ptrError: lookup.error } : {}) } : hop;
+    }),
+  };
+}
+
+async function streamTrace(stream, index, targetInput, allowLocal, ptr = false) {
   try {
     const resolved = await resolveCheckTarget(targetInput, allowLocal);
     if (resolved.error) {
@@ -4597,10 +4624,24 @@ async function streamTrace(stream, index, targetInput, allowLocal) {
       return;
     }
     stream.send({ type: "start", index, target: resolved.target, address: resolved.address });
+    const ptrLookups = new Map();
+    const queuePtrLookups = (hops) => {
+      for (const hop of hops) {
+        if (!hop.address || ptrLookups.has(hop.address) || ptrLookups.size >= maxTraceHops * 2) continue;
+        ptrLookups.set(hop.address, lookupHopPtr(hop.address).then((lookup) => {
+          stream.send({ type: "ptr", index, address: hop.address, ...lookup });
+        }));
+      }
+    };
     const result = await runTraceroute(resolved.address, {
       signal: stream.signal,
-      onUpdate: (update) => stream.send({ type: "hops", index, hops: update.hops, reached: update.reached }),
+      onUpdate: (update) => {
+        stream.send({ type: "hops", index, hops: update.hops, reached: update.reached });
+        if (ptr) queuePtrLookups(update.hops);
+      },
     });
+    if (ptr && result.hops) queuePtrLookups(result.hops);
+    await Promise.all(ptrLookups.values());
     stream.send({ type: "done", index, target: resolved.target, address: resolved.address, hops: [], reached: false, ...result });
   } catch (error) {
     stream.send({ type: "done", index, target: String(targetInput).slice(0, 80), hops: [], reached: false, error: error.message });
@@ -4613,9 +4654,10 @@ async function tracerouteHost(request, url, response) {
   try {
     const user = currentUser(request);
     const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+    const ptr = url.searchParams.get("ptr") === "1";
     if (url.searchParams.get("stream") === "1") {
       const stream = startNdjson(request, response);
-      await streamTrace(stream, 0, rawName, allowLocal);
+      await streamTrace(stream, 0, rawName, allowLocal, ptr);
       response.end();
       return;
     }
@@ -4624,7 +4666,8 @@ async function tracerouteHost(request, url, response) {
       sendJson(response, 200, { target: resolved.target, hops: [], reached: false, error: resolved.error });
       return;
     }
-    const result = await runTraceroute(resolved.address);
+    let result = await runTraceroute(resolved.address);
+    if (ptr) result = await addHopPtrNames(result);
     sendJson(response, 200, { target: resolved.target, address: resolved.address, hops: [], reached: false, ...result });
   } catch (error) {
     const statusCode = error.statusCode || 500;
@@ -4646,7 +4689,8 @@ async function runMultiTraceroute(request, response) {
     if (!targets.length) throw invalidScanRequest("Enter at least one domain name or IP address.");
     if (targets.length > 10) throw invalidScanRequest("Enter no more than 10 targets.");
     const allowLocal = getPortScanPolicy().localScanByRole[user.role];
-    request.logDetails = JSON.stringify({ targets });
+    const ptr = body.ptr === true;
+    request.logDetails = JSON.stringify({ targets, ptr });
     if (body.stream === true) {
       const stream = startNdjson(request, response);
       let nextStream = 0;
@@ -4654,7 +4698,7 @@ async function runMultiTraceroute(request, response) {
         while (nextStream < targets.length) {
           const index = nextStream;
           nextStream += 1;
-          await streamTrace(stream, index, targets[index], allowLocal);
+          await streamTrace(stream, index, targets[index], allowLocal, ptr);
         }
       }));
       response.end();
@@ -4668,9 +4712,13 @@ async function runMultiTraceroute(request, response) {
         next += 1;
         try {
           const resolved = await resolveCheckTarget(targets[index], allowLocal);
-          results[index] = resolved.error
-            ? { target: resolved.target, hops: [], reached: false, error: resolved.error }
-            : { target: resolved.target, address: resolved.address, hops: [], reached: false, ...await runTraceroute(resolved.address) };
+          if (resolved.error) {
+            results[index] = { target: resolved.target, hops: [], reached: false, error: resolved.error };
+          } else {
+            let result = await runTraceroute(resolved.address);
+            if (ptr) result = await addHopPtrNames(result);
+            results[index] = { target: resolved.target, address: resolved.address, hops: [], reached: false, ...result };
+          }
         } catch (error) {
           results[index] = { target: targets[index].slice(0, 80), hops: [], reached: false, error: error.message };
         }

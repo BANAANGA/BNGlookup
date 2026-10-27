@@ -22,7 +22,7 @@ small Docker container with no application dependencies.
 - **Ping**: ICMP (4 echo requests) or HTTP/HTTPS GET check; optional live single-host monitoring at 3-second intervals, with latency chart and optional up/down sounds.
 - **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status.
 - **Ping scan**: one echo request to every host in a list or CIDR block.
-- **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side.
+- **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side, with optional PTR (reverse DNS) lookup for every hop.
 - **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
 - **Port scan / Bulk port scan**: custom TCP ports on one target, or one port across many addresses.
 - **Nmap**: bounded TCP profiles for one authorized target at a time, with live status and elapsed time.
@@ -196,7 +196,7 @@ Several tools send data to external services; these are listed under
 | Ping | ICMP: 4 echo requests with loss and RTT. HTTP/HTTPS: one GET to `/` (redirects reported, not followed). |
 | SSLscan | One TLS handshake to a host and port (default 443); reports the negotiated TLS protocol, cipher, peer certificate chain and certificate verification result. |
 | Ping scan | One echo per host; list or CIDR, max 256 addresses. |
-| Traceroute | `tracepath` (UDP), up to 20 hops, 45 s limit; live updates. |
+| Traceroute | `tracepath` (UDP), up to 20 hops, 45 s limit; live updates. Optional per-hop PTR lookup via the default DoH provider. |
 | Multi traceroute | Up to 10 targets, 4 at a time; hop comparison table. |
 | Magic scan | Default tab. See below. |
 | Port scan | Ports and ranges (`22,80,443,8000-8010`) on one target; max ports per role (default Admin 100, User 25); up to 8 resolved IPs. |
@@ -219,6 +219,8 @@ Several tools send data to external services; these are listed under
   protocol versions or cipher suites, or test for TLS vulnerabilities.
 - **Live traceroute API**: `GET /api/traceroute?name=…&stream=1` and
   `POST /api/multi-traceroute` with `"stream": true` return newline-delimited JSON events.
+  Add `ptr=1` (or `"ptr": true`) to resolve each hop's PTR record; results arrive as
+  `{"type":"ptr","address":…,"names":[…]}` events.
 - **Live Nmap status**: the authenticated UI polls `GET /api/nmap-status` for
   scan state and elapsed time; status is scoped to the signed-in user.
 - **Magic scan** checks A, AAAA, CAA, CNAME, HTTPS, MX, NS, SOA, SRV and TXT for the

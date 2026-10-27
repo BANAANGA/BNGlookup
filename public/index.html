@@ -169,6 +169,10 @@
             <textarea id="multi-trace-input" rows="4" maxlength="4096" placeholder="e.g.&#10;example.com&#10;8.8.8.8" spellcheck="false"></textarea>
             <span>One target per line (up to 10). Each path is traced up to 20 hops and the routes are compared side by side.</span>
           </div>
+          <div class="port-scan-control" id="trace-ptr-control" hidden>
+            <label><input id="trace-ptr-input" type="checkbox"> Look up the PTR record (reverse DNS host name) for every hop</label>
+            <span>Each responding router address is resolved with the server's default DNS-over-HTTPS provider.</span>
+          </div>
           <div class="scan-extra-control scan-port-control" id="bulk-port-control" hidden>
             <label for="bulk-port-input">TCP port to scan</label>
             <input id="bulk-port-input" type="number" min="1" max="65535" placeholder="e.g. 443" inputmode="numeric">
