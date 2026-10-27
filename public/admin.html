@@ -8,6 +8,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="stylesheet" href="/styles.css">
     <script src="/branding.js" defer></script>
+    <script src="/about.js" defer></script>
     <script src="/admin.js" defer></script>
   </head>
   <body>
@@ -65,6 +66,7 @@
           <button class="settings-tab" id="certificate-tab" type="button" role="tab" aria-selected="false" aria-controls="certificate-panel" tabindex="-1">SSL certificate</button>
           <button class="settings-tab" id="users-tab" type="button" role="tab" aria-selected="false" aria-controls="users-panel" tabindex="-1">Users</button>
           <button class="settings-tab" id="mail-tab" type="button" role="tab" aria-selected="false" aria-controls="mail-panel" tabindex="-1">Email</button>
+          <button class="settings-tab" id="about-tab" type="button" role="tab" aria-selected="false" aria-controls="about-panel" tabindex="-1">About page</button>
         </div>
         <form id="settings-form">
           <section class="settings-panel" id="general-panel" role="tabpanel" aria-labelledby="general-tab">
@@ -186,6 +188,21 @@
             <input id="mail-test-to" name="to" type="email" maxlength="254" autocomplete="email" required>
             <button class="submit-button" type="submit"><span>Send test email</span><span aria-hidden="true">→</span></button>
           </form>
+        </section>
+        <section class="settings-panel" id="about-panel" role="tabpanel" aria-labelledby="about-tab" hidden>
+          <h2>About page</h2>
+          <p class="form-hint">Content for the public <a href="/about" target="_blank" rel="noopener">About page</a>, linked in the site footer. Supports a small Markdown subset: <code># Heading</code>, <code>**bold**</code>, <code>*italic*</code>, <code>`code`</code>, <code>[link](https://…)</code>, <code>- lists</code>, <code>1. lists</code>, <code>&gt; quotes</code>, <code>---</code> and <code>```</code> code blocks. HTML is shown as text.</p>
+          <form id="about-form" class="admin-create-form about-form">
+            <label for="about-content-input">Content</label>
+            <textarea id="about-content-input" name="content" rows="16" maxlength="20000" spellcheck="true"></textarea>
+            <p class="form-hint" id="about-status"></p>
+            <div class="about-actions">
+              <button class="submit-button" type="submit"><span>Save About page</span><span aria-hidden="true">→</span></button>
+              <button class="dash-version-check" id="about-reset" type="button">Reset to default</button>
+            </div>
+          </form>
+          <h2 class="policy-heading">Preview</h2>
+          <div class="about-content about-preview" id="about-preview"></div>
         </section>
       </section>
     </main>

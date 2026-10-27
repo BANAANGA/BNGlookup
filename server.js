@@ -77,6 +77,8 @@ const staticFiles = new Set([
   "/admin-logs.html",
   "/admin-stats.html",
   "/admin-dashboard.html",
+  "/about.html",
+  "/about.js",
   "/styles.css",
   "/app.js",
   "/account.js",
@@ -960,7 +962,7 @@ function dnsQuestionType(type) {
   throw new Error("This record type is not supported for direct nameserver queries.");
 }
 
-function encodeDnsQuery(name, typeCode) {
+function encodeDnsQuery(name, typeCode, { dnssec = false, checkingDisabled = false } = {}) {
   const labels = name.replace(/\.$/, "").split(".");
   const encodedName = Buffer.concat([
     ...labels.map((label) => {
@@ -974,12 +976,17 @@ function encodeDnsQuery(name, typeCode) {
   ]);
   const header = Buffer.alloc(12);
   header.writeUInt16BE(Math.floor(Math.random() * 65536), 0);
-  header.writeUInt16BE(0x0100, 2);
+  // RD, plus AD to request the validation result and CD to skip validation when asked.
+  header.writeUInt16BE(0x0100 | (dnssec ? 0x0020 : 0) | (checkingDisabled ? 0x0010 : 0), 2);
   header.writeUInt16BE(1, 4);
   const questionTail = Buffer.alloc(4);
   questionTail.writeUInt16BE(typeCode, 0);
   questionTail.writeUInt16BE(1, 2);
-  return Buffer.concat([header, encodedName, questionTail]);
+  if (!dnssec) return Buffer.concat([header, encodedName, questionTail]);
+  header.writeUInt16BE(1, 10);
+  // EDNS(0) OPT record: root name, type 41, 4096-byte UDP size, DO bit set.
+  const opt = Buffer.from([0, 0, 41, 0x10, 0x00, 0, 0, 0x80, 0, 0, 0]);
+  return Buffer.concat([header, encodedName, questionTail, opt]);
 }
 
 function decodeDnsName(packet, start) {
@@ -1067,6 +1074,28 @@ function decodeDnsRecordData(packet, typeCode, start, length) {
     }
     return chunks.join(" ");
   }
+  if ((typeCode === 43 || typeCode === 59) && length >= 4) {
+    return `${packet.readUInt16BE(start)} ${packet[start + 2]} ${packet[start + 3]} ${packet.subarray(start + 4, end).toString("hex").toUpperCase()}`;
+  }
+  if ((typeCode === 48 || typeCode === 60) && length >= 4) {
+    return `${packet.readUInt16BE(start)} ${packet[start + 2]} ${packet[start + 3]} ${packet.subarray(start + 4, end).toString("base64")}`;
+  }
+  if (typeCode === 46 && length >= 19) {
+    const covered = packet.readUInt16BE(start);
+    const signer = decodeDnsName(packet, start + 18);
+    const stamp = (seconds) => new Date(seconds * 1000).toISOString().replace(/[-:T]/g, "").slice(0, 14);
+    return [
+      dnsTypeNames[covered] || `TYPE${covered}`,
+      packet[start + 2],
+      packet[start + 3],
+      packet.readUInt32BE(start + 4),
+      stamp(packet.readUInt32BE(start + 8)),
+      stamp(packet.readUInt32BE(start + 12)),
+      packet.readUInt16BE(start + 16),
+      signer.name,
+      packet.subarray(signer.nextOffset, end).toString("base64"),
+    ].join(" ");
+  }
   if (typeCode === 257 && length >= 2) {
     const flags = packet[start];
     const tagLength = packet[start + 1];
@@ -1119,6 +1148,7 @@ function parseDnsPacket(packet) {
   return {
     status: flags & 0x000f,
     truncated: Boolean(flags & 0x0200),
+    authenticated: Boolean(flags & 0x0020),
     answers: sections[0],
     authority: sections[1],
     additional: sections[2],
@@ -1255,12 +1285,14 @@ function queryDohOverHttp2(url, timeoutMs) {
   });
 }
 
-async function queryDohDns(name, type) {
+async function queryDohDns(name, type, { dnssec = false, checkingDisabled = false } = {}) {
   const resolver = getDnsResolver();
   if (resolver.format === "json") {
     const queryUrl = new URL(resolver.endpoint);
     queryUrl.searchParams.set("name", name);
     queryUrl.searchParams.set("type", type);
+    if (dnssec) queryUrl.searchParams.set("do", "1");
+    if (checkingDisabled) queryUrl.searchParams.set("cd", "1");
     const response = await fetch(queryUrl, {
       headers: { accept: "application/dns-json" },
       signal: AbortSignal.timeout(8000),
@@ -1276,13 +1308,14 @@ async function queryDohDns(name, type) {
       type,
       status: data.Status,
       statusText: dnsStatusNames[data.Status] || `DNS status ${data.Status}`,
+      authenticated: data.AD === true,
       answers: data.Answer || [],
       authority: data.Authority || [],
       additional: data.Additional || [],
     };
   }
 
-  const query = encodeDnsQuery(name, dnsQuestionType(type));
+  const query = encodeDnsQuery(name, dnsQuestionType(type), { dnssec, checkingDisabled });
   const queryUrl = new URL(resolver.endpoint);
   queryUrl.searchParams.set("dns", query.toString("base64url"));
   let packet;
@@ -1307,9 +1340,178 @@ async function queryDohDns(name, type) {
     type,
     status: result.status,
     statusText: dnsStatusNames[result.status] || `DNS status ${result.status}`,
+    authenticated: result.authenticated,
     answers: result.answers,
     authority: result.authority,
     additional: result.additional,
+  };
+}
+
+const dnssecAlgorithms = {
+  1: { name: "RSA/MD5", status: "prohibited" },
+  3: { name: "DSA/SHA-1", status: "prohibited" },
+  5: { name: "RSA/SHA-1", status: "deprecated" },
+  6: { name: "DSA-NSEC3-SHA1", status: "prohibited" },
+  7: { name: "RSASHA1-NSEC3-SHA1", status: "deprecated" },
+  8: { name: "RSA/SHA-256", status: "ok" },
+  10: { name: "RSA/SHA-512", status: "ok" },
+  12: { name: "GOST R 34.10-2001", status: "prohibited" },
+  13: { name: "ECDSA P-256/SHA-256", status: "ok" },
+  14: { name: "ECDSA P-384/SHA-384", status: "ok" },
+  15: { name: "Ed25519", status: "ok" },
+  16: { name: "Ed448", status: "ok" },
+};
+const dnssecDigestTypes = { 1: "SHA-1", 2: "SHA-256", 3: "GOST R 34.11-94", 4: "SHA-384" };
+
+function dnskeyTag(flags, protocol, algorithm, publicKey) {
+  const rdata = Buffer.concat([Buffer.from([flags >> 8, flags & 255, protocol, algorithm]), publicKey]);
+  let accumulator = 0;
+  for (let index = 0; index < rdata.length; index += 1) {
+    accumulator += index & 1 ? rdata[index] : rdata[index] << 8;
+  }
+  accumulator += (accumulator >> 16) & 0xffff;
+  return accumulator & 0xffff;
+}
+
+function dnssecRecordsOfType(data, typeName, owner) {
+  const normalize = (value) => String(value || "").toLowerCase().replace(/\.$/, "");
+  return (data?.answers || []).filter((answer) =>
+    (answer.typeName === typeName || dnsTypeNames[answer.type] === typeName) &&
+    normalize(answer.name) === normalize(owner));
+}
+
+async function checkDnssec(domain) {
+  const resolver = getDnsResolver();
+  const settle = (promise) => promise.then((data) => ({ data }), (error) => ({ error }));
+  const [dsResult, dnskeyResult, soaResult] = await Promise.all([
+    settle(queryDohDns(domain, "DS", { dnssec: true })),
+    settle(queryDohDns(domain, "DNSKEY", { dnssec: true })),
+    settle(queryDohDns(domain, "SOA", { dnssec: true })),
+  ]);
+  if (soaResult.error) {
+    return {
+      domain,
+      resolver: resolver.label,
+      status: "error",
+      summary: soaResult.error.name === "TimeoutError" ? "The DNS provider timed out." : "The DNS provider could not be queried.",
+      ds: [],
+      dnskeys: [],
+      signatures: [],
+      issues: [],
+    };
+  }
+  let bogus = false;
+  let dsData = dsResult.data;
+  let dnskeyData = dnskeyResult.data;
+  let soaData = soaResult.data;
+  if (soaResult.data.status === 2) {
+    const unchecked = await settle(queryDohDns(domain, "SOA", { dnssec: true, checkingDisabled: true }));
+    bogus = unchecked.data?.status === 0;
+    if (bogus) {
+      // Fetch the records without validation so the report can show why validation fails.
+      const [uncheckedDs, uncheckedKeys] = await Promise.all([
+        settle(queryDohDns(domain, "DS", { dnssec: true, checkingDisabled: true })),
+        settle(queryDohDns(domain, "DNSKEY", { dnssec: true, checkingDisabled: true })),
+      ]);
+      dsData = uncheckedDs.data || dsData;
+      dnskeyData = uncheckedKeys.data || dnskeyData;
+      soaData = unchecked.data;
+    }
+  }
+  const dnskeys = dnssecRecordsOfType(dnskeyData, "DNSKEY", domain).map((record) => {
+    const [flags, protocol, algorithm, ...keyParts] = String(record.data).split(" ");
+    const key = Buffer.from(keyParts.join(""), "base64");
+    const flagValue = Number(flags);
+    return {
+      flags: flagValue,
+      role: flagValue & 1 ? "KSK" : "ZSK",
+      algorithm: Number(algorithm),
+      algorithmName: dnssecAlgorithms[algorithm]?.name || `Algorithm ${algorithm}`,
+      keyTag: dnskeyTag(flagValue, Number(protocol), Number(algorithm), key),
+      keyBytes: key.length,
+    };
+  });
+  const ds = dnssecRecordsOfType(dsData, "DS", domain).map((record) => {
+    const [keyTag, algorithm, digestType, ...digest] = String(record.data).split(" ");
+    return {
+      keyTag: Number(keyTag),
+      algorithm: Number(algorithm),
+      algorithmName: dnssecAlgorithms[algorithm]?.name || `Algorithm ${algorithm}`,
+      digestType: Number(digestType),
+      digestTypeName: dnssecDigestTypes[digestType] || `Digest ${digestType}`,
+      digest: digest.join("").toUpperCase(),
+      matchesKey: dnskeys.some((key) => key.keyTag === Number(keyTag) && key.algorithm === Number(algorithm)),
+    };
+  });
+  const signatures = [...dnssecRecordsOfType(dnskeyData, "RRSIG", domain), ...dnssecRecordsOfType(soaData, "RRSIG", domain)]
+    .map((record) => {
+      const [typeCovered, algorithm, , , expiration, inception, keyTag, signer] = String(record.data).split(" ");
+      const parseStamp = (value) => /^\d{14}$/.test(value || "")
+        ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}T${value.slice(8, 10)}:${value.slice(10, 12)}:${value.slice(12, 14)}Z`
+        : null;
+      return {
+        typeCovered,
+        algorithm: Number(algorithm),
+        algorithmName: dnssecAlgorithms[algorithm]?.name || `Algorithm ${algorithm}`,
+        keyTag: Number(keyTag),
+        signer: String(signer || "").replace(/\.$/, ""),
+        inception: parseStamp(inception),
+        expiration: parseStamp(expiration),
+      };
+    });
+  const issues = [];
+  const algorithmsInUse = new Set([...ds, ...dnskeys].map((entry) => entry.algorithm));
+  for (const algorithm of algorithmsInUse) {
+    const info = dnssecAlgorithms[algorithm];
+    if (info?.status === "prohibited") issues.push({ severity: "high", message: `Algorithm ${algorithm} (${info.name}) must not be used for DNSSEC signing (RFC 8624).` });
+    else if (info?.status === "deprecated") issues.push({ severity: "medium", message: `Algorithm ${algorithm} (${info.name}) is deprecated; move to ECDSA P-256 (13) or Ed25519 (15).` });
+  }
+  if (ds.some((entry) => entry.digestType === 1)) {
+    issues.push({ severity: "low", message: "A DS record uses a SHA-1 digest; publish a SHA-256 (type 2) DS record instead." });
+  }
+  if (ds.length && dnskeys.length && !ds.some((entry) => entry.matchesKey)) {
+    issues.push({ severity: "high", message: "No DS record matches a DNSKEY in the zone; the chain of trust is broken." });
+  }
+  const now = Date.now();
+  for (const signature of signatures) {
+    const expires = Date.parse(signature.expiration || "");
+    if (Number.isFinite(expires) && expires < now) {
+      issues.push({ severity: "high", message: `The RRSIG over ${signature.typeCovered} (key ${signature.keyTag}) expired on ${signature.expiration}.` });
+    } else if (Number.isFinite(expires) && expires - now < 7 * 86400_000) {
+      issues.push({ severity: "medium", message: `The RRSIG over ${signature.typeCovered} (key ${signature.keyTag}) expires soon (${signature.expiration}).` });
+    }
+  }
+  let status;
+  let summary;
+  if (bogus) {
+    status = "bogus";
+    summary = "DNSSEC validation fails: the resolver returns SERVFAIL unless checking is disabled. Resolvers that validate cannot resolve this domain.";
+  } else if (soaResult.data.authenticated && ds.length) {
+    status = "secure";
+    summary = "DNSSEC is enabled and the chain of trust validates.";
+  } else if (soaResult.data.authenticated) {
+    status = "secure";
+    summary = "Answers for this name are DNSSEC-validated (signed via a parent zone).";
+  } else if (!ds.length && dnskeys.length) {
+    status = "insecure";
+    summary = "The zone is signed, but the parent zone has no DS record, so the chain of trust is not established.";
+  } else if (!ds.length) {
+    status = "unsigned";
+    summary = "DNSSEC is not enabled for this domain.";
+  } else {
+    status = "indeterminate";
+    summary = "A DS record exists, but the resolver did not mark the answer as validated.";
+  }
+  return {
+    domain,
+    resolver: resolver.label,
+    status,
+    summary,
+    authenticated: soaResult.data.authenticated,
+    ds,
+    dnskeys,
+    signatures,
+    issues,
   };
 }
 
@@ -2080,6 +2282,10 @@ async function bulkScan(request, url, response) {
       error: error.message || "Unable to retrieve registration details.",
     }),
   );
+  const dnssecPromise = checkDnssec(domain).catch((error) => {
+    console.error("DNSSEC check failed:", error.message);
+    return { domain, status: "error", summary: "The DNSSEC check could not be completed.", ds: [], dnskeys: [], signatures: [], issues: [] };
+  });
   const certificateTransparencyPromise = discoverCertificateTransparencySubdomains(domain).then(
     ({ names, source }) => ({ names, source, error: null }),
     (error) => ({
@@ -2243,6 +2449,7 @@ async function bulkScan(request, url, response) {
     hostsWithRecords: hosts.filter((host) => host.records.length).length,
     registration: registrationResult.registration,
     registrationError: registrationResult.error,
+    dnssec: await dnssecPromise,
     emailSecurity: {
       spfRecords,
       rootSpfFound: spfRecords.some((record) => record.name === domain),
@@ -3833,6 +4040,77 @@ async function handleAdminVersion(request, url, response) {
     ...appBuild,
     repositoryUrl: `https://github.com/${appRepository}`,
     updateCheck: await getUpdateCheck(url.searchParams.get("refresh") === "1"),
+  });
+}
+
+const aboutContentLimit = 20000;
+const defaultAboutContent = `# About this site
+
+This site runs **BNGlookup**, a self-hosted DNS and network toolkit: DNS and reverse lookups, Whois, DNSSEC checks, dig, ping, traceroute, TLS tests and more.
+
+The administrator has not written a custom About page yet.
+
+Source code: [github.com/BANAANGA/BNGlookup](https://github.com/BANAANGA/BNGlookup)`;
+
+function readAboutContent() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'about_page'").get();
+  if (!row) return { content: defaultAboutContent, custom: false, updatedAt: null };
+  try {
+    const saved = JSON.parse(row.value);
+    return { content: String(saved.content || ""), custom: true, updatedAt: saved.updatedAt || null };
+  } catch {
+    return { content: defaultAboutContent, custom: false, updatedAt: null };
+  }
+}
+
+function handleAbout(request, response) {
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (appSetupRequired()) {
+    sendJson(response, 503, { error: "Complete initial administrator setup first.", setupRequired: true });
+    return;
+  }
+  sendJson(response, 200, readAboutContent());
+}
+
+function handleAdminAbout(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") {
+    sendJson(response, 200, { ...readAboutContent(), defaultContent: defaultAboutContent, limit: aboutContentLimit });
+    return;
+  }
+  if (request.method !== "PUT" && request.method !== "DELETE") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  if (request.method === "DELETE") {
+    database.prepare("DELETE FROM app_settings WHERE key = 'about_page'").run();
+    recordAdminLog("audit", request, "About page reset", null, 200, admin.username);
+    sendJson(response, 200, { ...readAboutContent(), defaultContent: defaultAboutContent, limit: aboutContentLimit });
+    return;
+  }
+  void readAuthBody(request, response).then((body) => {
+    if (!body) return;
+    const content = typeof body.content === "string" ? body.content.replace(/\r\n/g, "\n") : null;
+    if (content === null || content.length > aboutContentLimit) {
+      sendJson(response, 400, { error: `About page content must be text of at most ${aboutContentLimit.toLocaleString("en-US")} characters.` });
+      return;
+    }
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(content)) {
+      sendJson(response, 400, { error: "About page content contains unsupported control characters." });
+      return;
+    }
+    const saved = { content, updatedAt: new Date().toISOString() };
+    database.prepare(`
+      INSERT INTO app_settings (key, value) VALUES ('about_page', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(JSON.stringify(saved));
+    recordAdminLog("audit", request, "About page updated", `${content.length} characters`, 200, admin.username);
+    sendJson(response, 200, { ...saved, custom: true, defaultContent: defaultAboutContent, limit: aboutContentLimit });
   });
 }
 
@@ -5510,6 +5788,15 @@ async function lookup(request, url, response) {
     return;
   }
 
+  if (queryType === "DNSSEC") {
+    if (rawNameserver.trim()) {
+      sendJson(response, 400, { error: "The DNSSEC check uses the validating DNS-over-HTTPS resolver. Clear the custom nameserver." });
+      return;
+    }
+    sendJson(response, 200, { name: queryName, type: "DNSSEC", dnssecCheck: await checkDnssec(queryName.replace(/\.$/, "")) });
+    return;
+  }
+
   let nameserver;
   try {
     nameserver = await resolveNameserver(parseNameserver(rawNameserver));
@@ -5706,6 +5993,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/about") {
+    handleAbout(request, response);
+    return;
+  }
+
   if (url.pathname === "/api/branding") {
     if (request.method !== "GET") {
       sendJson(response, 405, { error: "Method not allowed." });
@@ -5804,6 +6096,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
 
   if (url.pathname === "/api/admin/system") {
     handleAdminSystem(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/about") {
+    handleAdminAbout(request, response);
     return;
   }
 
@@ -6068,7 +6365,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
   }
-  const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname;
+  const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname;
   if (!staticFiles.has(requestedPath)) {
     response.writeHead(404);
     response.end();

@@ -1179,3 +1179,29 @@ footer a:hover { color: #e4ffef; }
   font-size: 10px;
   cursor: pointer;
 }
+.email-auth-status.warning { color: #f0cb86; background: #2a2112; }
+.email-auth-status.danger { color: #ffb4b4; background: #2c1515; }
+.dnssec-summary { margin: 4px 0 10px; color: #ddd; font-size: 12px; }
+.dnssec-section h4 { margin: 14px 0 6px; color: #b9c7bd; font-size: 12px; }
+.dnssec-issues { margin: 0 0 8px; padding-left: 18px; font-size: 12px; }
+.dnssec-issue { margin: 3px 0; color: #ddd; }
+.dnssec-issue.high { color: #ffb4b4; }
+.dnssec-issue.medium { color: #f0cb86; }
+.dnssec-ok { color: #a9e5c5; }
+.dnssec-bad { color: #ffb4b4; }
+.dnssec-digest .copy-result { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; overflow-wrap: anywhere; }
+.about-card { max-width: 760px; }
+.about-content { color: #ddd; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.about-content h2 { margin: 6px 0 12px; color: #f1f1f1; font-size: 26px; }
+.about-content h3 { margin: 22px 0 8px; color: #f1f1f1; font-size: 18px; }
+.about-content h4 { margin: 18px 0 6px; color: #e4e4e4; font-size: 15px; }
+.about-content p, .about-content ul, .about-content ol { margin: 0 0 12px; }
+.about-content a { color: #8aeab1; }
+.about-content code { padding: 1px 5px; border-radius: 4px; background: #1b1b1b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.about-content pre { padding: 12px; overflow: auto; border: 1px solid #292929; border-radius: 8px; background: #0d0d0d; }
+.about-content pre code { padding: 0; background: none; }
+.about-content blockquote { margin: 0 0 12px; padding: 4px 12px; border-left: 3px solid #28583b; color: #b9c7bd; }
+.about-content hr { margin: 18px 0; border: 0; border-top: 1px solid #292929; }
+.about-preview { padding: 16px; border: 1px solid #292929; border-radius: 8px; background: #0d0d0d; }
+.about-form textarea { width: 100%; min-height: 280px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.about-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }

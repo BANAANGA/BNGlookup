@@ -563,6 +563,65 @@ resultPanel.addEventListener("click", (event) => {
   if (search.value) search.dispatchEvent(new Event("input", { bubbles: true }));
 });
 
+function renderDnssecSection(check) {
+  if (!check) return "";
+  const labels = {
+    secure: ["found", "Secure"],
+    unsigned: ["missing", "Not enabled"],
+    insecure: ["warning", "No chain of trust"],
+    bogus: ["danger", "Validation fails"],
+    indeterminate: ["warning", "Not validated"],
+    error: ["missing", "Unavailable"],
+  };
+  const [statusClass, statusLabel] = labels[check.status] || ["missing", check.status];
+  const table = (head, rows) => rows.length ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
+    <thead><tr>${head.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>` : "";
+  const dsRows = (check.ds || []).map((entry) => `
+    <tr>
+      <td>${copyableResult(entry.keyTag)}</td>
+      <td>${escapeHtml(`${entry.algorithm} · ${entry.algorithmName}`)}</td>
+      <td>${escapeHtml(`${entry.digestType} · ${entry.digestTypeName}`)}</td>
+      <td>${entry.matchesKey ? '<span class="dnssec-ok">Matches DNSKEY</span>' : '<span class="dnssec-bad">No matching key</span>'}</td>
+      <td class="dnssec-digest">${copyableResult(entry.digest)}</td>
+    </tr>`);
+  const keyRows = (check.dnskeys || []).map((key) => `
+    <tr>
+      <td>${copyableResult(key.keyTag)}</td>
+      <td>${escapeHtml(`${key.role} (flags ${key.flags})`)}</td>
+      <td>${escapeHtml(`${key.algorithm} · ${key.algorithmName}`)}</td>
+      <td>${escapeHtml(`${key.keyBytes} bytes`)}</td>
+    </tr>`);
+  const signatureRows = (check.signatures || []).map((signature) => `
+    <tr>
+      <td>${escapeHtml(signature.typeCovered)}</td>
+      <td>${copyableResult(signature.keyTag)}</td>
+      <td>${escapeHtml(signature.signer)}</td>
+      <td>${escapeHtml(signature.inception ? signature.inception.replace("T", " ").replace("Z", " UTC") : "")}</td>
+      <td>${escapeHtml(signature.expiration ? signature.expiration.replace("T", " ").replace("Z", " UTC") : "")}</td>
+    </tr>`);
+  const issues = (check.issues || []).map((issue) => `<li class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join("");
+  return `
+    <section class="email-auth dnssec-section">
+      <h3>DNSSEC <span class="email-auth-status ${statusClass}">${escapeHtml(statusLabel)}</span></h3>
+      <p class="dnssec-summary">${escapeHtml(check.summary || "")}</p>
+      ${issues ? `<ul class="dnssec-issues">${issues}</ul>` : ""}
+      ${dsRows.length ? `<h4>DS records at the parent zone</h4>${table(["Key tag", "Algorithm", "Digest", "Match", "Digest value"], dsRows)}` : ""}
+      ${keyRows.length ? `<h4>DNSKEY records</h4>${table(["Key tag", "Role", "Algorithm", "Key size"], keyRows)}` : ""}
+      ${signatureRows.length ? `<h4>Signatures (RRSIG)</h4>${table(["Covers", "Key tag", "Signer", "Valid from", "Expires"], signatureRows)}` : ""}
+      <p class="scan-disclaimer">Validated by ${escapeHtml(check.resolver || "the DNS-over-HTTPS resolver")} (AD flag ${check.authenticated ? "set" : "not set"}). A bogus result means validating resolvers refuse to answer for this domain.</p>
+    </section>`;
+}
+
+function renderDnssecResult(data) {
+  const check = data.dnssecCheck;
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">DNSSEC CHECK</p><h2>${copyableResult(check.domain)}</h2></div>
+    </div>
+    ${renderDnssecSection(check)}`;
+  resultPanel.hidden = false;
+}
+
 function renderScanResult(data) {
   const foundHosts = data.hosts.filter((host) => host.records.length);
   const scanRecordCount = foundHosts.reduce(
@@ -744,6 +803,7 @@ function renderScanResult(data) {
       ${registrationDetails}
       <p class="scan-disclaimer">Registration information is provided by RDAP, the modern WHOIS service. Contact details may be redacted or unavailable.</p>
     </section>
+    ${renderDnssecSection(data.dnssec)}
     <section class="email-auth">
       <h3>Email authentication</h3>
       <div class="email-auth-grid">
@@ -2055,6 +2115,7 @@ form.addEventListener("submit", async (event) => {
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "dig") renderDigResult(data);
     else if (requestMode === "scan") renderScanResult(data);
+    else if (data.dnssecCheck) renderDnssecResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Port scan" : "Bulk port scan");
     else {
       showResult(data);
