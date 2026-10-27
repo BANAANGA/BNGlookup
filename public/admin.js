@@ -125,7 +125,7 @@ function renderDnsResolverSetting(resolvers, selectedResolver) {
   `;
 }
 
-function renderPortScanSettings(policy) {
+function renderPortScanSettings(policy, zmapEnabled) {
   const roleSettings = ["admin", "user"].map((role) => `
     <fieldset class="port-scan-role">
       <legend>${role === "admin" ? "Administrators" : "Users"}</legend>
@@ -156,7 +156,11 @@ function renderPortScanSettings(policy) {
           </option>
         `).join("")}
       </select>
-      <p class="form-hint">The scan remains capped at 256 unique addresses total. IPv4 cannot be broader than /24 and IPv6 cannot be broader than /120.</p>
+      <label for="zmap-rate">zmap send rate (packets per second)</label>
+      <input id="zmap-rate" name="zmapRate" type="number" min="1000" max="100000" step="1" value="${policy.zmapRate}" required>
+      <p class="form-hint">${zmapEnabled
+    ? "zmap engine: enabled. IPv4 targets are SYN-scanned with zmap, up to 65,536 addresses (IPv4 /16). IPv6 targets still use TCP connect, capped at 256 addresses (/120)."
+    : "zmap engine: disabled. Scans use TCP connect and are capped at 256 addresses total, so IPv4 CIDRs broader than /24 will be rejected. Run with compose.zmap.yaml to enable zmap."}</p>
     </fieldset>
   `;
   portScanSettings.innerHTML = roleSettings + cidrSettings;
@@ -304,7 +308,7 @@ async function initializeAdmin() {
     trustedProxySetting.value = settings.trustedProxies;
     trustCloudflareProxiesSetting.checked = settings.trustCloudflareProxies;
     setCloudflareProxyStatus(settings.cloudflareProxyUpdatedAt);
-    renderPortScanSettings(settings.portScanPolicy);
+    renderPortScanSettings(settings.portScanPolicy, settings.zmapEnabled);
     nmapAllowedCidrs.value = settings.nmapAllowedCidrs;
     renderNmapLoginIps(settings.nmapLoginIps);
     siteTitleSetting.value = settings.branding.title;
@@ -370,6 +374,7 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
           ipv4: Number(portScanSettings.querySelector('[name="largestBulkCidrPrefixIpv4"]').value),
           ipv6: Number(portScanSettings.querySelector('[name="largestBulkCidrPrefixIpv6"]').value),
         },
+        zmapRate: Number(portScanSettings.querySelector('[name="zmapRate"]').value),
       };
     } else {
       throw new Error("Select a settings category first.");

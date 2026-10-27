@@ -154,7 +154,11 @@ const portScanPolicyDefaults = {
   maxPortsByRole: { admin: 100, user: 25 },
   localScanByRole: { admin: true, user: false },
   largestBulkCidrPrefix: { ipv4: 24, ipv6: 120 },
+  zmapRate: 10000,
 };
+const zmapEnabled = process.env.ZMAP_ENABLED === "true";
+const zmapRateLimits = { min: 1000, max: 100000 };
+const bulkScanLimits = { tcpConnect: 256, zmapIpv4: 65536 };
 const publicLookupDailyLimit = 15;
 database.exec(`
   PRAGMA foreign_keys = ON;
@@ -1595,7 +1599,11 @@ function addressFromBigInt(value, family) {
   ).join(":");
 }
 
-function parseBulkScanTargets(input, largestCidrPrefix = portScanPolicyDefaults.largestBulkCidrPrefix) {
+function parseBulkScanTargets(
+  input,
+  largestCidrPrefix = portScanPolicyDefaults.largestBulkCidrPrefix,
+  limits = { 4: bulkScanLimits.tcpConnect, 6: bulkScanLimits.tcpConnect, total: bulkScanLimits.tcpConnect },
+) {
   if (input.length > 8192) {
     throw invalidScanRequest("Target list must not exceed 8,192 characters.");
   }
@@ -1605,13 +1613,23 @@ function parseBulkScanTargets(input, largestCidrPrefix = portScanPolicyDefaults.
     throw invalidScanRequest("Enter no more than 256 IP addresses or CIDR blocks.");
   }
   const targets = new Set();
+  const counts = { 4: 0, 6: 0 };
+  const limitError = (family) => invalidScanRequest(limits[family] < limits.total
+    ? `Bulk scans are limited to ${limits[family].toLocaleString("en-US")} unique IPv${family} addresses.`
+    : `Bulk scans are limited to ${limits.total.toLocaleString("en-US")} unique IP addresses.`);
+  const addTarget = (address, family) => {
+    if (targets.has(address)) return;
+    targets.add(address);
+    counts[family] += 1;
+    if (counts[family] > limits[family] || targets.size > limits.total) throw limitError(family);
+  };
   for (const token of tokens) {
     const slash = token.indexOf("/");
     if (slash < 0) {
       if (!isIP(token)) {
         throw invalidScanRequest(`Invalid IP address or CIDR block: ${token}`);
       }
-      targets.add(token);
+      addTarget(token, isIP(token));
       continue;
     }
     const address = token.slice(0, slash);
@@ -1631,24 +1649,92 @@ function parseBulkScanTargets(input, largestCidrPrefix = portScanPolicyDefaults.
     }
     const hostBits = BigInt(width - prefix);
     const count = 1n << hostBits;
-    if (count > 256n) {
-      throw invalidScanRequest("Bulk scans are limited to 256 unique IP addresses.");
-    }
+    if (count > BigInt(Math.min(limits[family], limits.total))) throw limitError(family);
     const rawAddress = family === 4
       ? BigInt(address.split(".").reduce((value, octet) => (value << 8n) | BigInt(octet), 0n))
       : ipv6ToBigInt(address);
     const network = (rawAddress >> hostBits) << hostBits;
     for (let offset = 0n; offset < count; offset += 1n) {
-      targets.add(addressFromBigInt(network + offset, family));
-      if (targets.size > 256) {
-        throw invalidScanRequest("Bulk scans are limited to 256 unique IP addresses.");
-      }
+      addTarget(addressFromBigInt(network + offset, family), family);
     }
   }
-  if (targets.size > 256) {
-    throw invalidScanRequest("Bulk scans are limited to 256 unique IP addresses.");
-  }
   return [...targets];
+}
+
+function runZmap(addresses, port, rate) {
+  return new Promise((resolve, reject) => {
+    let directory;
+    let child;
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let finished = false;
+    let timer;
+    const finish = (error, value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (directory) fs.rm(directory, { recursive: true, force: true }, () => {});
+      if (error) reject(error);
+      else resolve(value);
+    };
+    try {
+      directory = fs.mkdtempSync(path.join(os.tmpdir(), "zmap-"));
+      const allowlist = path.join(directory, "allowlist.txt");
+      const blocklist = path.join(directory, "blocklist.txt");
+      // Eligibility is enforced by isScannableAddress; the empty blocklist stops
+      // zmap's default list from dropping private targets an admin has allowed.
+      fs.writeFileSync(allowlist, addresses.map((address) => `${address}/32`).join("\n") + "\n");
+      fs.writeFileSync(blocklist, "");
+      const args = [
+        "-p", String(port),
+        "-r", String(rate),
+        "-w", allowlist,
+        "-b", blocklist,
+        "-c", "5",
+        "-f", "saddr",
+        "-o", "-",
+        "-q",
+      ];
+      if (process.env.ZMAP_INTERFACE) args.push("-i", process.env.ZMAP_INTERFACE);
+      if (process.env.ZMAP_GATEWAY_MAC) args.push("-G", process.env.ZMAP_GATEWAY_MAC);
+      if (process.env.ZMAP_SOURCE_IP) args.push("-S", process.env.ZMAP_SOURCE_IP);
+      child = spawn(process.env.ZMAP_PATH || "zmap", args, { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      finish(error);
+      return;
+    }
+    const timeoutMs = Math.ceil(addresses.length / rate) * 1000 + 30000;
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      if (stdout.length < 4 * 1024 * 1024) stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < 16384) stderr += chunk;
+    });
+    child.on("error", (error) => finish(error.code === "ENOENT"
+      ? invalidScanRequest("zmap is enabled but is not installed on this server.", 503)
+      : error));
+    child.on("close", (code) => {
+      if (timedOut) {
+        finish(invalidScanRequest("The zmap scan took too long and was stopped.", 504));
+        return;
+      }
+      if (code !== 0) {
+        console.error(`zmap exited with code ${code}: ${stderr.trim().split("\n").slice(-3).join(" | ")}`);
+        const permission = /permission|operation not permitted|pcap|socket/i.test(stderr);
+        finish(invalidScanRequest(permission
+          ? "zmap could not open a raw socket. Run the container with compose.zmap.yaml (NET_RAW and NET_ADMIN)."
+          : "zmap could not complete the scan. Check the server log for details.", 503));
+        return;
+      }
+      const eligible = new Set(addresses);
+      finish(null, new Set(stdout.split("\n").map((line) => line.trim()).filter((line) => eligible.has(line))));
+    });
+  });
 }
 
 async function runCustomPortScan(request, response) {
@@ -1708,17 +1794,70 @@ async function runBulkPortScan(request, response) {
       throw invalidScanRequest("Enter a TCP port between 1 and 65535.");
     }
     const targetsInput = typeof body.targets === "string" ? body.targets : "";
-    const addresses = parseBulkScanTargets(targetsInput, policy.largestBulkCidrPrefix);
-    request.logDetails = JSON.stringify({ targets: addresses, port });
-    const data = await scanTcpTargets(
-      "Bulk IP targets",
-      addresses,
-      [port],
-      256,
-      (address) => address,
-      policy.localScanByRole[user.role],
-    );
-    sendJson(response, 200, data);
+    const limits = zmapEnabled
+      ? { 4: bulkScanLimits.zmapIpv4, 6: bulkScanLimits.tcpConnect, total: bulkScanLimits.zmapIpv4 + bulkScanLimits.tcpConnect }
+      : { 4: bulkScanLimits.tcpConnect, 6: bulkScanLimits.tcpConnect, total: bulkScanLimits.tcpConnect };
+    let addresses;
+    try {
+      addresses = parseBulkScanTargets(targetsInput, policy.largestBulkCidrPrefix, limits);
+    } catch (error) {
+      if (!zmapEnabled && error.statusCode === 400 && /limited to/.test(error.message)) {
+        error.message += " Larger IPv4 ranges need the zmap engine (see compose.zmap.yaml).";
+      }
+      throw error;
+    }
+    request.logDetails = JSON.stringify({
+      targets: addresses.length > 256 ? targetsInput.slice(0, 2048) : addresses,
+      addressCount: addresses.length,
+      port,
+      engine: zmapEnabled ? "zmap" : "tcp-connect",
+    });
+    if (!zmapEnabled) {
+      const data = await scanTcpTargets(
+        "Bulk IP targets",
+        addresses,
+        [port],
+        bulkScanLimits.tcpConnect,
+        (address) => address,
+        policy.localScanByRole[user.role],
+      );
+      sendJson(response, 200, { ...data, engine: "tcp-connect" });
+      return;
+    }
+
+    const allowLocal = policy.localScanByRole[user.role];
+    const eligible = addresses.filter((address) => isScannableAddress(address, allowLocal));
+    const ipv4 = eligible.filter((address) => isIP(address) === 4);
+    const ipv6 = eligible.filter((address) => isIP(address) === 6);
+    let openIpv4 = new Set();
+    if (ipv4.length) {
+      if (!acquireHeavyJob("zmap")) {
+        throw invalidScanRequest("Another bulk port scan is running. Try again shortly.", 503);
+      }
+      try {
+        openIpv4 = await runZmap(ipv4, port, policy.zmapRate);
+      } finally {
+        releaseHeavyJob("zmap");
+      }
+    }
+    const ipv6Data = ipv6.length
+      ? await scanTcpTargets("Bulk IP targets", ipv6, [port], bulkScanLimits.tcpConnect, (address) => address, allowLocal)
+      : { results: [] };
+    const results = [
+      ...ipv4.filter((address) => openIpv4.has(address))
+        .map((address) => ({ target: address, address, openPorts: [port] })),
+      ...ipv6Data.results.filter((result) => result.openPorts.length),
+    ];
+    sendJson(response, 200, {
+      enabled: true,
+      engine: "zmap",
+      openOnly: true,
+      scanLabel: "Bulk IP targets",
+      portsChecked: 1,
+      addressesScanned: eligible.length,
+      addressesSkipped: addresses.length - eligible.length,
+      results,
+    });
   } catch (error) {
     const statusCode = error.statusCode || 500;
     if (statusCode === 500) console.error("Bulk port scan failed:", error);
@@ -2273,13 +2412,17 @@ function getPortScanPolicy() {
           : portScanPolicyDefaults.localScanByRole[role],
       ])),
       largestBulkCidrPrefix: Object.fromEntries(["ipv4", "ipv6"].map((family) => {
-        const minimumPrefix = family === "ipv4" ? 24 : 120;
+        const minimumPrefix = family === "ipv4" ? 16 : 120;
         const maximumPrefix = family === "ipv4" ? 32 : 128;
         const prefix = saved.largestBulkCidrPrefix?.[family];
         return [family, Number.isInteger(prefix) && prefix >= minimumPrefix && prefix <= maximumPrefix
           ? prefix
           : portScanPolicyDefaults.largestBulkCidrPrefix[family]];
       })),
+      zmapRate: Number.isInteger(saved.zmapRate) &&
+        saved.zmapRate >= zmapRateLimits.min && saved.zmapRate <= zmapRateLimits.max
+        ? saved.zmapRate
+        : portScanPolicyDefaults.zmapRate,
     };
   } catch {
     return structuredClone(portScanPolicyDefaults);
@@ -2930,6 +3073,7 @@ function handleAdminSettings(request, response) {
       featureAccess: getFeatureAccess(),
       features: featureNames,
       portScanPolicy: getPortScanPolicy(),
+      zmapEnabled,
       nmapAllowedCidrs: getManualNmapAllowedCidrs().entries.join("\n"),
       nmapLoginIps: getNmapLoginIps(),
       defaultDnsResolver: getDefaultResolverId(),
@@ -2952,6 +3096,9 @@ function handleAdminSettings(request, response) {
     const portScanPolicy = Object.hasOwn(body, "portScanPolicy")
       ? body.portScanPolicy
       : getPortScanPolicy();
+    if (portScanPolicy && typeof portScanPolicy === "object" && !Object.hasOwn(portScanPolicy, "zmapRate")) {
+      portScanPolicy.zmapRate = getPortScanPolicy().zmapRate;
+    }
     let nmapAllowedCidrs = getManualNmapAllowedCidrs();
     if (Object.hasOwn(body, "nmapAllowedCidrs")) {
       try {
@@ -3025,13 +3172,21 @@ function handleAdminSettings(request, response) {
     }
     if (!portScanPolicy?.largestBulkCidrPrefix ||
       !Number.isInteger(portScanPolicy.largestBulkCidrPrefix.ipv4) ||
-      portScanPolicy.largestBulkCidrPrefix.ipv4 < 24 ||
+      portScanPolicy.largestBulkCidrPrefix.ipv4 < 16 ||
       portScanPolicy.largestBulkCidrPrefix.ipv4 > 32 ||
       !Number.isInteger(portScanPolicy.largestBulkCidrPrefix.ipv6) ||
       portScanPolicy.largestBulkCidrPrefix.ipv6 < 120 ||
       portScanPolicy.largestBulkCidrPrefix.ipv6 > 128) {
       sendJson(response, 400, {
-        error: "Bulk scan CIDR limits must be IPv4 /24–/32 and IPv6 /120–/128.",
+        error: "Bulk scan CIDR limits must be IPv4 /16–/32 and IPv6 /120–/128.",
+      });
+      return;
+    }
+    if (!Number.isInteger(portScanPolicy.zmapRate) ||
+      portScanPolicy.zmapRate < zmapRateLimits.min ||
+      portScanPolicy.zmapRate > zmapRateLimits.max) {
+      sendJson(response, 400, {
+        error: `The zmap send rate must be between ${zmapRateLimits.min.toLocaleString("en-US")} and ${zmapRateLimits.max.toLocaleString("en-US")} packets per second.`,
       });
       return;
     }
@@ -4160,8 +4315,8 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4 };
-const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1 };
+const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0, zmap: 0 };
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
 

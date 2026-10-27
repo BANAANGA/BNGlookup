@@ -220,7 +220,7 @@ function setMode(nextMode) {
   tracePtrControl.hidden = !(traceroute || multiTraceroute);
   bulkTargetsHint.textContent = pingScan
     ? "Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses."
-    : "Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses.";
+    : "Separate targets with commas or new lines. IPv4 and IPv6 are supported; CIDR size follows the administrator's prefix limit (up to /16 for IPv4 when the server runs zmap).";
   customPortsInput.required = customPortScan;
   bulkTargetsInput.required = bulkPortScan || pingScan;
   multiTraceInput.required = multiTraceroute;
@@ -776,8 +776,12 @@ function renderPortScanResult(data, title) {
       <span>${copyableResult(`${data.portsChecked} TCP port(s) checked per address`)}</span>
     </div>
     ${data.addressesSkipped ? `<p class="detail-notice">${escapeHtml(data.addressesSkipped)} disallowed, reserved, or excess IP address(es) were skipped.</p>` : ""}
-    ${results || '<p class="empty-result">No eligible IP addresses were available to scan.</p>'}
-    <p class="scan-disclaimer">Only ports that accepted a TCP connection are listed. Scan only systems you are authorized to test.</p>`;
+    ${results || (data.openOnly && data.addressesScanned
+    ? '<p class="empty-result">The port was not open on any scanned address.</p>'
+    : '<p class="empty-result">No eligible IP addresses were available to scan.</p>')}
+    <p class="scan-disclaimer">${data.engine === "zmap"
+    ? "IPv4 addresses were scanned with zmap (TCP SYN); only addresses that answered with SYN-ACK are listed."
+    : "Only ports that accepted a TCP connection are listed."} Scan only systems you are authorized to test.</p>`;
   resultPanel.hidden = false;
 }
 

@@ -103,7 +103,7 @@
           </section>
           <section class="settings-panel" id="port-scan-panel" role="tabpanel" aria-labelledby="port-scan-tab" hidden>
             <h2>Port scan policy</h2>
-            <p class="form-hint">Port scans always require an account, even when the feature is marked Public. Private/local targets are enabled for administrators by default and remain unavailable to users until enabled here. Limits apply to unique TCP ports per target. Bulk scans remain capped at 256 unique addresses per request.</p>
+            <p class="form-hint">Port scans always require an account, even when the feature is marked Public. Private/local targets are enabled for administrators by default and remain unavailable to users until enabled here. Limits apply to unique TCP ports per target. Bulk scans are capped at 256 unique addresses per request, or 65,536 IPv4 addresses when the zmap engine is enabled.</p>
             <div id="port-scan-settings" class="port-scan-settings"></div>
             <h2 class="policy-heading">Nmap authorized networks</h2>
             <p class="form-hint">Nmap remains disabled until an administrator adds authorized CIDR ranges or a user signs in. Successful logins add the observed client IP as one exact host (/32 or /128) for 30 days. The observed IP follows the Trusted reverse proxies setting. The combined allowlist is limited to 254 entries; when full, the oldest automatic entry is replaced. Manual CIDRs are never replaced.</p>
