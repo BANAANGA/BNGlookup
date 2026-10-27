@@ -15,7 +15,7 @@ small Docker container with no application dependencies.
 **Lookup tools** (one tabbed header on every page, plus a search bar below it)
 
 - **Auto lookup**: detects domains/URLs, IPv4/IPv6 and MAC addresses and picks the right tool.
-- **DNS lookup**: A, AAAA, ANY, CAA, CNAME, HTTPS, MX, NS, PTR, SOA, SRV, SSHFP, SVCB, TLSA, TXT, or any type by name/number.
+- **DNS lookup**: A, AAAA, ANY, CAA, CNAME, DNSKEY, DS, HTTPS, MX, NS, PTR, SOA, SRV, SSHFP, SVCB, TLSA, TXT, or any type by name/number, plus a **DNSSEC** validation check.
 - **Reverse lookup**: PTR records for IPv4/IPv6, with IP WHOIS data.
 - **Whois**: RDAP registration data for domains and IPs (registrar, dates, status, network range, ASN, contacts) and a nameserver comparison.
 - **Dig**: run a custom `dig` command (`[@server] name [type] [class] +options`) and see the raw output.
@@ -24,7 +24,7 @@ small Docker container with no application dependencies.
 - **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status, plus an optional full TLS test with an SSL Labs-style A+–F grade.
 - **Ping scan**: one echo request to every host in a list or CIDR block.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side, with optional PTR (reverse DNS) lookup for every hop.
-- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
+- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
 - **Port scan / Bulk port scan**: custom TCP ports on one target, or one port across many addresses.
 - **Nmap**: bounded TCP profiles for one authorized target at a time, with live status and elapsed time.
 
@@ -194,7 +194,7 @@ Several tools send data to external services; these are listed under
 
 | Tool | Limits and defaults |
 | --- | --- |
-| DNS lookup | Common types or any type by name/code. `ANY` may return incomplete data. |
+| DNS lookup | Common types or any type by name/code. `ANY` may return incomplete data. Choose **DNSSEC** for a validation check (see below). |
 | Reverse lookup | IPv4/IPv6 PTR; shows IP WHOIS. |
 | Whois | RDAP via `rdap.org`; missing ASNs are resolved through RIPE Stat, with `ipwho.is` as fallback. Contacts may be redacted. |
 | Dig | Runs the real `dig` binary (no shell) with one query: `@server`, name, type, class, `-t -c -q -x -p -4 -6 -u`, and an allowlist of `+options` (`+short`, `+dnssec`, `+trace`, `+tcp`, `+nsid`, `+subnet=`, `+noall +answer`, …). `+time` ≤ 10 s, `+tries` ≤ 3, 30 s overall limit, 256 KB output. File, key and bind-address flags (`-f`, `-k`, `-y`, `-b`) are rejected. A private `@server` follows the role's local-network setting; without `@server` the container's resolver is used. |
@@ -243,6 +243,15 @@ Several tools send data to external services; these are listed under
   `{"type":"ptr","address":…,"names":[…]}` events.
 - **Live Nmap status**: the authenticated UI polls `GET /api/nmap-status` for
   scan state and elapsed time; status is scoped to the signed-in user.
+- **DNSSEC check** (DNS lookup type *DNSSEC* and every Magic scan) queries DS, DNSKEY and
+  SOA with the EDNS DO bit through the configured DoH resolver and reads its AD
+  (validated) flag. It reports **Secure**, **Not enabled**, **No chain of trust**
+  (signed zone without a DS record at the parent) or **Validation fails** (the
+  resolver returns SERVFAIL unless checking is disabled), lists DS records with
+  their matching DNSKEY key tags, DNSKEYs (KSK/ZSK) and RRSIG validity, and warns
+  about deprecated algorithms, SHA-1 DS digests, mismatched DS records and
+  signatures that are expired or expire within 7 days. It does not use a custom
+  nameserver, since validation needs a validating resolver.
 - **Magic scan** checks A, AAAA, CAA, CNAME, HTTPS, MX, NS, SOA, SRV and TXT for the
   domain, common subdomains (`www`, `mail`, `api`, `staging`, …) and provider
   verification names (AWS/SES, Azure, Google Cloud, Cloudflare, Vercel, Netlify,
@@ -324,6 +333,12 @@ Several tools send data to external services; these are listed under
   the database and its backups as sensitive.
 
 ## Admin settings
+
+- **About page**: Settings → About page edits the public `/about` page (linked in
+  the footer) with a live preview. It supports a small Markdown subset (headings,
+  bold, italic, code, links, lists, quotes, rules and code blocks); HTML is shown
+  as text and only `http(s)`, `mailto:` and same-site links become links. Up to
+  20,000 characters; *Reset to default* restores the built-in text.
 
 Open **Admin** (Settings & users). Settings persist in SQLite at
 `/data/bnglookup.sqlite` on the `app_data` volume.

@@ -560,6 +560,57 @@ acmeRequestButton.addEventListener("click", async () => {
   }
 });
 
+const aboutForm = document.querySelector("#about-form");
+const aboutInput = document.querySelector("#about-content-input");
+const aboutPreview = document.querySelector("#about-preview");
+const aboutStatus = document.querySelector("#about-status");
+
+function renderAboutEditor(data) {
+  aboutInput.value = data.content;
+  aboutInput.maxLength = data.limit || 20000;
+  aboutPreview.innerHTML = renderAboutMarkdown(data.content);
+  aboutStatus.textContent = data.custom
+    ? `Custom content, last saved ${new Date(data.updatedAt).toLocaleString()}.`
+    : "Showing the default content. Save to publish your own.";
+}
+
+async function loadAboutEditor() {
+  try {
+    renderAboutEditor(await api("/api/admin/about"));
+  } catch (error) {
+    aboutStatus.textContent = error.message;
+  }
+}
+
+aboutInput.addEventListener("input", () => {
+  aboutPreview.innerHTML = renderAboutMarkdown(aboutInput.value);
+  aboutStatus.textContent = `${aboutInput.value.length.toLocaleString()} / ${aboutInput.maxLength.toLocaleString()} characters · unsaved changes`;
+});
+
+aboutForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    renderAboutEditor(await api("/api/admin/about", {
+      method: "PUT",
+      body: JSON.stringify({ content: aboutInput.value }),
+    }));
+    showAdminSuccess("About page saved.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+document.querySelector("#about-reset").addEventListener("click", async () => {
+  if (!window.confirm("Replace the About page with the default content?")) return;
+  try {
+    renderAboutEditor(await api("/api/admin/about", { method: "DELETE" }));
+    showAdminSuccess("About page reset to the default content.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
 loadCertificate();
+loadAboutEditor();
 
 initializeAdmin();
