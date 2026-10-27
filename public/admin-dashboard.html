@@ -55,6 +55,7 @@
         <p class="account-description">Live resource usage, activity and the latest queries. Updates every 3 seconds.</p>
       </section>
       <p class="error-message" id="dash-error" role="alert" hidden></p>
+      <p class="dash-update-banner" id="dash-update-banner" role="status" hidden></p>
       <p class="logs-status" id="dash-status" role="status">Loading…</p>
       <section class="stats-cards dash-gauges" aria-label="Resource usage">
         <article class="stats-card"><span>CPU usage</span><strong id="g-cpu">—</strong><div class="gauge"><i id="b-cpu"></i></div><small id="s-cpu"></small></article>
@@ -77,6 +78,13 @@
           <h2>Top tools (24 h)</h2>
           <div id="dash-top" class="stats-top-queries"></div>
         </article>
+      </section>
+      <section class="account-card admin-card stats-panel dash-version">
+        <div class="dash-version-heading">
+          <h2>Version</h2>
+          <button class="dash-version-check" id="dash-version-check" type="button">Check for updates</button>
+        </div>
+        <div class="detail-list" id="dash-version"><div class="detail-row"><span>Loading…</span></div></div>
       </section>
       <section class="account-card admin-card stats-panel dash-latest">
         <h2>Latest queries</h2>
