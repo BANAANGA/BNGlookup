@@ -158,5 +158,67 @@ document.querySelector("#admin-logout").addEventListener("click", async () => {
   window.location.assign("/");
 });
 
+function formatIsoTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : `${date.toLocaleString(undefined, { timeZone: "UTC" })} UTC`;
+}
+
+function formatVersion(version) {
+  return /^\d/.test(version) ? `v${version}` : version;
+}
+
+function renderVersion(data) {
+  const update = data.updateCheck;
+  const commit = data.commit
+    ? `<a href="${escapeHtml(`${data.repositoryUrl}/commit/${data.commit}`)}" target="_blank" rel="noopener noreferrer">${escapeHtml(data.commit.slice(0, 7))}</a>`
+    : "—";
+  let status;
+  if (!update.enabled) status = "Update check disabled (UPDATE_CHECK=false)";
+  else if (update.error && !update.latestVersion) status = `Could not check: ${update.error}`;
+  else if (update.updateAvailable === true) status = `Update available: ${update.latestVersion}`;
+  else if (update.updateAvailable === false) status = "Up to date";
+  else status = "Development build; compare with the latest release";
+  const statusClass = update.updateAvailable === true ? "warning" : update.updateAvailable === false ? "success" : "";
+  const rows = [
+    ["Running version", escapeHtml(data.version === "dev" ? "dev (local build)" : formatVersion(data.version))],
+    ["Commit", commit],
+    ["Built", escapeHtml(data.buildDate ? formatIsoTime(data.buildDate) : "—")],
+    ["Latest release", update.latestVersion
+      ? `<a href="${escapeHtml(update.latestUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(update.latestVersion)}</a>${update.publishedAt ? escapeHtml(` · ${formatIsoTime(update.publishedAt)}`) : ""}`
+      : "—"],
+    ["Status", `<span class="logs-status-code ${statusClass}">${escapeHtml(status)}</span>`],
+    ["Last checked", escapeHtml(update.checkedAt ? formatIsoTime(update.checkedAt) : "—")],
+    ["Source code", `<a href="${escapeHtml(data.repositoryUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(data.repositoryUrl.replace("https://", ""))}</a>`],
+  ];
+  document.querySelector("#dash-version").innerHTML = rows.map(([label, value]) => `
+    <div class="detail-row"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`).join("");
+  const banner = document.querySelector("#dash-update-banner");
+  banner.hidden = update.updateAvailable !== true;
+  if (update.updateAvailable === true) {
+    banner.innerHTML = `A new version is available: <a href="${escapeHtml(update.latestUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(update.latestVersion)}</a> (running ${escapeHtml(formatVersion(data.version))}).`;
+  }
+}
+
+async function loadVersion(refreshCheck = false) {
+  const button = document.querySelector("#dash-version-check");
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/admin/version${refreshCheck ? "?refresh=1" : ""}`, {
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Unable to load version information.");
+    renderVersion(data);
+  } catch (error) {
+    document.querySelector("#dash-version").innerHTML = `<div class="detail-row"><span>${escapeHtml(error.message)}</span></div>`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+document.querySelector("#dash-version-check").addEventListener("click", () => loadVersion(true));
+
 refresh();
 schedule();
+loadVersion();

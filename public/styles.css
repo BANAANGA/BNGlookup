@@ -1125,3 +1125,28 @@ body {
 .tls-severity.danger { color: #ffb4b4; }
 .tls-all-findings { margin-top: 16px; }
 .tls-all-findings summary { cursor: pointer; color: #b9c7bd; font-size: 12px; }
+footer a { color: #b9c7bd; text-decoration: underline; text-underline-offset: 2px; }
+footer a:hover { color: #e4ffef; }
+.dash-version { margin-top: 14px; }
+.dash-version-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dash-version-check {
+  padding: 6px 10px;
+  border: 1px solid #28583b;
+  border-radius: 6px;
+  color: #e4ffef;
+  background: #14251a;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dash-version-check:disabled { opacity: .55; cursor: wait; }
+.dash-version a, .dash-update-banner a { color: #8aeab1; }
+.logs-status-code.warning { color: #f0cb86; background: #2a2112; }
+.dash-update-banner {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #5a4417;
+  border-radius: 8px;
+  color: #f0cb86;
+  background: #2a2112;
+  font-size: 12px;
+}

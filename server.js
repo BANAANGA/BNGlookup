@@ -3742,6 +3742,98 @@ function memoryInfo() {
   return { scope: "host", total: hostTotal, used: hostTotal - os.freemem() };
 }
 
+const appRepository = /^[\w.-]+\/[\w.-]+$/.test(process.env.UPDATE_REPOSITORY || "")
+  ? process.env.UPDATE_REPOSITORY
+  : "BANAANGA/BNGlookup";
+const appBuild = {
+  version: (process.env.APP_VERSION || "").trim() || "dev",
+  commit: /^[0-9a-f]{7,40}$/i.test(process.env.APP_COMMIT || "") ? process.env.APP_COMMIT : null,
+  buildDate: Number.isNaN(Date.parse(process.env.APP_BUILD_DATE || "")) ? null : new Date(process.env.APP_BUILD_DATE).toISOString(),
+};
+const updateCheckEnabled = process.env.UPDATE_CHECK !== "false";
+const updateCheckCacheMs = { success: 6 * 3600_000, failure: 30 * 60_000 };
+let updateCheckState = null;
+let updateCheckPromise = null;
+
+function parseVersion(value) {
+  const match = String(value || "").trim().match(/^v?(\d+(?:\.\d+){0,3})$/i);
+  return match ? match[1].split(".").map(Number) : null;
+}
+
+function compareVersions(left, right) {
+  const a = parseVersion(left);
+  const b = parseVersion(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const difference = (a[index] || 0) - (b[index] || 0);
+    if (difference) return Math.sign(difference);
+  }
+  return 0;
+}
+
+async function fetchLatestRelease() {
+  const response = await fetch(`https://api.github.com/repos/${appRepository}/releases/latest`, {
+    headers: { accept: "application/vnd.github+json", "user-agent": "BNGlookup-update-check" },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (response.status === 404) throw new Error("No published release was found.");
+  if (!response.ok) throw new Error(`GitHub returned HTTP ${response.status}.`);
+  const release = await response.json();
+  if (typeof release.tag_name !== "string") throw new Error("GitHub returned an invalid release.");
+  return {
+    version: release.tag_name.slice(0, 64),
+    url: typeof release.html_url === "string" && release.html_url.startsWith("https://github.com/")
+      ? release.html_url
+      : `https://github.com/${appRepository}/releases`,
+    publishedAt: typeof release.published_at === "string" ? release.published_at : null,
+  };
+}
+
+async function getUpdateCheck(force = false) {
+  if (!updateCheckEnabled) return { enabled: false };
+  const age = updateCheckState ? Date.now() - updateCheckState.checkedAt : Infinity;
+  const maxAge = updateCheckState?.error ? updateCheckCacheMs.failure : updateCheckCacheMs.success;
+  if (force || age > maxAge) {
+    updateCheckPromise ||= fetchLatestRelease()
+      .then((latest) => ({ checkedAt: Date.now(), latest }))
+      .catch((error) => ({
+        checkedAt: Date.now(),
+        latest: updateCheckState?.latest || null,
+        error: error.name === "TimeoutError" ? "GitHub did not respond in time." : error.message,
+      }))
+      .then((state) => {
+        updateCheckState = state;
+        return state;
+      })
+      .finally(() => { updateCheckPromise = null; });
+    await updateCheckPromise;
+  }
+  const latest = updateCheckState?.latest || null;
+  const comparison = latest ? compareVersions(latest.version, appBuild.version) : null;
+  return {
+    enabled: true,
+    checkedAt: updateCheckState ? new Date(updateCheckState.checkedAt).toISOString() : null,
+    latestVersion: latest?.version || null,
+    latestUrl: latest?.url || null,
+    publishedAt: latest?.publishedAt || null,
+    updateAvailable: comparison === null ? null : comparison > 0,
+    error: updateCheckState?.error || null,
+  };
+}
+
+async function handleAdminVersion(request, url, response) {
+  if (!requireAdmin(request, response)) return;
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  sendJson(response, 200, {
+    ...appBuild,
+    repositoryUrl: `https://github.com/${appRepository}`,
+    updateCheck: await getUpdateCheck(url.searchParams.get("refresh") === "1"),
+  });
+}
+
 function handleAdminSystem(request, response) {
   if (!requireAdmin(request, response)) return;
   if (request.method !== "GET") {
@@ -5504,6 +5596,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/admin/version") {
+    void handleAdminVersion(request, url, response);
+    return;
+  }
+
   if (url.pathname === "/api/admin/stats") {
     handleAdminStats(request, url, response);
     return;
@@ -5802,7 +5899,7 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 server.listen(port, host, () => {
-  console.log(`DNS lookup listening on ${host}:${port}`);
+  console.log(`DNS lookup ${appBuild.version} listening on ${host}:${port}`);
 });
 
 function applyTlsCertificate(credentials) {

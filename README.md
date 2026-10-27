@@ -157,6 +157,10 @@ build, so back it up the same way (see Update below).
 
 ## Update
 
+The admin **Dashboard** shows the running version, commit and build date, and
+checks GitHub for the latest release. When a newer release exists it shows a
+banner linking to the release notes.
+
 Accounts, settings, logs and certificates live in the `app_data` volume and
 survive updates. Use the same compose files you started with.
 
@@ -339,6 +343,8 @@ Environment variables:
 | `COOKIE_SECURE=true` | Set the cookie `Secure` attribute; use behind HTTPS. |
 | `HTTPS_PORT` | HTTPS listener port (default 8443). |
 | `DOH_ENDPOINT` | Extra custom DoH JSON endpoint, offered as a resolver choice. |
+| `UPDATE_CHECK=false` | Disable the dashboard's check for new releases (otherwise the server asks the GitHub API at most every 6 hours, only while an admin views the dashboard). |
+| `APP_VERSION`, `APP_COMMIT`, `APP_BUILD_DATE` | Build information shown on the dashboard. Set automatically by the release workflow as Docker build arguments; local builds show `dev`. |
 
 ## SSL certificate (ACME)
 

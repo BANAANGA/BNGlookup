@@ -27,6 +27,11 @@ RUN apk add --no-cache iputils-tracepath coreutils nmap nmap-scripts zmap \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
     /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
+ARG APP_VERSION=dev
+ARG APP_COMMIT=
+ARG APP_BUILD_DATE=
+ENV APP_VERSION=$APP_VERSION APP_COMMIT=$APP_COMMIT APP_BUILD_DATE=$APP_BUILD_DATE
+
 COPY server.js ./server.js
 COPY acme.js ./acme.js
 COPY mail.js ./mail.js
