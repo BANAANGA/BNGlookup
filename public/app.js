@@ -19,6 +19,8 @@ const nmapControl = document.querySelector("#nmap-control");
 const nmapScanType = document.querySelector("#nmap-scan-type");
 const multiTraceControl = document.querySelector("#multi-trace-control");
 const multiTraceInput = document.querySelector("#multi-trace-input");
+const tracePtrControl = document.querySelector("#trace-ptr-control");
+const tracePtrInput = document.querySelector("#trace-ptr-input");
 const bulkTargetsHint = document.querySelector("#bulk-targets-hint");
 const pingMethodControl = document.querySelector("#ping-method-control");
 const pingMethodInput = document.querySelector("#ping-method-input");
@@ -215,6 +217,7 @@ function setMode(nextMode) {
   bulkPortControl.hidden = !bulkPortScan;
   nmapControl.hidden = !nmapScan;
   multiTraceControl.hidden = !multiTraceroute;
+  tracePtrControl.hidden = !(traceroute || multiTraceroute);
   bulkTargetsHint.textContent = pingScan
     ? "Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses."
     : "Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses.";
@@ -1212,11 +1215,25 @@ function renderPingScanResult(data) {
   resultPanel.hidden = false;
 }
 
+function hopPtrNames(result, hop) {
+  return hop.ptr || result.ptr?.[hop.address]?.names;
+}
+
+function renderHopPtr(result, hop) {
+  if (!hop.address) return "";
+  const names = hopPtrNames(result, hop);
+  if (!names) return result.running ? '<span class="trace-silent">Looking up…</span>' : "";
+  if (hop.ptrError || result.ptr?.[hop.address]?.error) return '<span class="trace-silent">Lookup failed</span>';
+  if (!names.length) return '<span class="trace-silent">No PTR record</span>';
+  return names.map((name) => copyableResult(name)).join("<br>");
+}
+
 function renderTraceTable(result) {
   const rows = result.hops.map((hop) => `
     <tr>
       <td>${hop.hop}</td>
       <td>${hop.address ? copyableResult(hop.address) : '<span class="trace-silent">* no reply</span>'}</td>
+      ${result.showPtr ? `<td>${renderHopPtr(result, hop)}</td>` : ""}
       <td>${hop.rttMs === null ? "" : escapeHtml(`${hop.rttMs} ms`)}</td>
     </tr>`).join("");
   return `
@@ -1231,7 +1248,7 @@ function renderTraceTable(result) {
       </div>
       ${result.error ? `<p class="detail-notice">${escapeHtml(result.error)}</p>` : ""}
       ${rows ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
-        <thead><tr><th>Hop</th><th>Address</th><th>Response time</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
+        <thead><tr><th>Hop</th><th>Address</th>${result.showPtr ? "<th>Host name (PTR)</th>" : ""}<th>Response time</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
       ${result.partial ? '<p class="detail-notice">The trace took too long and was stopped; the path shown is incomplete.</p>' : ""}
     </section>`;
 }
@@ -1244,7 +1261,8 @@ function renderTraceComparison(results) {
     const hopNumber = index + 1;
     const cells = traced.map((result) => {
       const hop = result.hops.find((item) => item.hop === hopNumber);
-      return `<td>${hop?.address ? copyableResult(hop.address) : hop ? '<span class="trace-silent">*</span>' : ""}</td>`;
+      const ptrName = hop?.address && result.showPtr ? hopPtrNames(result, hop)?.[0] : null;
+      return `<td>${hop?.address ? copyableResult(hop.address) : hop ? '<span class="trace-silent">*</span>' : ""}${ptrName ? `<br>${copyableResult(ptrName, "port-target-address")}` : ""}</td>`;
     }).join("");
     return `<tr><td>${hopNumber}</td>${cells}</tr>`;
   }).join("");
@@ -1276,14 +1294,18 @@ function renderTracerouteResult(data, multiple) {
 async function streamTraceroute(multiple) {
   const rawTargets = multiple ? multiTraceInput.value : input.value;
   const targets = [...new Set(rawTargets.split(multiple ? /[\s,;]+/ : /\n/).map((item) => item.trim()).filter(Boolean))].slice(0, multiple ? 10 : 1);
-  const results = targets.map((target) => ({ target, hops: [], reached: false, running: true }));
+  const showPtr = tracePtrInput.checked;
+  const newEntry = (target) => ({ target, hops: [], reached: false, running: true, showPtr, ptr: {} });
+  const results = targets.map(newEntry);
+  const traceParams = new URLSearchParams({ name: input.value.trim(), stream: "1" });
+  if (showPtr) traceParams.set("ptr", "1");
   const response = multiple
     ? await fetch("/api/multi-traceroute", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ targets: rawTargets, stream: true }),
+      body: JSON.stringify({ targets: rawTargets, stream: true, ptr: showPtr }),
     })
-    : await fetch(`/api/traceroute?${new URLSearchParams({ name: input.value.trim(), stream: "1" })}`);
+    : await fetch(`/api/traceroute?${traceParams}`);
   if (response.status === 401) {
     const next = `${window.location.pathname}${window.location.search}`;
     window.location.assign(`/login.html?next=${encodeURIComponent(next)}`);
@@ -1293,14 +1315,18 @@ async function streamTraceroute(multiple) {
     const data = await readApiResponse(response);
     throw new Error(data.error || "Traceroute failed.");
   }
-  if (!results.length) results.push({ target: input.value.trim(), hops: [], reached: false, running: true });
+  if (!results.length) results.push(newEntry(input.value.trim()));
   let frame = 0;
   const draw = () => {
     frame = 0;
     renderTracerouteResult({ results }, multiple);
   };
   const apply = (event) => {
-    const entry = results[event.index] || (results[event.index] = { target: event.target || "", hops: [], reached: false, running: true });
+    const entry = results[event.index] || (results[event.index] = newEntry(event.target || ""));
+    if (event.type === "ptr") {
+      entry.ptr[event.address] = { names: event.names || [], error: event.error };
+      return;
+    }
     if (event.target) entry.target = event.target;
     if (event.address) entry.address = event.address;
     if (event.type === "hops") {
