@@ -24,7 +24,9 @@ small Docker container with no application dependencies.
 - **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status, plus an optional full TLS test with an SSL Labs-style A+–F grade.
 - **Ping scan**: one echo request to every host in a list or CIDR block.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side, with optional PTR (reverse DNS) lookup for every hop.
-- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, blocklists (DNSBL), SPF, DKIM, certificate-transparency names, geolocation, optional port check.
+- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, blocklists (DNSBL), SPF (with lookup counting), DKIM, DMARC, MTA-STS, TLS-RPT, certificate-transparency names, geolocation, optional port check.
+- **Propagation**: compare one record across Cloudflare, Google, Quad9, DNS4EU and the zone's authoritative nameservers.
+- **Share links**: signed-in users can turn any result into a link that anyone can open for 30 days.
 - **Blocklist check**: Magic scan and Auto lookup check domains and public IPv4 addresses against common spam/abuse blocklists.
 - **Port scan / Bulk port scan**: custom TCP ports on one target, or one port across many addresses.
 - **Nmap**: bounded TCP profiles for one authorized target at a time, with live status and elapsed time.
@@ -265,6 +267,24 @@ Several tools send data to external services; these are listed under
   `BLOCKLIST_RESOLVER` to your own recursive resolver (for example a local
   Unbound) or a Spamhaus DQS mirror. The checked names are sent to the blocklist
   operators.
+- **Mail security** (Magic scan, Email authentication section): **DMARC**
+  (missing record, `p=none`, `sp=none`, `pct` below 100, no `rua`); **SPF
+  evaluation** that follows `include`/`redirect` and counts DNS-querying
+  mechanisms against the RFC 7208 limit of 10, flags multiple records, `+all`,
+  `?all` and `ptr`; **MTA-STS** (TXT record, then the policy fetched over HTTPS
+  from `mta-sts.<domain>` with certificate verification, pinned to a checked
+  public address: mode, `max_age` and MX coverage); and **TLS-RPT**.
+- **Propagation** (feature `propagation`) queries one name and type through each
+  built-in DoH resolver (plus `DOH_ENDPOINT` if set) and directly at the zone's
+  authoritative nameservers (found by walking up the name), groups identical
+  answers and highlights resolvers that differ. Authoritative servers on private
+  addresses are not queried.
+- **Share links**: after a result appears, signed-in users can click *Create a
+  share link*. The result data (not HTML) is stored for 30 days and re-rendered
+  by the normal, escaping renderers for anyone with the link. Users list and
+  delete their links on *My account*; admins can delete any link. Up to 200
+  links per user and 1 MB per result. Links are unguessable but not
+  password-protected, so only share what you are happy for the recipient to see.
 - **Magic scan** checks A, AAAA, CAA, CNAME, HTTPS, MX, NS, SOA, SRV and TXT for the
   domain, common subdomains (`www`, `mail`, `api`, `staging`, …) and provider
   verification names (AWS/SES, Azure, Google Cloud, Cloudflare, Vercel, Netlify,

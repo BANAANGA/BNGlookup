@@ -44,6 +44,9 @@
           <button class="mode-tab" id="dig-tab" type="button" role="tab" aria-selected="false" data-mode="dig" hidden>
             <span aria-hidden="true">$</span> Dig
           </button>
+          <button class="mode-tab" id="propagation-tab" type="button" role="tab" aria-selected="false" data-mode="propagation" hidden>
+            <span aria-hidden="true">≋</span> Propagation
+          </button>
           <button class="mode-tab" id="mac-tab" type="button" role="tab" aria-selected="false" data-mode="mac" hidden>
             <span aria-hidden="true">◇</span> MAC lookup
           </button>
@@ -217,6 +220,11 @@
           </div>
           <div class="ping-monitor-summary" id="ping-monitor-summary"></div>
         </section>
+        <div class="share-results" id="share-results" hidden>
+          <button type="button" id="share-results-button">🔗 Create a share link</button>
+          <input id="share-results-link" type="text" readonly aria-label="Share link" hidden>
+          <span id="share-results-status" role="status"></span>
+        </div>
         <div class="mail-results" id="mail-results" hidden>
           <button type="button" id="mail-results-button">✉ Email these results to me</button>
           <span id="mail-results-status" role="status"></span>
