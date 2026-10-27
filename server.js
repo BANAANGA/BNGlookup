@@ -697,6 +697,21 @@ function validDnsName(name) {
   );
 }
 
+// Reduces a pasted URL (scheme, credentials, port, path, query, fragment) to its host name or IP.
+function hostFromInput(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
+  if (!hasScheme && isIP(value.replace(/^\[(.*)\]$/, "$1"))) return value.replace(/^\[(.*)\]$/, "$1");
+  try {
+    const parsed = new URL(hasScheme ? value : `http://${value}`);
+    if (parsed.hostname) return parsed.hostname.replace(/^\[(.*)\]$/, "$1").replace(/\.$/, "").toLowerCase();
+  } catch {
+    // Not URL-shaped; validate the raw value as typed.
+  }
+  return value;
+}
+
 function normalizeDomain(name) {
   const normalized = domainToASCII(name.trim().replace(/\.$/, "").toLowerCase());
   if (
@@ -2755,7 +2770,7 @@ async function discoverCertificateTransparencySubdomains(domain) {
 }
 
 async function bulkScan(request, url, response) {
-  const rawDomain = queryInput(url, "name", 253, response);
+  const rawDomain = queryInput(url, "name", 2048, response);
   const portScanOption = queryInput(url, "ports", 10, response);
   const rawNameserver = queryInput(url, "nameserver", 300, response);
   if ([rawDomain, portScanOption, rawNameserver].includes(null)) return;
@@ -2763,9 +2778,14 @@ async function bulkScan(request, url, response) {
     sendJson(response, 403, { error: "Custom nameservers are available to administrators only." });
     return;
   }
-  const domain = normalizeDomain(rawDomain);
+  const host = hostFromInput(rawDomain);
+  if (isIP(host)) {
+    sendJson(response, 400, { error: "Magic scan works on domain names. For an IP address, use Auto lookup or Reverse lookup." });
+    return;
+  }
+  const domain = normalizeDomain(host);
   if (!domain) {
-    sendJson(response, 400, { error: "Enter a valid domain name." });
+    sendJson(response, 400, { error: "Enter a valid domain name or a URL." });
     return;
   }
 
