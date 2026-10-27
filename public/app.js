@@ -26,10 +26,9 @@ const pingMethodControl = document.querySelector("#ping-method-control");
 const pingMethodInput = document.querySelector("#ping-method-input");
 const sslScanControl = document.querySelector("#sslscan-control");
 const sslScanPort = document.querySelector("#sslscan-port");
-const sslLabsControl = document.querySelector("#ssllabs-control");
-const sslLabsInput = document.querySelector("#ssllabs-input");
-const sslLabsFreshInput = document.querySelector("#ssllabs-fresh-input");
-let sslLabsRun = 0;
+const tlsGradeControl = document.querySelector("#tls-grade-control");
+const tlsGradeInput = document.querySelector("#tls-grade-input");
+let tlsGradeRun = 0;
 const pingMonitorControl = document.querySelector("#ping-monitor-control");
 const pingMonitorStart = document.querySelector("#ping-monitor-start");
 const pingMonitorStop = document.querySelector("#ping-monitor-stop");
@@ -207,8 +206,8 @@ function setMode(nextMode) {
   if (!isAdmin) nameserverInput.value = "";
   pingMethodControl.hidden = !ping;
   sslScanControl.hidden = !sslscan;
-  sslLabsControl.hidden = !sslscan || !authState?.user;
-  sslLabsRun += 1;
+  tlsGradeControl.hidden = !sslscan || !authState?.user;
+  tlsGradeRun += 1;
   sslScanPort.disabled = !sslscan;
   sslScanPort.required = sslscan;
   pingMonitorControl.hidden = !ping;
@@ -974,85 +973,144 @@ function renderSslScanResult(data) {
   resultPanel.hidden = false;
 }
 
-function sslLabsGradeClass(grade) {
+const tlsSeverityRank = { OK: 0, INFO: 1, LOW: 2, MEDIUM: 3, WARN: 3, HIGH: 4, CRITICAL: 5, FATAL: 5 };
+const tlsProtocolIds = [["SSLv2", "SSL 2.0"], ["SSLv3", "SSL 3.0"], ["TLS1", "TLS 1.0"], ["TLS1_1", "TLS 1.1"], ["TLS1_2", "TLS 1.2"], ["TLS1_3", "TLS 1.3"]];
+const tlsVulnerabilityIds = [
+  ["heartbleed", "Heartbleed"], ["CCS", "CCS injection"], ["ticketbleed", "Ticketbleed"], ["ROBOT", "ROBOT"],
+  ["secure_renego", "Secure renegotiation"], ["secure_client_renego", "Client-initiated renegotiation"],
+  ["CRIME_TLS", "CRIME (TLS compression)"], ["BREACH", "BREACH (HTTP compression)"], ["POODLE_SSL", "POODLE (SSLv3)"],
+  ["fallback_SCSV", "Downgrade protection (TLS_FALLBACK_SCSV)"], ["SWEET32", "SWEET32"], ["FREAK", "FREAK"],
+  ["DROWN", "DROWN"], ["LOGJAM", "Logjam"], ["BEAST", "BEAST"], ["LUCKY13", "Lucky Thirteen"], ["winshock", "Winshock"],
+  ["RC4", "RC4"], ["opossum", "Opossum"],
+];
+const tlsCertificateIds = [
+  ["cert_chain_of_trust", "Chain of trust"], ["cert_trust", "Host name match"], ["cert_commonName", "Common name"],
+  ["cert_subjectAltName", "Subject alternative names"], ["cert_caIssuers", "Issuer"], ["cert_keySize", "Key"],
+  ["cert_signatureAlgorithm", "Signature algorithm"], ["cert_notBefore", "Valid from"], ["cert_notAfter", "Valid until"],
+  ["cert_expirationStatus", "Expiration"], ["cert_revocation", "Revocation information"], ["OCSP_stapling", "OCSP stapling"],
+  ["certificate_transparency", "Certificate Transparency"], ["DNS_CAArecord", "DNS CAA record"],
+  ["HSTS_time", "HSTS"], ["HSTS_preload", "HSTS preload"], ["FS", "Forward secrecy"],
+];
+
+function tlsSeverityClass(severity) {
+  const rank = tlsSeverityRank[severity] ?? 1;
+  return rank >= 4 ? "danger" : rank >= 2 ? "warning" : rank === 0 ? "success" : "";
+}
+
+function tlsGradeClass(grade) {
   if (!grade) return "";
   if (grade.startsWith("A")) return "success";
   if (grade === "B" || grade === "C") return "warning";
   return "danger";
 }
 
-function renderSslLabsSection(state) {
-  const section = document.querySelector("#ssllabs-section");
+function renderTlsFindingRows(rows) {
+  return rows.map(([label, finding]) => `
+    <tr>
+      <td>${escapeHtml(label)}</td>
+      <td><span class="tls-severity ${tlsSeverityClass(finding.severity)}">${escapeHtml(finding.severity)}</span></td>
+      <td>${escapeHtml(finding.finding)}${finding.cve ? `<br><span class="trace-silent">${escapeHtml(finding.cve)}</span>` : ""}</td>
+    </tr>`).join("");
+}
+
+function renderTlsGradeReport(result) {
+  const byId = new Map(result.findings.map((finding) => [finding.id, finding]));
+  const pick = (ids) => ids.filter(([id]) => byId.has(id)).map(([id, label]) => [label, byId.get(id)]);
+  const scoreBar = (label, value) => value === null ? "" : `
+    <div class="tls-score"><span>${escapeHtml(label)}</span>
+      <div class="tls-score-bar"><div style="width:${Math.max(0, Math.min(100, value))}%"></div></div>
+      <strong>${escapeHtml(String(value))}</strong></div>`;
+  const ciphers = result.findings.filter((finding) => finding.id.startsWith("cipher-tls") || finding.id.startsWith("cipher-ssl"))
+    .map((finding) => {
+      const parts = finding.finding.trim().split(/\s{2,}/);
+      const kx = parts.length >= 7 ? parts[3] : (parts[3] || "").replace(/\s+\S+$/, "");
+      return { finding, protocol: parts[0] || "", name: parts.at(-1) || finding.finding, bits: (parts.at(-2) || "").trim(), kx };
+    });
+  const cipherRows = ciphers.map(({ finding, protocol, name, bits, kx }) => `
+    <tr>
+      <td>${escapeHtml(protocol)}</td>
+      <td><span class="tls-severity ${tlsSeverityClass(finding.severity)}">${escapeHtml(finding.severity)}</span></td>
+      <td>${escapeHtml(name)}</td>
+      <td>${escapeHtml(kx)}</td>
+      <td>${escapeHtml(/^\d+$/.test(bits) ? `${bits} bits` : "")}</td>
+    </tr>`).join("");
+  const sortedFindings = [...result.findings]
+    .filter((finding) => !finding.id.startsWith("clientsimulation-"))
+    .sort((left, right) => (tlsSeverityRank[right.severity] ?? 1) - (tlsSeverityRank[left.severity] ?? 1));
+  const table = (head, rows) => rows ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
+    <thead><tr>${head.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>` : "";
+  return `
+    <div class="tls-grade-summary">
+      <span class="ssllabs-grade tls-grade-large ${tlsGradeClass(result.grade)}">${escapeHtml(result.grade || "?")}</span>
+      <div class="tls-scores">
+        ${scoreBar("Protocol support (30%)", result.scores.protocol)}
+        ${scoreBar("Key exchange (30%)", result.scores.keyExchange)}
+        ${scoreBar("Cipher strength (40%)", result.scores.cipher)}
+        ${scoreBar("Final score", result.scores.final)}
+      </div>
+    </div>
+    ${result.capReasons.map((reason) => `<p class="detail-notice">${escapeHtml(reason)}</p>`).join("")}
+    ${result.warnings.map((warning) => `<p class="detail-notice">${escapeHtml(warning)}</p>`).join("")}
+    <h4 class="tls-subheading">Protocols</h4>
+    ${table(["Protocol", "Severity", "Result"], renderTlsFindingRows(pick(tlsProtocolIds)))}
+    <h4 class="tls-subheading">Cipher suites</h4>
+    ${table(["Protocol", "Severity", "Cipher suite", "Key exchange", "Strength"], cipherRows) || '<p class="empty-result">No cipher suites were reported.</p>'}
+    <h4 class="tls-subheading">Certificate, HSTS and forward secrecy</h4>
+    ${table(["Check", "Severity", "Result"], renderTlsFindingRows(pick(tlsCertificateIds)))}
+    <h4 class="tls-subheading">Vulnerabilities</h4>
+    ${table(["Test", "Severity", "Result"], renderTlsFindingRows(pick(tlsVulnerabilityIds)))}
+    <details class="tls-all-findings">
+      <summary>All ${escapeHtml(String(sortedFindings.length))} findings</summary>
+      ${table(["Test", "Severity", "Result"], renderTlsFindingRows(sortedFindings.map((finding) => [finding.id, finding])))}
+    </details>
+    <p class="scan-disclaimer">Grade calculated with testssl.sh using the SSL Labs SSL Server Rating Guide${result.scanTime ? `; the test took ${escapeHtml(String(result.scanTime))} seconds` : ""}. Grades can differ slightly from SSL Labs, which tests every IP address of a host and runs some extra checks.</p>`;
+}
+
+function renderTlsGradeSection(state) {
+  const section = document.querySelector("#tls-grade-section");
   if (!section) return false;
-  const data = state.data;
-  const running = !state.error && (!data || !["READY", "ERROR"].includes(data.status));
-  const endpoints = (data?.endpoints || []).map((endpoint) => {
-    const grade = endpoint.grade || "";
-    const trustNote = endpoint.gradeTrustIgnored && endpoint.gradeTrustIgnored !== grade
-      ? `If certificate trust issues are ignored: ${endpoint.gradeTrustIgnored}`
-      : "";
-    const status = grade
-      ? [endpoint.hasWarnings ? "Has warnings" : "", endpoint.isExceptional ? "Exceptional configuration" : "", trustNote].filter(Boolean).join(" · ")
-      : endpoint.statusDetailsMessage || endpoint.statusMessage || "Waiting";
-    return `
-      <tr>
-        <td>${grade ? `<span class="ssllabs-grade ${sslLabsGradeClass(grade)}">${escapeHtml(grade)}</span>` : running ? '<span class="status-badge live">Testing</span>' : '<span class="trace-silent">—</span>'}</td>
-        <td>${endpoint.ipAddress ? copyableResult(endpoint.ipAddress) : ""}${endpoint.serverName ? `<br>${copyableResult(endpoint.serverName, "port-target-address")}` : ""}</td>
-        <td>${escapeHtml(status)}${!grade && Number.isFinite(endpoint.progress) && endpoint.progress >= 0 ? escapeHtml(` (${endpoint.progress}%)`) : ""}</td>
-      </tr>`;
-  }).join("");
+  const elapsed = state.elapsedMs ? ` · ${Math.round(state.elapsedMs / 1000)} s` : "";
   const badge = state.error
-    ? '<span class="status-badge warning">Unavailable</span>'
-    : running
-      ? '<span class="status-badge live">Assessing…</span>'
-      : data.status === "ERROR"
-        ? '<span class="status-badge warning">Assessment failed</span>'
-        : '<span class="status-badge success">Complete</span>';
+    ? '<span class="status-badge warning">Not completed</span>'
+    : state.result
+      ? '<span class="status-badge success">Complete</span>'
+      : `<span class="status-badge live">${escapeHtml(`${state.stage || "Starting"}${elapsed}`)}</span>`;
   section.innerHTML = `
-    <div class="trace-heading"><h3>Qualys SSL Labs grade</h3>${badge}</div>
+    <div class="trace-heading"><h3>TLS test and grade${state.address ? ` ${copyableResult(state.address, "port-target-address")}` : ""}</h3>${badge}</div>
     ${state.error ? `<p class="detail-notice">${escapeHtml(state.error)}</p>` : ""}
-    ${data?.status === "ERROR" ? `<p class="detail-notice">${escapeHtml(data.statusMessage || "SSL Labs could not assess this host.")}</p>` : ""}
-    ${!state.error && running && !endpoints ? `<p class="detail-notice">${escapeHtml(data?.statusMessage || "Starting the SSL Labs assessment…")}</p>` : ""}
-    ${endpoints ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
-      <thead><tr><th>Grade</th><th>Endpoint</th><th>Details</th></tr></thead><tbody>${endpoints}</tbody></table></div>` : ""}
-    ${data?.testTime && !running ? `<p class="scan-disclaimer">Assessed ${escapeHtml(new Date(data.testTime).toLocaleString())}. <a href="${escapeHtml(data.reportUrl)}" target="_blank" rel="noopener noreferrer">Full report on SSL Labs</a></p>` : ""}`;
+    ${!state.error && !state.result ? '<p class="detail-notice">Testing protocols, cipher suites, the certificate and known vulnerabilities. This usually takes one to three minutes.</p>' : ""}
+    ${state.result ? renderTlsGradeReport(state.result) : ""}`;
   return true;
 }
 
-async function runSslLabsAssessment(target, port) {
-  const run = sslLabsRun;
-  resultPanel.insertAdjacentHTML("beforeend", '<section class="record-section trace-section" id="ssllabs-section"></section>');
-  const state = { data: null, error: null };
-  if (Number(port) !== 443) state.error = "SSL Labs only assesses port 443.";
-  else if (/^[0-9.]+$|:/.test(target)) state.error = "SSL Labs only grades host names, not IP addresses.";
-  renderSslLabsSection(state);
-  if (state.error) return;
-  const deadline = Date.now() + 10 * 60 * 1000;
-  let first = true;
-  while (run === sslLabsRun) {
-    try {
-      const params = new URLSearchParams({ name: target });
-      if (first) {
-        params.set("start", "1");
-        if (sslLabsFreshInput.checked) params.set("fresh", "1");
-      }
-      const response = await fetch(`/api/ssllabs?${params}`);
+async function runTlsGrade(target, port) {
+  const run = tlsGradeRun;
+  resultPanel.insertAdjacentHTML("beforeend", '<section class="record-section trace-section" id="tls-grade-section"></section>');
+  const state = { stage: "Starting" };
+  renderTlsGradeSection(state);
+  try {
+    const startResponse = await fetch("/api/tls-grade", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target, port: String(port) }),
+    });
+    const started = await readApiResponse(startResponse);
+    if (!startResponse.ok) throw new Error(started.error || "The TLS test could not be started.");
+    Object.assign(state, { address: started.address });
+    while (run === tlsGradeRun) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      if (run !== tlsGradeRun) return;
+      const response = await fetch(`/api/tls-grade?${new URLSearchParams({ id: started.id })}`);
       const data = await readApiResponse(response);
-      if (run !== sslLabsRun) return;
-      if (!response.ok) throw new Error(data.error || "SSL Labs assessment failed.");
-      first = false;
-      state.data = data;
-    } catch (error) {
-      if (run !== sslLabsRun) return;
-      state.error = error.message;
+      if (run !== tlsGradeRun) return;
+      if (!response.ok) throw new Error(data.error || "The TLS test failed.");
+      Object.assign(state, { stage: data.stage, elapsedMs: data.elapsedMs, error: data.error, result: data.result });
+      if (!renderTlsGradeSection(state) || data.status !== "running") return;
     }
-    if (!renderSslLabsSection(state) || state.error || ["READY", "ERROR"].includes(state.data?.status)) return;
-    if (Date.now() > deadline) {
-      state.error = "The SSL Labs assessment is taking longer than 10 minutes. Open the full report on SSL Labs to follow it.";
-      renderSslLabsSection(state);
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, first ? 5000 : 10000));
+  } catch (error) {
+    if (run !== tlsGradeRun) return;
+    state.error = error.message;
+    renderTlsGradeSection(state);
   }
 }
 
@@ -1842,7 +1900,7 @@ form.addEventListener("submit", async (event) => {
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   submitButton.disabled = true;
-  sslLabsRun += 1;
+  tlsGradeRun += 1;
   const customPortScan = requestMode === "custom-port";
   const bulkPortScan = requestMode === "bulk-port";
   const pingScan = requestMode === "ping-scan";
@@ -1943,7 +2001,7 @@ form.addEventListener("submit", async (event) => {
     else if (requestMode === "ping") renderPingResult(data);
     else if (requestMode === "sslscan") {
       renderSslScanResult(data);
-      if (sslLabsInput.checked && authState?.user) void runSslLabsAssessment(data.target, data.port);
+      if (tlsGradeInput.checked && authState?.user) void runTlsGrade(data.target, data.port);
     }
     else if (pingScan) renderPingScanResult(data);
     else if (requestMode === "traceroute") renderTracerouteResult({ results: [data] }, false);

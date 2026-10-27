@@ -4305,84 +4305,215 @@ async function sslScanHost(request, url, response) {
   }
 }
 
-const sslLabsEmail = (process.env.SSLLABS_EMAIL || "").trim();
-const sslLabsApi = process.env.SSLLABS_API || "https://api.ssllabs.com/api/v4";
+const testsslPath = process.env.TESTSSL_PATH || "testssl.sh";
+const tlsGradeJobs = new Map();
+const tlsGradeJobLimits = { runtimeMs: 6 * 60 * 1000, retainMs: 30 * 60 * 1000 };
+const tlsGradeStages = [
+  [/^Testing protocols/, "Protocols"],
+  [/^Testing cipher categories/, "Cipher categories"],
+  [/^Testing server's cipher preferences/, "Cipher preferences"],
+  [/^Testing robust forward secrecy/, "Forward secrecy"],
+  [/^Testing server defaults/, "Certificate and server defaults"],
+  [/^Testing HTTP header/, "HTTP headers"],
+  [/^Testing vulnerabilities/, "Vulnerabilities"],
+  [/^Running client simulations/, "Client simulations"],
+  [/^Rating/, "Rating"],
+];
 
-function describeSslLabsHost(host, data) {
+function pruneTlsGradeJobs() {
+  const now = Date.now();
+  for (const [id, job] of tlsGradeJobs) {
+    if (job.finishedAt && now - job.finishedAt > tlsGradeJobLimits.retainMs) tlsGradeJobs.delete(id);
+  }
+}
+
+function summarizeTestsslFindings(findings) {
+  const value = (id) => findings.find((finding) => finding.id === id)?.finding ?? null;
+  const score = (id) => {
+    const number = Number(value(id));
+    return Number.isFinite(number) ? number : null;
+  };
   return {
-    host,
-    status: data.status,
-    statusMessage: data.statusMessage || null,
-    testTime: Number.isFinite(data.testTime) ? data.testTime : null,
-    reportUrl: `https://www.ssllabs.com/ssltest/analyze.html?d=${encodeURIComponent(host)}&hideResults=on`,
-    endpoints: (Array.isArray(data.endpoints) ? data.endpoints : []).slice(0, 16).map((endpoint) => ({
-      ipAddress: endpoint.ipAddress || null,
-      serverName: endpoint.serverName || null,
-      grade: endpoint.grade || null,
-      gradeTrustIgnored: endpoint.gradeTrustIgnored || null,
-      hasWarnings: Boolean(endpoint.hasWarnings),
-      isExceptional: Boolean(endpoint.isExceptional),
-      statusMessage: endpoint.statusMessage || null,
-      statusDetailsMessage: endpoint.statusDetailsMessage || null,
-      progress: Number.isFinite(endpoint.progress) ? endpoint.progress : null,
-      eta: Number.isFinite(endpoint.eta) ? endpoint.eta : null,
-    })),
+    grade: value("overall_grade"),
+    scores: {
+      protocol: score("protocol_support_score"),
+      keyExchange: score("key_exchange_score"),
+      cipher: score("cipher_strength_score"),
+      final: score("final_score"),
+    },
+    capReasons: findings.filter((finding) => /^grade_cap_reason_\d+$/.test(finding.id)).map((finding) => finding.finding),
+    warnings: findings.filter((finding) => /^grade_cap_warning_\d+$/.test(finding.id)).map((finding) => finding.finding),
+    scanTime: score("scanTime"),
+    findings: findings
+      .filter((finding) => finding.id !== "engine_problem" && !/^(rating_|grade_cap_)/.test(finding.id))
+      .map((finding) => ({
+        id: String(finding.id),
+        severity: String(finding.severity || "INFO"),
+        finding: String(finding.finding ?? ""),
+        ...(finding.cve ? { cve: String(finding.cve) } : {}),
+      })),
   };
 }
 
-async function sslLabsAssessment(request, url, response) {
-  const rawName = queryInput(url, "name", 253, response);
-  if (rawName === null) return;
-  if (!sslLabsEmail) {
-    sendJson(response, 503, { error: "SSL Labs grading is not configured on this server. An administrator must set SSLLABS_EMAIL." });
-    return;
-  }
-  const host = isIP(rawName.trim()) ? null : normalizeDomain(rawName);
-  if (!host) {
-    sendJson(response, 400, { error: "SSL Labs only grades public host names, not IP addresses." });
-    return;
-  }
-  const params = new URLSearchParams({ host, publish: "off", all: "done" });
-  if (url.searchParams.get("start") === "1") {
-    if (url.searchParams.get("fresh") === "1") params.set("startNew", "on");
-    else {
-      params.set("fromCache", "on");
-      params.set("maxAge", "24");
+function runTestssl(job, hostname, address, port) {
+  return new Promise((resolve) => {
+    let directory;
+    let child;
+    let stdout = "";
+    let timedOut = false;
+    let finished = false;
+    let timer;
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (directory) fs.rm(directory, { recursive: true, force: true }, () => {});
+      resolve(result);
+    };
+    try {
+      directory = fs.mkdtempSync(path.join(os.tmpdir(), "testssl-"));
+      const jsonFile = path.join(directory, "result.json");
+      const args = [
+        "--jsonfile", jsonFile,
+        "--quiet",
+        "--color", "0",
+        "--warnings", "off",
+        "--connect-timeout", "10",
+        "--openssl-timeout", "10",
+        "--ip", address,
+        ...(isIP(address) === 6 ? ["-6"] : []),
+        `${isIP(hostname) === 6 ? `[${hostname}]` : hostname}:${port}`,
+      ];
+      child = spawn(testsslPath, args, {
+        stdio: ["ignore", "pipe", "ignore"],
+        env: { ...process.env, TERM: "dumb", TMPDIR: directory },
+      });
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+      }, tlsGradeJobLimits.runtimeMs);
+      child.stdout.on("data", (chunk) => {
+        stdout = (stdout + chunk).slice(-4096);
+        for (const line of stdout.split("\n")) {
+          const stage = tlsGradeStages.find(([pattern]) => pattern.test(line.trim()));
+          if (stage) job.stage = stage[1];
+        }
+      });
+      child.on("error", (error) => finish({
+        error: error.code === "ENOENT"
+          ? "testssl.sh is not installed on this server."
+          : "The TLS test could not be started.",
+      }));
+      child.on("close", (code) => {
+        if (timedOut) {
+          finish({ error: "The TLS test took longer than 6 minutes and was stopped." });
+          return;
+        }
+        let findings;
+        try {
+          findings = JSON.parse(fs.readFileSync(jsonFile, "utf8"));
+        } catch {
+          finish({ error: code ? `The TLS test failed (exit code ${code}). The host may not speak TLS on this port.` : "The TLS test produced no results." });
+          return;
+        }
+        if (!Array.isArray(findings)) {
+          finish({ error: "The TLS test produced an invalid result." });
+          return;
+        }
+        const scanProblem = findings.find((finding) => finding.id === "scanProblem")?.finding;
+        if (scanProblem && !findings.some((finding) => finding.id === "overall_grade")) {
+          finish({ error: `The TLS test could not complete: ${String(scanProblem).slice(0, 300)}` });
+          return;
+        }
+        const offersProtocol = findings.some((finding) =>
+          ["SSLv2", "SSLv3", "TLS1", "TLS1_1", "TLS1_2", "TLS1_3"].includes(finding.id) &&
+          /offered/i.test(finding.finding) && !/not offered/i.test(finding.finding));
+        if (!offersProtocol) {
+          finish({ error: "No SSL or TLS protocol was offered on this port, so there is nothing to grade." });
+          return;
+        }
+        finish({ result: summarizeTestsslFindings(findings) });
+      });
+    } catch (error) {
+      console.error("TLS test failed to start:", error.message);
+      finish({ error: "The TLS test could not be started." });
     }
-  }
+  });
+}
+
+async function startTlsGrade(request, response) {
   try {
-    const upstream = await fetch(`${sslLabsApi}/analyze?${params}`, {
-      headers: { accept: "application/json", email: sslLabsEmail },
-      signal: AbortSignal.timeout(20000),
-    });
-    const data = await upstream.json().catch(() => ({}));
-    if (upstream.status === 429) {
-      sendJson(response, 429, { error: "SSL Labs is rate limiting this server. Try again in a few minutes." });
-      return;
+    const user = currentUser(request);
+    if (!user) throw invalidScanRequest("Log in to run the TLS test.", 401);
+    const body = await readJsonRequest(request);
+    let target = typeof body.target === "string" ? body.target.trim() : "";
+    const port = typeof body.port === "string" && /^\d{1,5}$/.test(body.port) ? Number(body.port) : body.port ?? 443;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw invalidScanRequest("Enter a TCP port between 1 and 65535.");
+    if (!target || target.length > 253) throw invalidScanRequest("Enter a domain name or IP address.");
+    const bracketed = target.match(/^\[([0-9a-f:.]+)\]$/i);
+    if (bracketed) target = bracketed[1];
+    request.logDetails = JSON.stringify({ target, port });
+    pruneTlsGradeJobs();
+    if ([...tlsGradeJobs.values()].some((job) => job.userId === user.id && !job.finishedAt)) {
+      throw invalidScanRequest("You already have a TLS test running. Wait for it to finish.", 429);
     }
-    if (upstream.status === 503 || upstream.status === 529) {
-      sendJson(response, 503, { error: "SSL Labs is unavailable or overloaded. Try again later." });
-      return;
+    let addresses;
+    if (isIP(target)) {
+      addresses = [target];
+    } else {
+      const domain = normalizeDomain(target);
+      if (!domain) throw invalidScanRequest("Enter a valid domain name or IP address.");
+      target = domain;
+      try {
+        addresses = (await resolveHost(domain, { all: true, verbatim: true })).map((entry) => entry.address);
+      } catch {
+        throw invalidScanRequest("The host name could not be resolved.");
+      }
     }
-    if (!upstream.ok) {
-      const message = Array.isArray(data.errors) && typeof data.errors[0]?.message === "string"
-        ? data.errors[0].message.slice(0, 300)
-        : `HTTP ${upstream.status}`;
-      if (upstream.status >= 500) console.error(`SSL Labs request failed: ${message}`);
-      sendJson(response, 502, { error: `SSL Labs rejected the request: ${message}` });
-      return;
+    const allowLocal = getPortScanPolicy().localScanByRole[user.role];
+    const eligible = addresses.filter((address) => isScannableAddress(address, allowLocal));
+    eligible.sort((left, right) => isIP(left) - isIP(right));
+    if (!eligible.length) {
+      throw invalidScanRequest("This target resolves to a private or reserved address that cannot be checked.");
     }
-    if (typeof data.status !== "string") {
-      sendJson(response, 502, { error: "SSL Labs returned an invalid response." });
-      return;
+    if (!acquireHeavyJob("tlsGrade")) {
+      throw invalidScanRequest("The server is busy with other TLS tests. Try again shortly.", 503);
     }
-    sendJson(response, 200, describeSslLabsHost(host, data));
+    const id = crypto.randomBytes(16).toString("hex");
+    const job = { id, userId: user.id, target, address: eligible[0], port, stage: "Starting", startedAt: Date.now(), finishedAt: null };
+    tlsGradeJobs.set(id, job);
+    runTestssl(job, target, eligible[0], port).then((outcome) => {
+      Object.assign(job, outcome, { finishedAt: Date.now() });
+    }).finally(() => releaseHeavyJob("tlsGrade"));
+    sendJson(response, 202, { id, target, address: eligible[0], port });
   } catch (error) {
-    console.error("SSL Labs request failed:", error.message);
-    sendJson(response, 502, {
-      error: error.name === "TimeoutError" ? "SSL Labs did not respond in time." : "Unable to reach SSL Labs.",
+    const statusCode = error.statusCode || 500;
+    if (statusCode === 500) console.error("TLS test failed:", error);
+    sendJson(response, statusCode, {
+      error: statusCode === 500 ? "Unable to start the TLS test." : error.message,
     });
   }
+}
+
+function tlsGradeStatus(request, url, response) {
+  const user = currentUser(request);
+  const job = tlsGradeJobs.get(url.searchParams.get("id") || "");
+  if (!user || !job || job.userId !== user.id) {
+    sendJson(response, 404, { error: "This TLS test was not found or has expired." });
+    return;
+  }
+  sendJson(response, 200, {
+    id: job.id,
+    target: job.target,
+    address: job.address,
+    port: job.port,
+    status: !job.finishedAt ? "running" : job.error ? "error" : "done",
+    stage: job.stage,
+    elapsedMs: (job.finishedAt || Date.now()) - job.startedAt,
+    ...(job.error ? { error: job.error } : {}),
+    ...(job.result ? { result: job.result } : {}),
+  });
 }
 
 function runSinglePing(address) {
@@ -4395,8 +4526,8 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1 };
-const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0, zmap: 0 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2 };
+const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0, zmap: 0, tlsGrade: 0 };
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
 
@@ -5239,14 +5370,13 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/mac-lookup": { method: "GET", action: "MAC lookup", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
     "/api/sslscan": { method: "GET", action: "SSL/TLS check", keys: ["name", "port"] },
-    "/api/ssllabs": { method: "GET", action: "SSL Labs assessment", keys: ["name", "fresh"], only: ["start", "1"] },
+    "/api/tls-grade": { method: "POST", action: "TLS test and grade" },
     "/api/ping-scan": { method: "POST", action: "Ping scan" },
     "/api/traceroute": { method: "GET", action: "Traceroute", keys: ["name"] },
     "/api/multi-traceroute": { method: "POST", action: "Multi traceroute" },
   };
   const queryLogRoute = queryLogRoutes[url.pathname];
-  if (queryLogRoute && request.method === queryLogRoute.method &&
-    (!queryLogRoute.only || url.searchParams.get(queryLogRoute.only[0]) === queryLogRoute.only[1])) {
+  if (queryLogRoute && request.method === queryLogRoute.method) {
     request.logUsername = currentUser(request)?.username || null;
     request.logClientAddress = getClientAddress(request);
     request.logDetails = JSON.stringify(Object.fromEntries(
@@ -5411,7 +5541,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/mac-lookup": "mac",
     "/api/ping": "ping",
     "/api/sslscan": "sslscan",
-    "/api/ssllabs": "sslscan",
+    "/api/tls-grade": "sslscan",
     "/api/ping-scan": "ping-scan",
     "/api/traceroute": "traceroute",
     "/api/multi-traceroute": "multi-traceroute",
@@ -5419,7 +5549,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   const feature = protectedFeatures[url.pathname];
   const requiresPortScanLogin =
     ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan", "/api/nmap-status"].includes(url.pathname) ||
-    url.pathname === "/api/ssllabs" ||
+    url.pathname === "/api/tls-grade" ||
     (url.pathname === "/api/ping" && url.searchParams.get("sample") === "1") ||
     (url.pathname === "/api/scan" && url.searchParams.get("ports") === "common");
   if (feature && !checkFeatureAccess(request, response, feature, requiresPortScanLogin)) return;
@@ -5505,12 +5635,10 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
-  if (url.pathname === "/api/ssllabs") {
-    if (request.method !== "GET") {
-      sendJson(response, 405, { error: "Method not allowed." });
-      return;
-    }
-    void sslLabsAssessment(request, url, response);
+  if (url.pathname === "/api/tls-grade") {
+    if (request.method === "POST") void startTlsGrade(request, response);
+    else if (request.method === "GET") tlsGradeStatus(request, url, response);
+    else sendJson(response, 405, { error: "Method not allowed." });
     return;
   }
 
