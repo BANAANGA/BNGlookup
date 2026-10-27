@@ -966,7 +966,7 @@ body {
 .mode-tab { color: #858585; }
 .mode-tab.active { color: #70e2a5; }
 .mode-tab.active::after { background: #54d88f; }
-.client-info { border-color: #292929; color: #929292; background: #090d0a; }
+.client-info { border-color: #28583b; color: #9fb8a7; background: #12281a; }
 .client-info strong, #client-ptr, #client-whois { color: #d8e8dd; }
 .field-label { color: #c5c5c5; }
 .input-wrap, .type-control select, .custom-type {
