@@ -2020,6 +2020,17 @@ async function appendIpRegistration(ip) {
   }
 }
 
+const hostInputModes = new Set(["scan", "forward", "reverse", "details", "sslscan", "ping", "traceroute", "nmap", "custom-port", "propagation"]);
+
+function urlPortFromInput(value) {
+  try {
+    const text = String(value || "").trim();
+    return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `http://${text}`).port || null;
+  } catch {
+    return null;
+  }
+}
+
 // Reduces a pasted URL (scheme, credentials, port, path, query, fragment) to its host name or IP.
 function hostFromInput(value) {
   const text = String(value || "").trim();
@@ -2147,16 +2158,18 @@ form.addEventListener("submit", async (event) => {
   pingMonitorPanel.hidden = true;
   let requestMode = mode;
   let lookupName = input.value.trim();
-  if (mode === "scan") {
+  if (hostInputModes.has(mode)) {
     const host = hostFromInput(lookupName);
-    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":")) {
+    if (mode === "scan" && (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.includes(":"))) {
       errorMessage.textContent = "Magic scan works on domain names. For an IP address, use Auto lookup or Reverse lookup.";
       errorMessage.hidden = false;
       return;
     }
     formHint.dataset.defaultText ||= formHint.textContent;
     if (host && host !== lookupName) {
-      formHint.textContent = `Scanning ${host} (taken from the URL you entered).`;
+      const urlPort = mode === "sslscan" ? urlPortFromInput(lookupName) : null;
+      if (urlPort) sslScanPort.value = urlPort;
+      formHint.textContent = `Using ${host}${urlPort ? ` port ${urlPort}` : ""} from the URL you entered.`;
       input.value = host;
       lookupName = host;
     } else {
