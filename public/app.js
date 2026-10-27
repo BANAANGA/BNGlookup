@@ -26,6 +26,10 @@ const pingMethodControl = document.querySelector("#ping-method-control");
 const pingMethodInput = document.querySelector("#ping-method-input");
 const sslScanControl = document.querySelector("#sslscan-control");
 const sslScanPort = document.querySelector("#sslscan-port");
+const sslLabsControl = document.querySelector("#ssllabs-control");
+const sslLabsInput = document.querySelector("#ssllabs-input");
+const sslLabsFreshInput = document.querySelector("#ssllabs-fresh-input");
+let sslLabsRun = 0;
 const pingMonitorControl = document.querySelector("#ping-monitor-control");
 const pingMonitorStart = document.querySelector("#ping-monitor-start");
 const pingMonitorStop = document.querySelector("#ping-monitor-stop");
@@ -203,6 +207,8 @@ function setMode(nextMode) {
   if (!isAdmin) nameserverInput.value = "";
   pingMethodControl.hidden = !ping;
   sslScanControl.hidden = !sslscan;
+  sslLabsControl.hidden = !sslscan || !authState?.user;
+  sslLabsRun += 1;
   sslScanPort.disabled = !sslscan;
   sslScanPort.required = sslscan;
   pingMonitorControl.hidden = !ping;
@@ -966,6 +972,88 @@ function renderSslScanResult(data) {
     : "")}
     <p class="scan-disclaimer">This performs one TLS handshake only. It does not enumerate supported protocol versions or cipher suites, or test for TLS vulnerabilities.</p>`;
   resultPanel.hidden = false;
+}
+
+function sslLabsGradeClass(grade) {
+  if (!grade) return "";
+  if (grade.startsWith("A")) return "success";
+  if (grade === "B" || grade === "C") return "warning";
+  return "danger";
+}
+
+function renderSslLabsSection(state) {
+  const section = document.querySelector("#ssllabs-section");
+  if (!section) return false;
+  const data = state.data;
+  const running = !state.error && (!data || !["READY", "ERROR"].includes(data.status));
+  const endpoints = (data?.endpoints || []).map((endpoint) => {
+    const grade = endpoint.grade || "";
+    const trustNote = endpoint.gradeTrustIgnored && endpoint.gradeTrustIgnored !== grade
+      ? `If certificate trust issues are ignored: ${endpoint.gradeTrustIgnored}`
+      : "";
+    const status = grade
+      ? [endpoint.hasWarnings ? "Has warnings" : "", endpoint.isExceptional ? "Exceptional configuration" : "", trustNote].filter(Boolean).join(" · ")
+      : endpoint.statusDetailsMessage || endpoint.statusMessage || "Waiting";
+    return `
+      <tr>
+        <td>${grade ? `<span class="ssllabs-grade ${sslLabsGradeClass(grade)}">${escapeHtml(grade)}</span>` : running ? '<span class="status-badge live">Testing</span>' : '<span class="trace-silent">—</span>'}</td>
+        <td>${endpoint.ipAddress ? copyableResult(endpoint.ipAddress) : ""}${endpoint.serverName ? `<br>${copyableResult(endpoint.serverName, "port-target-address")}` : ""}</td>
+        <td>${escapeHtml(status)}${!grade && Number.isFinite(endpoint.progress) && endpoint.progress >= 0 ? escapeHtml(` (${endpoint.progress}%)`) : ""}</td>
+      </tr>`;
+  }).join("");
+  const badge = state.error
+    ? '<span class="status-badge warning">Unavailable</span>'
+    : running
+      ? '<span class="status-badge live">Assessing…</span>'
+      : data.status === "ERROR"
+        ? '<span class="status-badge warning">Assessment failed</span>'
+        : '<span class="status-badge success">Complete</span>';
+  section.innerHTML = `
+    <div class="trace-heading"><h3>Qualys SSL Labs grade</h3>${badge}</div>
+    ${state.error ? `<p class="detail-notice">${escapeHtml(state.error)}</p>` : ""}
+    ${data?.status === "ERROR" ? `<p class="detail-notice">${escapeHtml(data.statusMessage || "SSL Labs could not assess this host.")}</p>` : ""}
+    ${!state.error && running && !endpoints ? `<p class="detail-notice">${escapeHtml(data?.statusMessage || "Starting the SSL Labs assessment…")}</p>` : ""}
+    ${endpoints ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
+      <thead><tr><th>Grade</th><th>Endpoint</th><th>Details</th></tr></thead><tbody>${endpoints}</tbody></table></div>` : ""}
+    ${data?.testTime && !running ? `<p class="scan-disclaimer">Assessed ${escapeHtml(new Date(data.testTime).toLocaleString())}. <a href="${escapeHtml(data.reportUrl)}" target="_blank" rel="noopener noreferrer">Full report on SSL Labs</a></p>` : ""}`;
+  return true;
+}
+
+async function runSslLabsAssessment(target, port) {
+  const run = sslLabsRun;
+  resultPanel.insertAdjacentHTML("beforeend", '<section class="record-section trace-section" id="ssllabs-section"></section>');
+  const state = { data: null, error: null };
+  if (Number(port) !== 443) state.error = "SSL Labs only assesses port 443.";
+  else if (/^[0-9.]+$|:/.test(target)) state.error = "SSL Labs only grades host names, not IP addresses.";
+  renderSslLabsSection(state);
+  if (state.error) return;
+  const deadline = Date.now() + 10 * 60 * 1000;
+  let first = true;
+  while (run === sslLabsRun) {
+    try {
+      const params = new URLSearchParams({ name: target });
+      if (first) {
+        params.set("start", "1");
+        if (sslLabsFreshInput.checked) params.set("fresh", "1");
+      }
+      const response = await fetch(`/api/ssllabs?${params}`);
+      const data = await readApiResponse(response);
+      if (run !== sslLabsRun) return;
+      if (!response.ok) throw new Error(data.error || "SSL Labs assessment failed.");
+      first = false;
+      state.data = data;
+    } catch (error) {
+      if (run !== sslLabsRun) return;
+      state.error = error.message;
+    }
+    if (!renderSslLabsSection(state) || state.error || ["READY", "ERROR"].includes(state.data?.status)) return;
+    if (Date.now() > deadline) {
+      state.error = "The SSL Labs assessment is taking longer than 10 minutes. Open the full report on SSL Labs to follow it.";
+      renderSslLabsSection(state);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, first ? 5000 : 10000));
+  }
 }
 
 function drawPingMonitorChart() {
@@ -1754,6 +1842,7 @@ form.addEventListener("submit", async (event) => {
   errorMessage.hidden = true;
   resultPanel.hidden = true;
   submitButton.disabled = true;
+  sslLabsRun += 1;
   const customPortScan = requestMode === "custom-port";
   const bulkPortScan = requestMode === "bulk-port";
   const pingScan = requestMode === "ping-scan";
@@ -1852,7 +1941,10 @@ form.addEventListener("submit", async (event) => {
     if (requestMode === "details" && data.ip) renderIpInfo(data);
     else if (requestMode === "details") renderDomainInfo(data);
     else if (requestMode === "ping") renderPingResult(data);
-    else if (requestMode === "sslscan") renderSslScanResult(data);
+    else if (requestMode === "sslscan") {
+      renderSslScanResult(data);
+      if (sslLabsInput.checked && authState?.user) void runSslLabsAssessment(data.target, data.port);
+    }
     else if (pingScan) renderPingScanResult(data);
     else if (requestMode === "traceroute") renderTracerouteResult({ results: [data] }, false);
     else if (multiTraceroute) renderTracerouteResult(data, true);

@@ -145,6 +145,11 @@
             <input id="sslscan-port" type="number" min="1" max="65535" value="443" inputmode="numeric">
             <span>Tests one TLS handshake and reports the negotiated protocol, cipher, certificate chain and trust status. Private addresses are checked only when allowed for your role.</span>
           </div>
+          <div class="port-scan-control" id="ssllabs-control" hidden>
+            <label><input id="ssllabs-input" type="checkbox"> Also get the Qualys SSL Labs grade (public host names on port 443 only)</label>
+            <label><input id="ssllabs-fresh-input" type="checkbox"> Run a new assessment instead of reusing one up to 24 hours old</label>
+            <span>A new SSL Labs assessment usually takes one to three minutes. Results are not published on the SSL Labs website boards.</span>
+          </div>
           <div class="scan-extra-control ping-monitor-control" id="ping-monitor-control" hidden>
             <span class="ping-monitor-label">Live monitoring</span>
             <div class="ping-monitor-actions">
