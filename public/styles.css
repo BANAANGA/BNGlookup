@@ -1111,4 +1111,17 @@ body {
 }
 .ssllabs-grade.success { color: #a9e5c5; background: #14251b; }
 .ssllabs-grade.danger { color: #ffb4b4; background: #2c1515; }
-.port-scan-control label + label { margin-top: 2px; }
+.tls-grade-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 22px; margin: 6px 0 14px; }
+.tls-grade-large { min-width: 76px; min-height: 76px; font-size: 38px; border-radius: 14px; }
+.tls-scores { display: grid; flex: 1 1 260px; gap: 8px; }
+.tls-score { display: grid; grid-template-columns: minmax(130px, 170px) 1fr 34px; align-items: center; gap: 10px; color: #b9c7bd; font-size: 11px; }
+.tls-score strong { color: #f1f1f1; text-align: right; }
+.tls-score-bar { height: 8px; border-radius: 4px; background: #1f1f1f; overflow: hidden; }
+.tls-score-bar div { height: 100%; background: #54d88f; }
+.tls-subheading { margin: 18px 0 8px; color: #ddd; font-size: 13px; }
+.tls-severity { font-size: 10px; font-weight: 700; color: #a0a0a0; }
+.tls-severity.success { color: #a9e5c5; }
+.tls-severity.warning { color: #f0cb86; }
+.tls-severity.danger { color: #ffb4b4; }
+.tls-all-findings { margin-top: 16px; }
+.tls-all-findings summary { cursor: pointer; color: #b9c7bd; font-size: 12px; }

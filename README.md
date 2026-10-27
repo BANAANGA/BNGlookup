@@ -20,7 +20,7 @@ small Docker container with no application dependencies.
 - **Whois**: RDAP registration data for domains and IPs (registrar, dates, status, network range, ASN, contacts) and a nameserver comparison.
 - **MAC lookup**: vendor, OUI block and address type.
 - **Ping**: ICMP (4 echo requests) or HTTP/HTTPS GET check; optional live single-host monitoring at 3-second intervals, with latency chart and optional up/down sounds.
-- **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status, plus an optional Qualys SSL Labs grade.
+- **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status, plus an optional full TLS test with an SSL Labs-style A+–F grade.
 - **Ping scan**: one echo request to every host in a list or CIDR block.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side, with optional PTR (reverse DNS) lookup for every hop.
 - **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, SPF, DKIM, certificate-transparency names, geolocation, optional port check.
@@ -131,7 +131,7 @@ sudo docker compose -f compose.registry.yaml ps
 
 Optional settings go in front of the command or in a `.env` file next to the
 compose file: `PORT=8080`, `BNGLOOKUP_TAG=1.2.69` (pin a version),
-`COOKIE_SECURE=true`, `TRUSTED_PROXIES=…`, `DOH_ENDPOINT=…`, `SSLLABS_EMAIL=…`. Include the same
+`COOKIE_SECURE=true`, `TRUSTED_PROXIES=…`, `DOH_ENDPOINT=…`. Include the same
 `-f` flags in every later command (or set `COMPOSE_FILE=compose.registry.yaml:compose.acme.yaml`).
 
 Update or roll back by pulling a newer tag:
@@ -194,7 +194,7 @@ Several tools send data to external services; these are listed under
 | Whois | RDAP via `rdap.org`; missing ASNs are resolved through RIPE Stat, with `ipwho.is` as fallback. Contacts may be redacted. |
 | MAC lookup | Vendor data from `maclookup.app`. |
 | Ping | ICMP: 4 echo requests with loss and RTT. HTTP/HTTPS: one GET to `/` (redirects reported, not followed). |
-| SSLscan | One TLS handshake to a host and port (default 443); reports the negotiated TLS protocol, cipher, peer certificate chain and certificate verification result. Signed-in users can also fetch the Qualys SSL Labs grade per endpoint (host names on port 443; needs `SSLLABS_EMAIL`). |
+| SSLscan | One TLS handshake to a host and port (default 443); reports the negotiated TLS protocol, cipher, peer certificate chain and certificate verification result. Signed-in users can also run a full testssl.sh test (protocols, ciphers, certificate, vulnerabilities) graded with the SSL Labs rating guide. |
 | Ping scan | One echo per host; list or CIDR, max 256 addresses. |
 | Traceroute | `tracepath` (UDP), up to 20 hops, 45 s limit; live updates. Optional per-hop PTR lookup via the default DoH provider. |
 | Multi traceroute | Up to 10 targets, 4 at a time; hop comparison table. |
@@ -215,23 +215,22 @@ Several tools send data to external services; these are listed under
   to the Compose service. Traceroute needs no extra privileges (the image installs
   `iputils-tracepath` and `coreutils`); silent routers appear as "no reply".
 - **SSLscan**: checks one host and port at a time and is subject to the same
-  private/reserved-address policy as other host checks. It does not enumerate
-  protocol versions or cipher suites, or test for TLS vulnerabilities; use the
-  SSL Labs option for that.
-- **SSL Labs grade**: the server proxies the [SSL Labs API v4](https://github.com/ssllabs/ssllabs-scan/blob/master/ssllabs-api-docs-v4.md),
-  which requires a one-time registration with an organization email address
-  (free mail providers are rejected):
-
-  ```sh
-  curl -X POST https://api.ssllabs.com/api/v4/register -H 'content-type: application/json' \
-    -d '{"firstName":"Jane","lastName":"Doe","email":"jane@example.com","organization":"Example"}'
-  ```
-
-  Then set `SSLLABS_EMAIL=jane@example.com`. Cached results up to 24 hours old
-  are reused unless the user asks for a new assessment; assessments run with
-  `publish=off`. Only signed-in users can request grades, and only requests
-  that start an assessment are logged (not the status polls). SSL Labs limits
-  concurrent assessments per account and its terms allow free non-commercial use.
+  private/reserved-address policy as other host checks. The basic check is one
+  TLS handshake; tick the full-test option to enumerate protocols and ciphers
+  and test for vulnerabilities.
+- **TLS test and grade**: runs the bundled [testssl.sh](https://github.com/testssl/testssl.sh)
+  (v3.2.4, GPLv2) inside the container against the resolved address: SSLv2–TLS 1.3,
+  every cipher suite, key exchange, certificate and chain, HSTS, and
+  vulnerabilities (Heartbleed, ROBOT, POODLE, CCS injection, DROWN, Logjam,
+  SWEET32 and more). It grades with the SSL Labs
+  [SSL Server Rating Guide](https://github.com/ssllabs/research/wiki/SSL-Server-Rating-Guide):
+  protocol 30%, key exchange 30% and cipher strength 40%, plus the guide's caps
+  (A+ for HSTS, T for untrusted, M for name mismatch, F for critical issues).
+  A test takes about 1–3 minutes and runs as a background job
+  (`POST /api/tls-grade`, then poll `GET /api/tls-grade?id=…`). Signed-in users
+  only; one test per user and two server-wide at a time; no third-party API is
+  contacted. Grades can differ slightly from SSL Labs, which tests every IP
+  address of a host and runs some additional checks.
 - **Live traceroute API**: `GET /api/traceroute?name=…&stream=1` and
   `POST /api/multi-traceroute` with `"stream": true` return newline-delimited JSON events.
   Add `ptr=1` (or `"ptr": true`) to resolve each hop's PTR record; results arrive as
@@ -340,7 +339,6 @@ Environment variables:
 | `COOKIE_SECURE=true` | Set the cookie `Secure` attribute; use behind HTTPS. |
 | `HTTPS_PORT` | HTTPS listener port (default 8443). |
 | `DOH_ENDPOINT` | Extra custom DoH JSON endpoint, offered as a resolver choice. |
-| `SSLLABS_EMAIL` | Email registered with the SSL Labs API v4; enables SSL Labs grades in SSLscan. |
 
 ## SSL certificate (ACME)
 
