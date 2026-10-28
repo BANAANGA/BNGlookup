@@ -393,6 +393,7 @@ Environment variables:
 | `COOKIE_SECURE=true` | Set the cookie `Secure` attribute; use behind HTTPS. |
 | `HTTPS_PORT` | HTTPS listener port (default 8443). |
 | `DOH_ENDPOINT` | Extra custom DoH JSON endpoint, offered as a resolver choice. |
+| `SETUP_TOKEN` | Optional secret required during first-run setup, so a fresh instance reachable from the internet cannot be claimed by someone else. Set it before first start; it is no longer used once an administrator exists. |
 | `WHOIS_SERVERS` | Per-TLD WHOIS server overrides for registries that publish none at IANA, e.g. `ga=whois.example.ga,xyz=whois.nic.xyz`. |
 | `BLOCKLIST_RESOLVER` | DNS server(s) for blocklist checks, e.g. `192.168.1.53` or `10.0.0.2:5353`, comma-separated. Default: the container's system resolver. |
 | `UPDATE_CHECK=false` | Disable the dashboard's check for new releases (otherwise the server asks the GitHub API at most every 6 hours, only while an admin views the dashboard). |
@@ -420,6 +421,18 @@ requests get HSTS and Secure cookies.
 - Input is validated server-side (size, duplicates, control characters, strict
   UTF-8), SQL is parameterized, output is HTML-escaped, and a strict Content
   Security Policy plus security headers are sent.
+- External tools (dig, nmap, zmap, tracepath, ping, testssl.sh) are started
+  without a shell and with fixed argument lists; user values are validated
+  first (dig uses an option allowlist).
+- Every tool that connects to a user-chosen target resolves it once, refuses
+  private, reserved and loopback addresses (including IPv4-mapped, NAT64, 6to4
+  and IPv4-compatible IPv6 forms) unless the role allows local targets, and pins
+  the connection to the checked address to prevent DNS rebinding.
+- Logins are limited per client IP (10 per 15 minutes) and per account (30
+  failures per 15 minutes from any number of IPs), with identical responses for
+  unknown usernames. State-changing API requests must come from the site itself
+  (Origin check) in addition to `SameSite=Strict` session cookies.
+- The post-login redirect only accepts same-origin paths.
 - Only an explicit list of static files is served. State-changing requests need a
   same-origin `Origin` header.
 - The Compose files run the container hardened: non-root user, read-only root

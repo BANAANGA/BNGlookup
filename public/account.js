@@ -10,9 +10,17 @@ function showAuthError(message) {
 
 function safeNextPath() {
   const requested = new URLSearchParams(window.location.search).get("next") || "/";
-  return requested.startsWith("/") && !requested.startsWith("//") && !requested.includes("\\")
-    ? requested
-    : "/";
+  // Browsers drop tabs and newlines from URLs, so "/\t/evil.example" would become
+  // "//evil.example". Resolve the value the way the browser will and require our origin.
+  if (!requested.startsWith("/") || /[\u0000-\u001f\u007f\\]/.test(requested)) return "/";
+  try {
+    const resolved = new URL(requested, window.location.origin);
+    return resolved.origin === window.location.origin
+      ? `${resolved.pathname}${resolved.search}${resolved.hash}`
+      : "/";
+  } catch {
+    return "/";
+  }
 }
 
 async function submitAccountForm(form, endpoint, includePasswordConfirmation = false) {
@@ -52,6 +60,16 @@ async function submitAccountForm(form, endpoint, includePasswordConfirmation = f
   });
 }
 
-if (setupForm) submitAccountForm(setupForm, "/api/auth/setup", true);
+if (setupForm) {
+  submitAccountForm(setupForm, "/api/auth/setup", true);
+  fetch("/api/auth/status", { credentials: "same-origin" })
+    .then((response) => response.json())
+    .then((status) => {
+      if (!status.setupTokenRequired) return;
+      document.querySelector("#setup-token-field").hidden = false;
+      document.querySelector("#setup-token").required = true;
+    })
+    .catch(() => {});
+}
 if (loginForm) submitAccountForm(loginForm, "/api/auth/login");
 if (changeForm) submitAccountForm(changeForm, "/api/auth/change-password", true);

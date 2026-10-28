@@ -618,6 +618,10 @@ const nonPublicAddressRanges = new net.BlockList();
   ["203.0.113.0", 24, "ipv4"], ["224.0.0.0", 4, "ipv4"],
   ["240.0.0.0", 4, "ipv4"], ["::", 128, "ipv6"],
   ["::1", 128, "ipv6"], ["64:ff9b:1::", 48, "ipv6"],
+  // IPv6 forms that embed an IPv4 address and can be routed to it (IPv4-compatible,
+  // SIIT, NAT64 and 6to4). net.BlockList only maps ::ffff:0:0/96 onto IPv4 rules itself.
+  ["::", 96, "ipv6"], ["::ffff:0:0:0", 96, "ipv6"],
+  ["64:ff9b::", 96, "ipv6"], ["2002::", 16, "ipv6"],
   ["100::", 64, "ipv6"],
   ["2001::", 23, "ipv6"], ["2001:db8::", 32, "ipv6"],
   ["fc00::", 7, "ipv6"], ["fe80::", 10, "ipv6"],
@@ -3745,6 +3749,40 @@ function allowAuthAttempt(request) {
   return true;
 }
 
+// Per-account limit on failed logins, so attempts spread across many IP addresses
+// (which the per-IP limit cannot see) still cannot guess one account's password.
+const accountLoginFailures = new Map();
+const accountLoginLimit = { failures: 30, windowMs: 15 * 60 * 1000 };
+
+function accountLoginBlocked(username) {
+  const key = String(username || "").toLowerCase();
+  const entry = accountLoginFailures.get(key);
+  if (!entry) return false;
+  if (Date.now() - entry.startedAt > accountLoginLimit.windowMs) {
+    accountLoginFailures.delete(key);
+    return false;
+  }
+  return entry.count >= accountLoginLimit.failures;
+}
+
+function recordAccountLoginFailure(username) {
+  const key = String(username || "").toLowerCase();
+  if (!key) return;
+  const now = Date.now();
+  if (accountLoginFailures.size > 10000) {
+    for (const [name, entry] of accountLoginFailures) {
+      if (now - entry.startedAt > accountLoginLimit.windowMs) accountLoginFailures.delete(name);
+    }
+    if (accountLoginFailures.size > 10000) return;
+  }
+  const entry = accountLoginFailures.get(key);
+  if (!entry || now - entry.startedAt > accountLoginLimit.windowMs) {
+    accountLoginFailures.set(key, { startedAt: now, count: 1 });
+  } else {
+    entry.count += 1;
+  }
+}
+
 function resetAuthAttempts(request) {
   authAttempts.delete(getClientAddress(request) || request.socket.remoteAddress || "unknown");
 }
@@ -3777,11 +3815,23 @@ function handleAuthStatus(request, response) {
   const user = setupRequired ? null : currentUser(request);
   sendJson(response, 200, {
     setupRequired,
+    setupTokenRequired: setupRequired && Boolean(setupToken),
     user,
     mailEnabled: Boolean(getMailConfig()),
     featureAccess: getFeatureAccess(),
     features: featureNames,
   });
+}
+
+// Optional secret that must be entered during first-run setup, so a freshly started
+// instance that is reachable from the internet cannot be claimed by a stranger.
+const setupToken = (process.env.SETUP_TOKEN || "").trim();
+
+function setupTokenMatches(value) {
+  if (!setupToken) return true;
+  const supplied = crypto.createHash("sha256").update(String(value || "")).digest();
+  const expected = crypto.createHash("sha256").update(setupToken).digest();
+  return crypto.timingSafeEqual(supplied, expected);
 }
 
 async function handleInitialSetup(request, response) {
@@ -3792,6 +3842,11 @@ async function handleInitialSetup(request, response) {
   }
   const body = await readAuthBody(request, response);
   if (!body) return;
+  if (!setupTokenMatches(body.setupToken)) {
+    recordAdminLog("login", request, "Initial setup rejected (wrong setup token)", "", 403, null);
+    sendJson(response, 403, { error: "The setup token is incorrect. It is the SETUP_TOKEN value configured on the server." });
+    return;
+  }
   const { username, password } = body;
   if (typeof body.confirmPassword !== "string" || body.confirmPassword !== password) {
     sendJson(response, 400, { error: "The passwords do not match." });
@@ -3874,6 +3929,11 @@ async function handleLogin(request, response) {
     ? body.username.trim()
     : "";
   const password = typeof body.password === "string" ? body.password : "";
+  if (accountLoginBlocked(username)) {
+    recordAdminLog("login", request, "Login rate limited (account)", "", 429, username || null);
+    sendJson(response, 429, { error: "Too many login attempts. Try again in 15 minutes." });
+    return;
+  }
   const user = database.prepare(`
     SELECT id, username, password_hash, password_salt, role, must_change_password
     FROM users WHERE username = ? AND active = 1
@@ -3885,11 +3945,13 @@ async function handleLogin(request, response) {
   const valid = validHash.length === supplied.length &&
     crypto.timingSafeEqual(validHash, supplied);
   if (!user || !valid || password.length > 128) {
+    recordAccountLoginFailure(username);
     recordAdminLog("login", request, "Login failed", "", 401, username || null);
     sendJson(response, 401, { error: "Invalid username or password." });
     return;
   }
   resetAuthAttempts(request);
+  accountLoginFailures.delete(username.toLowerCase());
   await establishSession(user.id, response);
   if (!user.must_change_password) recordNmapLoginIp(request, user.username);
   recordAdminLog("login", request, "Login successful", "", 200, user.username);
@@ -4134,7 +4196,13 @@ function handleAdminSettings(request, response) {
         saveSetting.run("feature_access", JSON.stringify(access));
       }
       if (Object.hasOwn(body, "portScanPolicy")) {
-        saveSetting.run("port_scan_policy", JSON.stringify(portScanPolicy));
+        // Store only the validated fields, not whatever else the request body contained.
+        saveSetting.run("port_scan_policy", JSON.stringify({
+          maxPortsByRole: { admin: portScanPolicy.maxPortsByRole.admin, user: portScanPolicy.maxPortsByRole.user },
+          localScanByRole: { admin: portScanPolicy.localScanByRole.admin, user: portScanPolicy.localScanByRole.user },
+          largestBulkCidrPrefix: { ipv4: portScanPolicy.largestBulkCidrPrefix.ipv4, ipv6: portScanPolicy.largestBulkCidrPrefix.ipv6 },
+          zmapRate: portScanPolicy.zmapRate,
+        }));
       }
       if (Object.hasOwn(body, "nmapAllowedCidrs")) {
         saveSetting.run("nmap_allowed_cidrs", nmapAllowedCidrs.entries.join("\n"));
@@ -5894,9 +5962,9 @@ function runNmap(address, profile) {
       if (stderr.length < 8192) stderr += chunk.toString().slice(0, 8192 - stderr.length);
     });
     child.on("error", (error) => {
-      failure = new Error(error.code === "ENOENT"
+      failure = invalidScanRequest(error.code === "ENOENT"
         ? "Nmap is unavailable on this server."
-        : "Nmap could not be started.");
+        : "Nmap could not be started.", 503);
     });
     child.on("close", (code) => {
       if (failure) {
@@ -6915,6 +6983,12 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     }
     response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
     response.end(keyAuthorization);
+    return;
+  }
+  // Defence in depth against CSRF: every state-changing API request must come from this
+  // site, even endpoints that are also protected by JSON-only bodies and SameSite cookies.
+  if (url.pathname.startsWith("/api/") && !["GET", "HEAD", "OPTIONS"].includes(request.method) &&
+    !enforceSameOrigin(request, response)) {
     return;
   }
   const queryKeys = new Set();
