@@ -143,15 +143,15 @@
             <input id="nameserver-input" name="nameserver" type="text" maxlength="300" placeholder="Default DNS-over-HTTPS provider, or e.g. 1.1.1.1" autocomplete="off" spellcheck="false">
             <span>Optional: enter a nameserver IP or hostname, with port if needed (for example, 1.1.1.1:53 or ns1.example.net:53).</span>
           </div>
-          <div class="port-scan-control" id="port-scan-control" hidden>
-            <label><input id="port-scan-input" type="checkbox"> Also scan 26 common TCP ports on the domain's eligible IP addresses</label>
-            <span>Optional active check, limited to 8 addresses. Local targets are scanned only when allowed for your role in the admin settings.</span>
-          </div>
           <div class="port-scan-control scan-includes-control" id="scan-includes-control" hidden>
             <label id="scan-email-option"><input id="scan-email-input" type="checkbox"> Also run the Email check (MX, SMTP STARTTLS, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI)</label>
             <label id="scan-ssl-option"><input id="scan-ssl-input" type="checkbox"> Also run SSLscan on port 443 (TLS handshake and certificate)</label>
             <label id="scan-tls-grade-option"><input id="scan-tls-grade-input" type="checkbox"> …and the full TLS test with a grade (testssl.sh, about one to three minutes)</label>
             <span>These run after the DNS scan and are added to the results, the share link and your history.</span>
+          </div>
+          <div class="port-scan-control" id="port-scan-control" hidden>
+            <label><input id="port-scan-input" type="checkbox"> Also scan 26 common TCP ports on the domain's eligible IP addresses</label>
+            <span>Optional active check that connects to the target, limited to 8 addresses. Only scan systems you are authorized to test. Local targets are scanned only when allowed for your role in the admin settings.</span>
           </div>
           <div class="scan-extra-control" id="ping-method-control" hidden>
             <label for="ping-method-input">Check method</label>
