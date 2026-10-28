@@ -1248,3 +1248,4 @@ footer a:hover { color: #e4ffef; }
 .detail-notice a { color: #8aeab1; }
 .mac-device-category { margin: 4px 0 10px; color: #f1f1f1; font-size: 18px; font-weight: 700; }
 .mac-device-guess .status-list { margin-bottom: 8px; }
+.tls-grade-top { margin: 14px 0 22px; padding-bottom: 18px; border-bottom: 1px solid #242424; }

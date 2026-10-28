@@ -1286,9 +1286,17 @@ function renderTlsGradeSection(state) {
   return true;
 }
 
+// The full TLS test is the most useful part of the result, so it goes directly under the heading.
+function insertTlsGradeSection() {
+  const section = '<section class="record-section trace-section tls-grade-top" id="tls-grade-section"></section>';
+  const heading = resultPanel.querySelector(".result-heading");
+  if (heading) heading.insertAdjacentHTML("afterend", section);
+  else resultPanel.insertAdjacentHTML("afterbegin", section);
+}
+
 async function runTlsGrade(target, port) {
   const run = tlsGradeRun;
-  resultPanel.insertAdjacentHTML("beforeend", '<section class="record-section trace-section" id="tls-grade-section"></section>');
+  insertTlsGradeSection();
   const state = { stage: "Starting" };
   renderTlsGradeSection(state);
   try {
@@ -2426,7 +2434,7 @@ function renderSharedResult(shareMode, payload) {
     default: throw new Error("This shared result type is not supported.");
   }
   if (extras.tlsGrade?.result) {
-    resultPanel.insertAdjacentHTML("beforeend", '<section class="record-section trace-section" id="tls-grade-section"></section>');
+    insertTlsGradeSection();
     renderTlsGradeSection({ result: extras.tlsGrade.result, address: extras.tlsGrade.address });
   }
   if (extras.blocklist) resultPanel.insertAdjacentHTML("beforeend", renderBlocklistSection(extras.blocklist));
