@@ -620,7 +620,6 @@ const bimiRecord = document.querySelector("#bimi-record");
 
 function renderBimiLogo(data) {
   bimiLogoPreview.src = `/logo.svg?v=${encodeURIComponent(data.updatedAt || "default")}`;
-  if (window.applySiteBranding) window.applySiteBranding();
   document.querySelector("#bimi-logo-url").textContent = data.url;
   bimiRecord.value = data.record;
   bimiLogoRemove.hidden = !data.custom;

@@ -15,7 +15,7 @@
     <main class="page account-page admin-page">
       <header class="topbar">
         <a class="brand" href="/" aria-label="Home">
-          <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
+          <img class="brand-logo" src="/brand-logo.svg" alt="" width="40" height="40">
           <span class="brand-name">DNSLookup</span>
         </a>
         <nav class="account-nav" aria-label="Account"><button id="admin-logout" type="button">Log out</button></nav>
@@ -88,9 +88,9 @@
               <div class="branding-preview" id="branding-preview" aria-live="polite"></div>
             </div>
             <h2 class="policy-heading">BIMI logo</h2>
-            <p class="form-hint">Upload your brand logo as an SVG. It replaces the header logo and is served at <code id="bimi-logo-url">/logo.svg</code>, the URL to use in your domain's BIMI record. Files with scripts, links, embedded content or external references are rejected; the upload is also checked against the BIMI SVG Tiny Portable/Secure rules.</p>
+            <p class="form-hint">Upload your brand logo as an SVG. It is served at <code id="bimi-logo-url">/logo.svg</code>, the URL to use in your domain's BIMI record. It does not change the site icon or header logo. Files with scripts, links, embedded content or external references are rejected; the upload is also checked against the BIMI SVG Tiny Portable/Secure rules.</p>
             <div class="bimi-logo-setting">
-              <img class="bimi-logo-preview" id="bimi-logo-preview" src="/logo.svg" alt="Current logo" width="96" height="96">
+              <img class="bimi-logo-preview" id="bimi-logo-preview" src="/brand-logo.svg" alt="Current logo" width="96" height="96">
               <div class="bimi-logo-fields">
                 <input id="bimi-logo-upload" type="file" accept="image/svg+xml,.svg" aria-label="Upload an SVG logo">
                 <div class="bimi-logo-actions">

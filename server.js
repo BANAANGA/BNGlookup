@@ -91,6 +91,7 @@ const staticFiles = new Set([
   "/branding.js",
   "/favicon.svg",
   "/logo.svg",
+  "/brand-logo.svg",
 ]);
 const dataDir = path.resolve(process.env.DATA_DIR || "/data");
 fs.mkdirSync(dataDir, { recursive: true });
@@ -4084,10 +4085,7 @@ function getSiteIconUrl() {
 }
 
 function getSiteBranding() {
-  const iconUrl = getSiteIconUrl();
-  const logo = readBimiLogo();
-  // An uploaded BIMI logo replaces the header logo; the site icon stays the favicon.
-  return { title: getSiteTitle(), iconUrl, logoUrl: logo ? `/logo.svg?v=${encodeURIComponent(logo.updatedAt || "")}` : iconUrl };
+  return { title: getSiteTitle(), iconUrl: getSiteIconUrl() };
 }
 
 function validateSiteIconUrl(value) {
