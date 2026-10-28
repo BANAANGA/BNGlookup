@@ -1246,3 +1246,5 @@ footer a:hover { color: #e4ffef; }
 .raw-whois summary { cursor: pointer; color: #b9c7bd; font-size: 12px; }
 .raw-whois pre { margin-top: 8px; max-height: 420px; }
 .detail-notice a { color: #8aeab1; }
+.mac-device-category { margin: 4px 0 10px; color: #f1f1f1; font-size: 18px; font-weight: 700; }
+.mac-device-guess .status-list { margin-bottom: 8px; }

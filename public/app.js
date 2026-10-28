@@ -1787,8 +1787,22 @@ function renderMacResult(data) {
           ${renderDetail("Registered address", data.address)}
         </div>
       </section>`
-    : '<p class="empty-result">No registered vendor was found for this MAC prefix. The address may be locally assigned or unregistered.</p>';
+    : data.locallyAdministered
+      ? ""
+      : '<p class="empty-result">No registered vendor was found for this MAC prefix. The address may be unregistered.</p>';
 
+  const guess = data.deviceGuess;
+  const confidenceLabels = { high: ["found", "High confidence"], medium: ["warning", "Medium confidence"], low: ["missing", "Low confidence"], none: ["missing", "No guess"] };
+  const [confidenceClass, confidenceLabel] = confidenceLabels[guess?.confidence] || confidenceLabels.none;
+  const deviceSection = guess ? `
+    <section class="email-auth mac-device-guess">
+      <h3>Likely device <span class="email-auth-status ${confidenceClass}">${escapeHtml(confidenceLabel)}</span></h3>
+      <p class="mac-device-category">${escapeHtml(guess.category)}</p>
+      ${guess.examples?.length ? `<div class="status-list">${guess.examples.map((example) => `<span>${escapeHtml(example)}</span>`).join("")}</div>` : ""}
+      <p class="dnssec-summary">${escapeHtml(guess.basis || "")}</p>
+      ${guess.notes?.length ? `<ul class="dnssec-issues">${guess.notes.map((note) => `<li class="dnssec-issue">${escapeHtml(note)}</li>`).join("")}</ul>` : ""}
+      <p class="scan-disclaimer">An educated guess. A MAC prefix identifies the manufacturer, not the model, so an exact product such as "iPhone 14" cannot be determined from the address alone.</p>
+    </section>` : "";
   resultPanel.innerHTML = `
     <div class="result-heading">
       <div><p class="eyebrow">MAC ADDRESS LOOKUP</p><h2>${copyableResult(data.mac)}</h2></div>
@@ -1799,6 +1813,7 @@ function renderMacResult(data) {
       ${renderDetail("Administration", administration)}
       ${renderDetail("OUI prefix", data.oui)}
     </div>
+    ${deviceSection}
     ${vendorDetails}
     <p class="scan-disclaimer">Vendor information is retrieved from maclookup.app. The submitted MAC address is sent to that service.</p>`;
   resultPanel.hidden = false;

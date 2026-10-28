@@ -6552,6 +6552,102 @@ async function digCommand(request, url, response) {
   }
 }
 
+// Prefixes that identify the kind of address rather than a hardware vendor.
+const macSpecialPrefixes = [
+  [/^FFFFFFFFFFFF$/, { category: "Broadcast address", examples: [], confidence: "high", basis: "Every bit set: sent to all devices on the network segment, not a device address." }],
+  [/^01005E/, { category: "IPv4 multicast group", examples: [], confidence: "high", basis: "01:00:5E is reserved for IPv4 multicast traffic, not a single device." }],
+  [/^3333/, { category: "IPv6 multicast group", examples: [], confidence: "high", basis: "33:33 is reserved for IPv6 multicast traffic, not a single device." }],
+  [/^0180C2/, { category: "Network protocol group address", examples: ["Spanning Tree (STP)", "LLDP", "802.1X"], confidence: "high", basis: "01:80:C2 is an IEEE 802.1 group address used by switches." }],
+  [/^01000C/, { category: "Cisco protocol group address", examples: ["CDP", "VTP", "PVST+"], confidence: "high", basis: "01:00:0C is used by Cisco discovery and spanning-tree protocols." }],
+  [/^(?:005056|000C29|000569|001C14)/, { category: "Virtual machine", examples: ["VMware virtual machine"], confidence: "high", basis: "This prefix is assigned to VMware virtual network adapters." }],
+  [/^080027/, { category: "Virtual machine", examples: ["VirtualBox virtual machine"], confidence: "high", basis: "08:00:27 is used by VirtualBox virtual network adapters." }],
+  [/^00155D/, { category: "Virtual machine", examples: ["Hyper-V virtual machine", "WSL 2", "Windows Sandbox"], confidence: "high", basis: "00:15:5D is used by Microsoft Hyper-V virtual adapters." }],
+  [/^525400/, { category: "Virtual machine", examples: ["QEMU/KVM virtual machine", "Proxmox VM", "libvirt guest"], confidence: "high", basis: "52:54:00 is the default prefix for QEMU/KVM virtual network cards." }],
+  [/^00163E/, { category: "Virtual machine", examples: ["Xen virtual machine"], confidence: "high", basis: "00:16:3E is used by Xen virtual network interfaces." }],
+  [/^001C42/, { category: "Virtual machine", examples: ["Parallels Desktop virtual machine"], confidence: "high", basis: "00:1C:42 is used by Parallels virtual adapters." }],
+  [/^0242/, { category: "Container", examples: ["Docker container"], confidence: "high", basis: "02:42 is the prefix Docker gives container network interfaces." }],
+];
+
+// Vendor name patterns mapped to the kind of device they usually make. Only a guess:
+// an OUI identifies the manufacturer, never the exact model.
+const macVendorRules = [
+  [/raspberry pi/i, "Single-board computer", ["Raspberry Pi"], "high"],
+  [/espressif/i, "IoT / smart-home device (ESP8266 / ESP32 chip)", ["Smart plug", "Smart bulb", "Sensor", "DIY / ESPHome / Tasmota device"], "high"],
+  [/arduino/i, "Microcontroller board", ["Arduino with Wi-Fi or Ethernet"], "high"],
+  [/shelly|allterco/i, "Smart relay / smart-home device", ["Shelly relay or plug"], "high"],
+  [/tuya/i, "Smart-home device", ["Smart plug", "Bulb", "Sensor (Tuya / Smart Life)"], "high"],
+  [/sonos/i, "Wireless speaker", ["Sonos speaker or soundbar"], "high"],
+  [/\bbose\b/i, "Audio device", ["Bose speaker or soundbar"], "high"],
+  [/signify|philips lighting/i, "Smart lighting", ["Philips Hue Bridge", "WiZ / Hue light"], "high"],
+  [/ubiquiti/i, "Network equipment", ["UniFi access point", "UniFi switch or gateway", "UniFi Protect camera"], "high"],
+  [/mikrotik|routerboard/i, "Router / switch", ["MikroTik router or switch"], "high"],
+  [/juniper/i, "Enterprise network equipment", ["Juniper router, switch or firewall"], "high"],
+  [/fortinet|palo alto|sonicwall|watchguard|check point/i, "Firewall / security appliance", ["Firewall or VPN gateway"], "high"],
+  [/aruba|ruckus|extreme networks|cambium|meraki/i, "Enterprise Wi-Fi / network equipment", ["Access point", "Switch"], "high"],
+  [/cisco/i, "Network equipment or IP phone", ["Cisco switch or router", "Cisco IP phone", "Wi-Fi access point"], "medium"],
+  [/tp-link|netgear|zyxel|d-link|linksys|asus.*router|avm\b|draytek|tenda|cudy/i, "Home / small-office network equipment", ["Wi-Fi router", "Mesh node", "Switch", "Range extender", "Smart plug (TP-Link Kasa / Tapo)"], "medium"],
+  [/synology/i, "Network storage (NAS)", ["Synology NAS"], "high"],
+  [/qnap/i, "Network storage (NAS)", ["QNAP NAS"], "high"],
+  [/western digital/i, "Storage device", ["WD My Cloud NAS"], "medium"],
+  [/nintendo/i, "Game console", ["Nintendo Switch", "Joy-Con controller"], "high"],
+  [/sony interactive|sony computer entertainment/i, "Game console", ["PlayStation 5", "PlayStation 4"], "high"],
+  [/valve/i, "Gaming device", ["Steam Deck", "Valve Index"], "high"],
+  [/roku/i, "Streaming player / smart TV", ["Roku streaming stick", "Roku TV"], "high"],
+  [/tesla/i, "Vehicle or energy product", ["Tesla car", "Powerwall", "Wall Connector"], "high"],
+  [/\bring\b/i, "Video doorbell / security camera", ["Ring doorbell", "Ring camera"], "high"],
+  [/nest labs/i, "Smart-home device", ["Nest thermostat", "Nest camera or doorbell", "Nest speaker"], "high"],
+  [/ecobee/i, "Smart thermostat", ["ecobee thermostat"], "high"],
+  [/hikvision|dahua|axis communications|reolink|ezviz|wyze|amcrest|hanwha|uniview|vivotek/i, "IP camera / video recorder", ["Security camera", "NVR"], "high"],
+  [/polycom|yealink|grandstream|snom|avaya|mitel|fanvil/i, "VoIP phone / conferencing", ["Desk phone", "Conference phone"], "high"],
+  [/brother|seiko epson|\bepson\b|lexmark|kyocera|xerox|ricoh|konica|sharp corp/i, "Printer / scanner", ["Network printer", "Multifunction printer"], "high"],
+  [/canon/i, "Printer or camera", ["Canon printer", "Canon camera"], "medium"],
+  [/zebra technologies|honeywell|datalogic/i, "Barcode scanner / label printer", ["Handheld scanner", "Label printer"], "medium"],
+  [/fitbit|garmin/i, "Wearable / fitness device", ["Smartwatch", "Fitness tracker"], "medium"],
+  [/super ?micro/i, "Server", ["Supermicro server or BMC"], "high"],
+  [/dell|lenovo|asustek|acer|micro-star|gigabyte|framework computer|hewlett packard enterprise/i, "Computer", ["Laptop", "Desktop PC", "Server"], "medium"],
+  [/hewlett packard|\bhp inc/i, "Computer or printer", ["HP printer", "HP laptop or desktop", "HP/Aruba network gear"], "low"],
+  [/intel corporate|intel corp/i, "Computer (Intel network adapter)", ["Laptop or desktop Wi-Fi / Ethernet"], "medium"],
+  [/microsoft/i, "Computer or game console", ["Surface", "Xbox", "PC network adapter"], "medium"],
+  [/apple/i, "Apple device", ["iPhone", "iPad", "Mac", "Apple Watch", "Apple TV", "HomePod / AirPods"], "low", "Apple uses the same OUIs across its product lines, so the model cannot be told from the address. iPhone, iPad and Apple Watch use a private (randomized) Wi-Fi address by default, so a real Apple address on Wi-Fi more often points to a Mac, Apple TV or HomePod, or a device with Private Wi-Fi Address turned off."],
+  [/samsung/i, "Samsung device", ["Galaxy phone or tablet", "Smart TV", "Appliance", "Galaxy Watch"], "low", "Samsung OUIs are shared between phones, TVs and appliances. Galaxy phones use a randomized address on Wi-Fi by default."],
+  [/google/i, "Google device", ["Pixel phone", "Chromecast / Google TV", "Nest speaker or display"], "low", "Pixel phones use a randomized address on Wi-Fi by default, so a real Google address is more often a Chromecast or Nest device."],
+  [/amazon/i, "Amazon device", ["Echo speaker", "Fire TV", "Kindle", "Ring / Blink camera"], "medium"],
+  [/xiaomi|huawei|honor device|oneplus|oppo|vivo mobile|motorola|realme|nokia|fairphone|htc|lg electronics/i, "Phone, tablet or consumer electronics", ["Smartphone", "Tablet", "Smart TV or IoT device"], "low", "Android phones use a randomized address on Wi-Fi by default, so a real vendor address is more common on tablets, TVs and IoT devices."],
+  [/realtek|qualcomm|atheros|mediatek|broadcom|marvell|azurewave|liteon|lite-on|hon hai|foxconn|murata|universal global|wistron|quanta|compal|pegatron|askey|gemtek|ampak|sercomm|arcadyan|sagemcom|technicolor/i, "Device with a third-party network chip", ["Laptop or PC adapter", "Router or set-top box", "IoT module"], "low", "This vendor makes network chips or builds devices for other brands, so the address says little about the finished product."],
+];
+
+function guessMacDevice({ hex, company, locallyAdministered, multicast, blockType }) {
+  for (const [pattern, guess] of macSpecialPrefixes) {
+    if (pattern.test(hex)) return { ...guess, notes: [] };
+  }
+  if (multicast) {
+    return { category: "Multicast / group address", examples: [], confidence: "high", basis: "The group bit is set, so this addresses a group of devices rather than one.", notes: [] };
+  }
+  if (locallyAdministered) {
+    return {
+      category: "Private (randomized) address",
+      examples: ["iPhone / iPad (Private Wi-Fi Address)", "Android phone (MAC randomization)", "Windows or macOS laptop (random hardware address)", "Virtual machine or container"],
+      confidence: "medium",
+      basis: "The locally administered bit is set, so the address was generated by software rather than burned in by a manufacturer.",
+      notes: ["Phones and many laptops pick a random address per Wi-Fi network to prevent tracking, so neither vendor nor model can be determined from it."],
+    };
+  }
+  if (!company) {
+    return { category: "Unknown", examples: [], confidence: "none", basis: "No vendor is registered for this prefix.", notes: [] };
+  }
+  const rule = macVendorRules.find(([pattern]) => pattern.test(company));
+  const notes = [];
+  if (blockType && /MA-S|IAB|MA-M/i.test(blockType)) {
+    notes.push(`This prefix is a small ${blockType} block, which companies usually buy for a single product line.`);
+  }
+  if (!rule) {
+    return { category: "Unknown device type", examples: [], confidence: "none", basis: `No device-type pattern is known for ${company.replace(/\.+$/, "")}.`, notes };
+  }
+  const [, category, examples, confidence, caveat] = rule;
+  if (caveat) notes.unshift(caveat);
+  return { category, examples, confidence, basis: `Based on the registered vendor: ${company.replace(/\.+$/, "")}.`, notes };
+}
+
 async function macLookup(url, response) {
   const rawInput = queryInput(url, "name", 32, response);
   if (rawInput === null) return;
@@ -6601,16 +6697,25 @@ async function macLookup(url, response) {
     return;
   }
 
+  const found = data.success && data.found;
+  const deviceGuess = guessMacDevice({
+    hex,
+    company: found ? data.company || null : null,
+    locallyAdministered: Boolean(firstOctet & 2),
+    multicast: Boolean(firstOctet & 1),
+    blockType: data.blockType || null,
+  });
   sendJson(response, 200, {
     mac,
     oui: hex.slice(0, 6),
     multicast: Boolean(firstOctet & 1),
     locallyAdministered: Boolean(firstOctet & 2),
-    found: data.success && data.found,
+    found,
     company: data.company || null,
     country: data.country || null,
     address: data.address || null,
     blockType: data.blockType || null,
+    deviceGuess,
   });
 }
 
