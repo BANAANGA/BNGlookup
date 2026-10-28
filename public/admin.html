@@ -87,6 +87,23 @@
               <label class="branding-reset" for="reset-site-icon"><input id="reset-site-icon" type="checkbox"> Use the default icon</label>
               <div class="branding-preview" id="branding-preview" aria-live="polite"></div>
             </div>
+            <h2 class="policy-heading">BIMI logo</h2>
+            <p class="form-hint">Upload your brand logo as an SVG. It replaces the header logo and is served at <code id="bimi-logo-url">/logo.svg</code>, the URL to use in your domain's BIMI record. Files with scripts, links, embedded content or external references are rejected; the upload is also checked against the BIMI SVG Tiny Portable/Secure rules.</p>
+            <div class="bimi-logo-setting">
+              <img class="bimi-logo-preview" id="bimi-logo-preview" src="/logo.svg" alt="Current logo" width="96" height="96">
+              <div class="bimi-logo-fields">
+                <input id="bimi-logo-upload" type="file" accept="image/svg+xml,.svg" aria-label="Upload an SVG logo">
+                <div class="bimi-logo-actions">
+                  <button class="dash-version-check" id="bimi-logo-save" type="button" disabled>Upload logo</button>
+                  <button class="dash-version-check" id="bimi-logo-remove" type="button" hidden>Use the default logo</button>
+                </div>
+                <p class="logs-status" id="bimi-logo-status" role="status"></p>
+                <ul class="bimi-logo-warnings" id="bimi-logo-warnings" hidden></ul>
+              </div>
+            </div>
+            <label class="bimi-record-label" for="bimi-record">BIMI DNS record (TXT at <code>default._bimi.&lt;your-domain&gt;</code>)</label>
+            <input id="bimi-record" type="text" readonly>
+            <span class="form-hint">Most mailbox providers, including Gmail and Apple Mail, only show BIMI logos for domains with DMARC at p=quarantine or p=reject, and many also require a Verified Mark Certificate (add <code>a=https://…/vmc.pem</code>).</span>
             <h2 class="policy-heading">Default DNS resolver</h2>
             <p class="form-hint">This encrypted DNS-over-HTTPS resolver is used for lookups unless a query specifies a nameserver. DNS4EU uses its protective service, which filters domains classified as malicious.</p>
             <div id="dns-resolver-setting" class="feature-settings"></div>
@@ -148,7 +165,7 @@
           <h2>Create user</h2>
           <form id="create-user-form" class="admin-create-form">
             <label for="new-username">Username</label>
-            <input id="new-username" name="username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" autocomplete="off" required>
+            <input id="new-username" name="username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.\-]{3,32}" autocomplete="off" required>
             <label for="new-password">Temporary password</label>
             <input id="new-password" name="password" type="password" minlength="12" maxlength="128" autocomplete="new-password" required>
             <label for="new-email">Email (optional)</label>

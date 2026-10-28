@@ -15,10 +15,13 @@ async function applySiteBranding() {
       ? title
       : `${document.title.slice(0, titleSeparator)} · ${title}`;
 
-    if (typeof branding.iconUrl === "string" && branding.iconUrl) {
+    const logoUrl = typeof branding.logoUrl === "string" && branding.logoUrl ? branding.logoUrl : branding.iconUrl;
+    if (typeof logoUrl === "string" && logoUrl) {
       document.querySelectorAll(".brand-logo").forEach((element) => {
-        element.src = branding.iconUrl;
+        element.src = logoUrl;
       });
+    }
+    if (typeof branding.iconUrl === "string" && branding.iconUrl) {
       document.querySelectorAll('link[rel="icon"]').forEach((element) => {
         element.href = branding.iconUrl;
         element.type = branding.iconUrl.startsWith("data:image/")

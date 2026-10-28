@@ -610,7 +610,75 @@ document.querySelector("#about-reset").addEventListener("click", async () => {
   }
 });
 
+const bimiLogoUpload = document.querySelector("#bimi-logo-upload");
+const bimiLogoSave = document.querySelector("#bimi-logo-save");
+const bimiLogoRemove = document.querySelector("#bimi-logo-remove");
+const bimiLogoPreview = document.querySelector("#bimi-logo-preview");
+const bimiLogoStatus = document.querySelector("#bimi-logo-status");
+const bimiLogoWarnings = document.querySelector("#bimi-logo-warnings");
+const bimiRecord = document.querySelector("#bimi-record");
+
+function renderBimiLogo(data) {
+  bimiLogoPreview.src = `/logo.svg?v=${encodeURIComponent(data.updatedAt || "default")}`;
+  if (window.applySiteBranding) window.applySiteBranding();
+  document.querySelector("#bimi-logo-url").textContent = data.url;
+  bimiRecord.value = data.record;
+  bimiLogoRemove.hidden = !data.custom;
+  bimiLogoStatus.textContent = data.custom
+    ? `Custom logo (${(data.bytes / 1024).toFixed(1)} KB), uploaded ${new Date(data.updatedAt).toLocaleString()}.`
+    : "Showing the default logo.";
+  renderBimiWarnings(data.warnings, data.custom ? "Accepted, but BIMI validators may reject it:" : "");
+}
+
+function renderBimiWarnings(warnings = [], heading = "") {
+  bimiLogoWarnings.hidden = !warnings.length;
+  bimiLogoWarnings.innerHTML = warnings.length
+    ? `${heading ? `<li class="bimi-logo-warning-heading">${escapeHtml(heading)}</li>` : ""}${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}`
+    : "";
+}
+
+async function loadBimiLogo() {
+  try {
+    renderBimiLogo(await api("/api/admin/logo"));
+  } catch (error) {
+    bimiLogoStatus.textContent = error.message;
+  }
+}
+
+bimiLogoUpload.addEventListener("change", () => {
+  const file = bimiLogoUpload.files[0];
+  bimiLogoSave.disabled = !file;
+  if (file) bimiLogoStatus.textContent = `${file.name} selected (${(file.size / 1024).toFixed(1)} KB). Upload it to publish.`;
+});
+
+bimiLogoSave.addEventListener("click", async () => {
+  const file = bimiLogoUpload.files[0];
+  if (!file) return;
+  bimiLogoSave.disabled = true;
+  try {
+    const data = await api("/api/admin/logo", { method: "PUT", body: JSON.stringify({ svg: await file.text() }) });
+    bimiLogoUpload.value = "";
+    renderBimiLogo(data);
+    showAdminSuccess(data.warnings.length ? "Logo uploaded. See the BIMI notes below it." : "Logo uploaded; it meets the BIMI SVG checks.");
+  } catch (error) {
+    bimiLogoSave.disabled = false;
+    renderBimiWarnings([]);
+    showAdminError(`Logo rejected: ${error.message}`);
+  }
+});
+
+bimiLogoRemove.addEventListener("click", async () => {
+  if (!window.confirm("Remove the custom logo and use the default one?")) return;
+  try {
+    renderBimiLogo(await api("/api/admin/logo", { method: "DELETE" }));
+    showAdminSuccess("Custom logo removed.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
 loadCertificate();
 loadAboutEditor();
+loadBimiLogo();
 
 initializeAdmin();
