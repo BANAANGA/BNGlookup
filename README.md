@@ -396,8 +396,8 @@ Several tools send data to external services; these are listed under
   bold, italic, code, links, lists, quotes, rules and code blocks); HTML is shown
   as text and only `http(s)`, `mailto:` and same-site links become links. Up to
   20,000 characters; *Reset to default* restores the built-in text.
-- **BIMI logo**: Settings → General → BIMI logo uploads an SVG that replaces the
-  header logo and is served at `https://<your-site>/logo.svg`, ready for a BIMI
+- **BIMI logo**: Settings → General → BIMI logo uploads an SVG that is served at
+  `https://<your-site>/logo.svg` (the site icon and header logo stay unchanged), ready for a BIMI
   record: `default._bimi.example.com TXT "v=BIMI1; l=https://<your-site>/logo.svg;"`.
   Uploads containing scripts, event handlers, links, embedded content, animation,
   entities or external references are rejected (64 KB limit), and the file is
