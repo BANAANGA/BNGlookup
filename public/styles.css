@@ -1242,3 +1242,6 @@ footer a:hover { color: #e4ffef; }
 .logs-filter select, .logs-filter input { padding: 8px 9px; border: 1px solid #292929; border-radius: 6px; color: #e4e4e4; background: #0d0d0d; font-size: 12px; color-scheme: dark; }
 .logs-table mark { padding: 0 2px; border-radius: 3px; color: #101010; background: #f0cb86; }
 .logs-more { display: block; margin: 12px auto 0; }
+.raw-whois { margin-top: 12px; }
+.raw-whois summary { cursor: pointer; color: #b9c7bd; font-size: 12px; }
+.raw-whois pre { margin-top: 8px; max-height: 420px; }

@@ -928,9 +928,10 @@ function renderScanResult(data) {
     ${data.failedQueries ? `<p class="detail-notice">${escapeHtml(data.failedQueries)} DNS queries could not be completed.</p>` : ""}
     ${data.subdomainDiscoveryError ? `<p class="detail-notice">${escapeHtml(data.subdomainDiscoveryError)}</p>` : ""}
     <section class="email-auth">
-      <h3>Domain registration <span class="email-auth-status ${registration ? "found" : "missing"}">${registration ? "WHOIS / RDAP" : "Unavailable"}</span></h3>
+      <h3>Domain registration <span class="email-auth-status ${registration ? "found" : "missing"}">${registration ? escapeHtml(registrationSourceLabel(registration)) : "Unavailable"}</span></h3>
       ${registrationDetails}
-      <p class="scan-disclaimer">Registration information is provided by RDAP, the modern WHOIS service. Contact details may be redacted or unavailable.</p>
+      ${renderRawWhois(registration)}
+      <p class="scan-disclaimer">Registration information comes from RDAP, or from the registry's WHOIS server for domains whose registry has no RDAP service (many country-code domains). Contact details may be redacted or unavailable.</p>
     </section>
     ${renderDnssecSection(data.dnssec)}
     ${renderBlocklistSection(data.blocklists)}
@@ -1808,6 +1809,15 @@ function renderDetail(label, value) {
   return `<div class="detail-row"><span>${escapeHtml(label)}</span><strong>${copyableResult(value)}</strong></div>`;
 }
 
+function registrationSourceLabel(registration) {
+  return registration?.source === "whois" ? `WHOIS · ${registration.whoisServer || "port 43"}` : "RDAP";
+}
+
+function renderRawWhois(registration) {
+  if (!registration?.rawWhois) return "";
+  return `<details class="raw-whois"><summary>Raw WHOIS response from ${escapeHtml(registration.whoisServer || "the registry")}</summary><pre class="dig-output">${escapeHtml(registration.rawWhois)}</pre></details>`;
+}
+
 function renderDomainInfo(data) {
   const registration = data.registration;
   const dnsNameservers = data.dnsNameservers;
@@ -1876,7 +1886,7 @@ function renderDomainInfo(data) {
     </div>
     ${data.registrationError ? `<p class="detail-notice">${escapeHtml(data.registrationError)}</p>` : ""}
     ${registration ? `<section class="record-section">
-      <h3>Registration <span>RDAP / WHOIS</span></h3>
+      <h3>Registration <span>${escapeHtml(registrationSourceLabel(registration))}</span></h3>
       <div class="detail-list">
         ${renderDetail("Registrar", registrar?.organization || registrar?.name)}
         ${renderDetail("Registry handle", registration.handle)}
@@ -1884,6 +1894,7 @@ function renderDomainInfo(data) {
       </div>
       ${registration.statuses.length ? `<div class="status-list">${registration.statuses.map((status) => `<span>${escapeHtml(status)}</span>`).join("")}</div>` : ""}
       ${contactRows ? `<div class="contact-list">${contactRows}</div>` : ""}
+      ${renderRawWhois(registration)}
     </section>` : ""}
     ${data.dnsNameserversError ? `<p class="detail-notice">${escapeHtml(data.dnsNameserversError)}</p>` : ""}
     ${dnsNameservers?.status && dnsNameservers.status !== "NOERROR" ? `<p class="detail-notice">Nameserver query status: ${escapeHtml(dnsNameservers.status)}</p>` : ""}

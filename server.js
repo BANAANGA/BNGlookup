@@ -754,6 +754,156 @@ function entityContact(entity) {
   return Object.values(contact).some(Boolean) ? contact : null;
 }
 
+const whoisServerCache = new Map();
+const whoisNotFoundPattern = /^(?:no match|not found|no entries found|no data found|domain not found|status:\s*(?:free|available)|.*\bis (?:free|available for registration)\b|.*\bno (?:object|matching record)s? found\b|.*\bnot (?:been )?registered\b)/im;
+
+function queryWhoisServer(server, query, { timeoutMs = 10000, maxBytes = 131072 } = {}) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    const socket = net.connect({ host: server, port: 43 });
+    const finish = (error) => {
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+    socket.setTimeout(timeoutMs, () => finish(Object.assign(new Error(`The WHOIS server ${server} did not respond in time.`), { name: "TimeoutError" })));
+    socket.once("connect", () => socket.write(`${query}\r\n`));
+    socket.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        finish(null);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    socket.once("end", () => finish(null));
+    socket.once("error", (error) => finish(new Error(`The WHOIS server ${server} could not be reached (${error.code || error.message}).`)));
+  });
+}
+
+async function whoisServerForTld(tld) {
+  const cached = whoisServerCache.get(tld);
+  if (cached && Date.now() - cached.at < 24 * 3600_000) return cached.server;
+  const text = await queryWhoisServer("whois.iana.org", tld);
+  const server = (text.match(/^whois:\s*([a-z0-9.-]+)\s*$/im) || text.match(/^refer:\s*([a-z0-9.-]+)\s*$/im) || [])[1]?.toLowerCase() || null;
+  whoisServerCache.set(tld, { server, at: Date.now() });
+  return server;
+}
+
+// Parses "Key: value" WHOIS text, including indented multi-line blocks such as the .nl format.
+function parseWhoisText(text) {
+  const fields = [];
+  let current = null;
+  for (const rawLine of text.split(/\r?\n/)) {
+    if (/^\s*[%#>]/.test(rawLine) || /^\s*-{3,}/.test(rawLine)) continue;
+    if (!rawLine.trim()) {
+      current = null;
+      continue;
+    }
+    const match = rawLine.match(/^\s*([A-Za-z][A-Za-z0-9 ./()'_-]{0,60}?)\s*:\s*(.*)$/);
+    if (match && !/^https?$/i.test(match[1])) {
+      current = { key: match[1].trim().toLowerCase(), values: match[2].trim() ? [match[2].trim()] : [] };
+      fields.push(current);
+    } else if (current && /^\s+/.test(rawLine)) {
+      current.values.push(rawLine.trim());
+    }
+  }
+  return fields;
+}
+
+function registrationFromWhois(domain, server, text) {
+  const fields = parseWhoisText(text);
+  const valuesFor = (pattern) => fields.filter((field) => pattern.test(field.key)).flatMap((field) => field.values).filter(Boolean);
+  const firstDate = (pattern) => {
+    for (const value of valuesFor(pattern)) {
+      const cleaned = value.replace(/\s*\(.*\)$/, "").trim();
+      const parsed = Date.parse(/^\d{4}\.\d{2}\.\d{2}/.test(cleaned) ? cleaned.replace(/\./g, "-") : cleaned.replace(/^(\d{2})[-./](\d{2})[-./](\d{4})/, "$3-$2-$1"));
+      if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+    }
+    return null;
+  };
+  const dates = {};
+  const created = firstDate(/^(creation date|created|created on|registered|registered on|registration date|registration time|domain registration date|record created|activated)$/);
+  const expires = firstDate(/^(registry expiry date|registrar registration expiration date|expiry date|expiration date|expires|expires on|expire|paid-till|renewal date|validity)$/);
+  const updated = firstDate(/^(updated date|last updated|last update|changed|last modified|modified|last-update)$/);
+  if (created) dates.registration = created;
+  if (expires) dates.expiration = expires;
+  if (updated) dates["last changed"] = updated;
+  const registrarName = valuesFor(/^(registrar|sponsoring registrar|registrar name|registrar organization)$/)[0] || null;
+  const nameservers = [...new Set(valuesFor(/^(name ?servers?|nserver|domain nameservers|nameservers? information|dns|host ?name)$/)
+    .flatMap((value) => value.split(/[\s,]+/))
+    .map((value) => value.toLowerCase().replace(/\.$/, ""))
+    .filter((value) => /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(value) && !isIP(value)))];
+  const statuses = [...new Set(valuesFor(/^(domain status|status|state)$/)
+    .map((value) => value.split(/\s+/)[0])
+    .filter(Boolean))];
+  const registrant = valuesFor(/^(registrant organization|registrant organisation|registrant|org)$/)[0] || null;
+  return {
+    name: (valuesFor(/^(domain name|domain)$/)[0] || domain).toLowerCase(),
+    handle: null,
+    registrar: registrarName ? { name: registrarName, organization: null, email: null, phone: null, address: null } : null,
+    dates,
+    statuses,
+    contacts: registrant && !/redacted|privacy|withheld|not disclosed/i.test(registrant)
+      ? [{ roles: ["registrant"], name: registrant, organization: null, email: null, phone: null, address: null }]
+      : [],
+    nameservers: nameservers.map((name) => ({ name, ipv4: [], ipv6: [] })),
+    source: "whois",
+    whoisServer: server,
+    rawWhois: text.trim().slice(0, 20000),
+  };
+}
+
+async function fetchWhois(domain) {
+  const tld = domain.split(".").pop();
+  const server = await whoisServerForTld(tld);
+  if (!server) throw new Error(`No WHOIS server is published for .${tld} domains.`);
+  const query = server === "whois.denic.de" ? `-T dn,ace ${domain}` : domain;
+  let text = await queryWhoisServer(server, query);
+  let usedServer = server;
+  if (whoisNotFoundPattern.test(text) && !/^domain name:/im.test(text)) {
+    throw Object.assign(new Error("No registration record was found for this domain."), { notFound: true });
+  }
+  // Thin registries (such as .com) refer to the registrar's WHOIS server for full details.
+  const referral = text.match(/^\s*registrar whois server:\s*([a-z0-9.-]+)\s*$/im)?.[1]?.toLowerCase();
+  if (referral && referral !== server && /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(referral)) {
+    try {
+      const detailed = await queryWhoisServer(referral, domain);
+      if (detailed.trim() && !whoisNotFoundPattern.test(detailed)) {
+        text = `${text.trim()}\n\n# ${referral}\n${detailed}`;
+        usedServer = `${server} → ${referral}`;
+      }
+    } catch {
+      // Keep the registry answer if the registrar server is unreachable.
+    }
+  }
+  return registrationFromWhois(domain, usedServer, text);
+}
+
+// RDAP first; many ccTLDs (for example .nl and .ga) only offer port-43 WHOIS.
+async function fetchRegistration(domain) {
+  let rdapError;
+  try {
+    return { source: "rdap", ...await fetchRdap(domain) };
+  } catch (error) {
+    rdapError = error;
+  }
+  // A subdomain is not registered on its own, so retry with parent names down to two labels.
+  const labels = domain.split(".");
+  const candidates = labels.slice(0, -1).map((_, index) => labels.slice(index).join(".")).slice(0, 4);
+  let whoisError;
+  for (const candidate of candidates) {
+    try {
+      return await fetchWhois(candidate);
+    } catch (error) {
+      whoisError ||= error;
+      if (!error.notFound) break;
+    }
+  }
+  throw whoisError?.notFound ? whoisError : new Error(`${rdapError.message} WHOIS fallback: ${whoisError?.message || "unavailable"}`);
+}
+
 async function fetchRdap(domain) {
   const response = await fetch(`https://rdap.org/domain/${encodeURIComponent(domain)}`, {
     headers: {
@@ -2802,7 +2952,7 @@ async function bulkScan(request, url, response) {
     return;
   }
 
-  const registrationPromise = fetchRdap(domain).then(
+  const registrationPromise = fetchRegistration(domain).then(
     (registration) => ({ registration, error: null }),
     (error) => ({
       registration: null,
@@ -3060,7 +3210,7 @@ async function domainInfo(url, response) {
   }
 
   const [rdapResult, nameserverResult] = await Promise.allSettled([
-    fetchRdap(domain),
+    fetchRegistration(domain),
     fetchNameservers(domain),
   ]);
   const nameserverRecords = nameserverResult.status === "fulfilled"
