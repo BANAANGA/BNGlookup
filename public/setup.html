@@ -22,8 +22,13 @@
         <p class="eyebrow">FIRST-RUN SETUP</p>
         <h1>Create administrator</h1>
         <p class="account-description">Create the initial administrator account. The first account receives full access and can configure public features and manage users.</p>
-        <p class="account-warning">Anyone who can reach this page before setup is complete can claim the initial administrator account. Restrict network access until setup is finished.</p>
+        <p class="account-warning">Anyone who can reach this page before setup is complete can claim the initial administrator account. Restrict network access until setup is finished, or start the server with a SETUP_TOKEN.</p>
         <form id="setup-form" class="account-form">
+          <div id="setup-token-field" hidden>
+            <label for="setup-token">Setup token</label>
+            <input id="setup-token" name="setupToken" type="password" maxlength="256" autocomplete="off">
+            <p class="form-hint">This server was started with a SETUP_TOKEN. Enter that value to prove you operate it.</p>
+          </div>
           <label for="username">Username</label>
           <input id="username" name="username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}" autocomplete="username" required>
           <label for="password">Password</label>
