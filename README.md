@@ -199,7 +199,7 @@ Several tools send data to external services; these are listed under
 | --- | --- |
 | DNS lookup | Common types or any type by name/code. `ANY` may return incomplete data. Choose **DNSSEC** for a validation check (see below). |
 | Reverse lookup | IPv4/IPv6 PTR; shows IP WHOIS. |
-| Whois | RDAP via `rdap.org`; missing ASNs are resolved through RIPE Stat, with `ipwho.is` as fallback. Contacts may be redacted. |
+| Whois | RDAP via `rdap.org`; for domains whose registry has no RDAP service (many ccTLDs such as `.nl` and `.ga`), classic WHOIS on TCP port 43: the TLD's server is found through `whois.iana.org`, one registrar referral is followed, and the raw response is shown. Subdomains fall back to their parent domain. Missing ASNs are resolved through RIPE Stat, with `ipwho.is` as fallback. Contacts may be redacted. |
 | Dig | Runs the real `dig` binary (no shell) with one query: `@server`, name, type, class, `-t -c -q -x -p -4 -6 -u`, and an allowlist of `+options` (`+short`, `+dnssec`, `+trace`, `+tcp`, `+nsid`, `+subnet=`, `+noall +answer`, …). `+time` ≤ 10 s, `+tries` ≤ 3, 30 s overall limit, 256 KB output. File, key and bind-address flags (`-f`, `-k`, `-y`, `-b`) are rejected. A private `@server` follows the role's local-network setting; without `@server` the container's resolver is used. |
 | MAC lookup | Vendor data from `maclookup.app`. |
 | Ping | ICMP: 4 echo requests with loss and RTT. HTTP/HTTPS: one GET to `/` (redirects reported, not followed). |
@@ -438,7 +438,7 @@ requests get HSTS and Secure cookies.
 | --- | --- |
 | Queried names and record types | Selected DoH provider |
 | Visitor IP (landing page PTR) | DoH provider; `rdap.org` for registration data |
-| Domains and IPs for Whois | `rdap.org`, `ipwho.is` (ASN fallback) |
+| Domains and IPs for Whois | `rdap.org`, `ipwho.is` (ASN fallback); `whois.iana.org` and the registry's WHOIS server over TCP port 43 when RDAP is unavailable (allow outbound port 43 in your firewall) |
 | Public IPs in scan results | `ipwho.is` (geolocation); private IPs are not sent |
 | Scanned domain | `crt.sh`, then CertSpotter on failure |
 | MAC address | `maclookup.app` |
