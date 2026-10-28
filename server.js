@@ -10,6 +10,7 @@ const dgram = require("node:dgram");
 const net = require("node:net");
 const http2 = require("node:http2");
 const crypto = require("node:crypto");
+const zlib = require("node:zlib");
 const { promisify } = require("node:util");
 const { DatabaseSync } = require("node:sqlite");
 const { lookup: resolveHost, Resolver: DnsResolver } = require("node:dns/promises");
@@ -1789,10 +1790,11 @@ async function analyzeDmarc(domain) {
   return { found: true, record: dmarc[0], tags, policy: policy || null, issues };
 }
 
-function fetchPinnedHttps(hostname, address, requestPath, { timeoutMs = 6000, maxBytes = 65536 } = {}) {
+function fetchPinnedHttps(hostname, address, requestPath, { timeoutMs = 6000, maxBytes = 65536, port = 443 } = {}) {
   return new Promise((resolve, reject) => {
     const request = https.get({
       host: hostname,
+      port,
       servername: hostname,
       path: requestPath,
       headers: { "user-agent": "BNGlookup-mail-check" },
@@ -2157,16 +2159,177 @@ async function analyzeDkimSelector(domain, selector, provider) {
   return { selector, provider, record: record.slice(0, 2000), keyType, keyBits, revoked: !publicKey, testing: /(^|:)y(:|$)/i.test(tags.t || ""), issues };
 }
 
+// Fetches a BIMI logo or certificate URL over HTTPS, pinned to a public address of its host.
+async function fetchBimiFile(location, maxBytes) {
+  let target;
+  try {
+    target = new URL(location);
+  } catch {
+    return { error: "The URL is not valid." };
+  }
+  if (target.protocol !== "https:") return { error: "The URL must use HTTPS." };
+  if (target.username || target.password) return { error: "The URL must not contain credentials." };
+  const hostname = target.hostname.replace(/^\[|\]$/g, "");
+  let address = isIP(hostname) ? hostname : null;
+  if (!address) {
+    for (const type of ["A", "AAAA"]) {
+      const answers = await queryDohDns(hostname, type).then((data) => data.answers, () => []);
+      address = answers.filter((answer) => answer.type === (type === "A" ? 1 : 28) || answer.typeName === type)
+        .map((answer) => answer.data).find((value) => isPublicAddress(value));
+      if (address) break;
+    }
+  }
+  if (!address || !isPublicAddress(address)) return { error: `${hostname} does not resolve to a public address.` };
+  try {
+    const response = await fetchPinnedHttps(hostname, address, `${target.pathname}${target.search}`, {
+      maxBytes, timeoutMs: 8000, port: Number(target.port) || 443,
+    });
+    if (response.status !== 200) {
+      return { error: response.status >= 300 && response.status < 400 ? `HTTP ${response.status} redirect; BIMI files must be served directly.` : `HTTP ${response.status}.` };
+    }
+    return { contentType: response.contentType, body: response.body };
+  } catch (error) {
+    return { error: error.message === "The response is too large." ? `The file is larger than ${Math.round(maxBytes / 1024)} KB.` : error.name === "TimeoutError" ? "The request timed out." : `Could not fetch the file (${String(error.code || error.message).slice(0, 80)}).` };
+  }
+}
+
+const bimiMarkTypeOid = "1.3.6.1.4.1.53087.1.13";
+const bimiExtendedKeyUsage = "1.3.6.1.5.5.7.3.31";
+
+function analyzeBimiCertificate(pem, domain, logoSvg) {
+  const blocks = String(pem).match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) || [];
+  if (!blocks.length) return { error: "The file contains no PEM certificate." };
+  let chain;
+  try {
+    chain = blocks.slice(0, 5).map((block) => new crypto.X509Certificate(block));
+  } catch {
+    return { error: "The certificate could not be parsed." };
+  }
+  const leaf = chain[0];
+  const issues = [];
+  const subjectFields = Object.fromEntries(leaf.subject.split("\n").map((line) => {
+    const index = line.indexOf("=");
+    return [line.slice(0, index), line.slice(index + 1)];
+  }));
+  const markType = subjectFields[bimiMarkTypeOid] || null;
+  const names = (leaf.subjectAltName || "").split(/,\s*/).filter((name) => name.startsWith("DNS:")).map((name) => name.slice(4).toLowerCase());
+  const validTo = new Date(leaf.validTo);
+  const daysRemaining = Math.floor((validTo.getTime() - Date.now()) / 86400000);
+  const kind = /prior use|modified registered/i.test(markType || "") ? "CMC" : markType ? "VMC" : null;
+  if (!(leaf.keyUsage || []).includes(bimiExtendedKeyUsage)) {
+    issues.push({ severity: "high", message: "The certificate is not a mark certificate (it lacks the BIMI extended key usage)." });
+  }
+  if (daysRemaining < 0) issues.push({ severity: "high", message: "The mark certificate has expired." });
+  else if (daysRemaining < 30) issues.push({ severity: "medium", message: `The mark certificate expires in ${daysRemaining} days.` });
+  if (new Date(leaf.validFrom) > new Date()) issues.push({ severity: "high", message: "The mark certificate is not valid yet." });
+  if (!names.some((name) => name === domain || domain.endsWith(`.${name}`))) {
+    issues.push({ severity: "high", message: `The certificate does not cover ${domain} (it lists ${names.join(", ") || "no domain names"}).` });
+  }
+  if (chain.length < 2) {
+    issues.push({ severity: "medium", message: "The file only contains the end certificate; it should include the intermediate certificate(s) too." });
+  } else if (!chain.slice(1).some((issuer) => leaf.checkIssued(issuer) && leaf.verify(issuer.publicKey))) {
+    issues.push({ severity: "high", message: "The included intermediate certificate did not issue the mark certificate." });
+  }
+  // The certificate embeds the logo as a gzip-compressed SVG data URL; BIMI requires it to match l=.
+  let embeddedLogoMatches = null;
+  const raw = leaf.raw.toString("latin1");
+  const marker = raw.indexOf("data:image/svg+xml;base64,");
+  if (marker >= 0) {
+    const encoded = raw.slice(marker + 26).match(/^[A-Za-z0-9+/=]+/)?.[0] || "";
+    try {
+      const data = Buffer.from(encoded, "base64");
+      const embedded = (data[0] === 0x1f && data[1] === 0x8b ? zlib.gunzipSync(data, { maxOutputLength: 1048576 }) : data).toString("utf8");
+      if (logoSvg) {
+        const normalize = (svg) => svg.replace(/^\uFEFF/, "").replace(/\s+/g, " ").trim();
+        embeddedLogoMatches = normalize(embedded) === normalize(logoSvg);
+        if (!embeddedLogoMatches) issues.push({ severity: "high", message: "The logo embedded in the certificate differs from the logo at l=; receivers will not show it." });
+      }
+    } catch {
+      issues.push({ severity: "medium", message: "The logo embedded in the certificate could not be decoded." });
+    }
+  } else {
+    issues.push({ severity: "medium", message: "The certificate does not embed a logo." });
+  }
+  return {
+    kind,
+    markType,
+    subject: subjectFields.O || subjectFields.CN || null,
+    trademark: subjectFields["1.3.6.1.4.1.53087.1.4"] || null,
+    issuer: leaf.issuer.split("\n").find((line) => line.startsWith("O="))?.slice(2) || leaf.issuer.split("\n").find((line) => line.startsWith("CN="))?.slice(3) || null,
+    names,
+    validTo: validTo.toISOString(),
+    daysRemaining,
+    chainLength: chain.length,
+    embeddedLogoMatches,
+    issues,
+  };
+}
+
 async function analyzeBimi(domain) {
   const { records } = await queryTxtRecords(`default._bimi.${domain}`);
-  const record = records.find((value) => /^v\s*=\s*BIMI1\b/i.test(value.trim()));
+  const bimiRecords = records.filter((value) => /^v\s*=\s*BIMI1\b/i.test(value.trim()));
+  const record = bimiRecords[0];
   if (!record) return { found: false, record: null, issues: [] };
   const tags = parseTagList(record);
   const issues = [];
-  if (!tags.l) issues.push({ severity: "medium", message: "No logo location (l=)." });
-  else if (!/^https:\/\//i.test(tags.l)) issues.push({ severity: "medium", message: "The logo URL must use HTTPS." });
-  if (!tags.a) issues.push({ severity: "low", message: "No Verified Mark Certificate (a=); Gmail and Apple Mail only show BIMI logos with one." });
-  return { found: true, record, logo: tags.l || null, certificate: tags.a || null, issues };
+  const result = { found: true, record, logo: tags.l || null, certificate: tags.a || null, logoCheck: null, certificateCheck: null, issues };
+  if (bimiRecords.length > 1) issues.push({ severity: "high", message: "More than one BIMI record is published at default._bimi; receivers will ignore BIMI." });
+  if (!tags.l && !tags.a) issues.push({ severity: "low", message: "The record has no logo (empty l=), which declines BIMI for this domain." });
+  else if (!tags.l) issues.push({ severity: "medium", message: "No logo location (l=)." });
+  if (!tags.a) issues.push({ severity: "low", message: "No mark certificate (a=); Gmail and Apple Mail only show BIMI logos with a VMC or CMC." });
+  const [logoFile, certificateFile] = await Promise.all([
+    tags.l ? fetchBimiFile(tags.l, 65536) : null,
+    tags.a ? fetchBimiFile(tags.a, 131072) : null,
+  ]);
+  let logoSvg = null;
+  if (logoFile) {
+    const logoIssues = [];
+    const check = { fetched: !logoFile.error, error: logoFile.error || null, contentType: logoFile.contentType || null, bytes: null, preview: null, issues: logoIssues };
+    if (!logoFile.error) {
+      logoSvg = logoFile.body;
+      check.bytes = Buffer.byteLength(logoSvg);
+      if (!/^image\/svg\+xml\b/i.test(check.contentType)) {
+        logoIssues.push({ severity: "medium", message: `The logo is served as "${check.contentType || "no content type"}" instead of image/svg+xml.` });
+      }
+      const { errors, warnings } = validateBimiSvg(logoSvg);
+      for (const message of errors) logoIssues.push({ severity: "high", message: `SVG Tiny PS: ${message}` });
+      for (const message of warnings) logoIssues.push({ severity: "medium", message });
+      // An SVG shown through <img> cannot run script, and a data URL keeps the logo host from seeing the visitor.
+      if (!errors.length || errors.every((message) => !/root element/.test(message))) {
+        check.preview = `data:image/svg+xml;base64,${Buffer.from(logoSvg).toString("base64")}`;
+      }
+    } else {
+      logoIssues.push({ severity: "high", message: `The logo could not be fetched: ${logoFile.error}` });
+    }
+    result.logoCheck = check;
+    issues.push(...logoIssues);
+  }
+  if (certificateFile) {
+    if (certificateFile.error) {
+      result.certificateCheck = { error: certificateFile.error, issues: [] };
+      issues.push({ severity: "high", message: `The mark certificate could not be fetched: ${certificateFile.error}` });
+    } else {
+      result.certificateCheck = analyzeBimiCertificate(certificateFile.body, domain, logoSvg);
+      if (result.certificateCheck.error) issues.push({ severity: "high", message: result.certificateCheck.error });
+      else issues.push(...result.certificateCheck.issues);
+    }
+  }
+  return result;
+}
+
+// BIMI is only honored when DMARC is enforced for all mail.
+function addBimiDmarcIssues(bimi, dmarc) {
+  if (!bimi?.found || dmarc?.error) return;
+  const policy = dmarc?.policy;
+  const pct = dmarc?.tags?.pct === undefined ? 100 : Number(dmarc.tags.pct);
+  const subdomainPolicy = String(dmarc?.tags?.sp || "").toLowerCase();
+  let message = null;
+  if (!dmarc?.found) message = "BIMI requires a DMARC record; this domain has none.";
+  else if (policy !== "quarantine" && policy !== "reject") message = `BIMI requires DMARC p=quarantine or p=reject; this domain uses p=${policy || "none"}.`;
+  else if (pct < 100) message = `BIMI requires DMARC to apply to all mail; pct=${pct} is set.`;
+  else if (subdomainPolicy === "none") message = "BIMI requires subdomains to be protected too; sp=none is set.";
+  bimi.dmarcReady = !message;
+  if (message) bimi.issues.unshift({ severity: "high", message });
 }
 
 async function emailCheck(request, url, response) {
@@ -2245,6 +2408,7 @@ async function emailCheck(request, url, response) {
       Promise.all(selectors.map(([selector, provider]) => analyzeDkimSelector(domain, selector, provider).catch(() => null))),
       fetchPtrLookups(resolved.flatMap((record) => record.addresses)),
     ]);
+    addBimiDmarcIssues(bimi, dmarc);
     const spfIncludes = (spf.tree || []).filter((node) => node.via).map((node) => node.name);
     const providers = {
       inbound: [...new Set(resolved.map((record) => record.provider).filter(Boolean))],

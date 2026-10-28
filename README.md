@@ -299,6 +299,13 @@ Several tools send data to external services; these are listed under
   your own, validating key type and size, revoked and test-mode keys) and names
   the providers it recognises in MX hosts (receiving) and SPF includes (sending).
   `SMTP_TEST_HELO` sets the EHLO name (default `bnglookup.localdomain`).
+  The **BIMI** check reads `default._bimi`, fetches the logo (`l=`) and mark
+  certificate (`a=`) over HTTPS (public addresses only, no redirects, 64/128 KB
+  limits), validates the logo against SVG Tiny PS and shows it, reads the VMC/CMC
+  (mark type, organization, trademark, issuer, domains, expiry, BIMI key usage,
+  intermediate), compares its embedded logo with `l=`, and checks that DMARC is
+  enforced (`p=quarantine`/`reject`, `pct=100`, no `sp=none`). The certificate
+  chain is not checked against the BIMI trusted root list.
 - **ASN** (feature `asn`) accepts an IP, a domain or an AS number and uses RIPE
   Stat to show the announcing prefix and origin AS, the prefix's RPKI validity,
   the AS holder, and all announced IPv4 and IPv6 prefixes (seen by at least three

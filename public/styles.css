@@ -869,6 +869,10 @@ h1 {
 .email-auth-status.missing { color: #c0c0c0; background: #252525; }
 .email-auth-record { display: flex; flex-direction: column; gap: 4px; margin-top: 7px; padding: 8px; border: 1px solid #223528; border-radius: 5px; }
 .email-auth-record strong { color: #b6e6c7; font-size: 10px; overflow-wrap: anywhere; }
+.bimi-result { display: flex; gap: 16px; align-items: flex-start; margin: 12px 0; }
+.bimi-result .detail-list { flex: 1; min-width: 0; }
+@media (max-width: 680px) { .bimi-result { flex-direction: column; } .bimi-result .detail-list { width: 100%; } }
+.bimi-result-logo { flex: none; width: 96px; height: 96px; padding: 6px; border: 1px solid #333; border-radius: 50%; object-fit: contain; background: #fff; }
 .email-auth-record span { color: #d0d0d0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; overflow-wrap: anywhere; }
 .email-auth .scan-disclaimer { margin-bottom: 0; }
 
