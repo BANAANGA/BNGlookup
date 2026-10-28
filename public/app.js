@@ -28,6 +28,10 @@ const sslScanControl = document.querySelector("#sslscan-control");
 const sslScanPort = document.querySelector("#sslscan-port");
 const emailControl = document.querySelector("#email-control");
 const dkimSelectorsInput = document.querySelector("#dkim-selectors");
+const scanIncludesControl = document.querySelector("#scan-includes-control");
+const scanEmailInput = document.querySelector("#scan-email-input");
+const scanSslInput = document.querySelector("#scan-ssl-input");
+const scanTlsGradeInput = document.querySelector("#scan-tls-grade-input");
 const tlsGradeControl = document.querySelector("#tls-grade-control");
 const tlsGradeInput = document.querySelector("#tls-grade-input");
 let tlsGradeRun = 0;
@@ -85,7 +89,12 @@ function currentHistoryParams(resultMode) {
   }
   if (resultMode === "traceroute") params.ptr = tracePtrInput.checked;
   if (resultMode === "nmap") params.scanType = nmapScanType.value;
-  if (resultMode === "scan") params.scanPorts = portScanInput.checked;
+  if (resultMode === "scan") {
+    params.scanPorts = portScanInput.checked;
+    params.scanEmail = scanEmailInput.checked;
+    params.scanSsl = scanSslInput.checked;
+    params.scanTlsGrade = scanTlsGradeInput.checked;
+  }
   return params;
 }
 
@@ -322,6 +331,7 @@ function setMode(nextMode) {
     ? "One sample every 3 seconds; monitoring stops after 5 minutes or 100 samples."
     : "Sign in to use live monitoring. One sample every 3 seconds; maximum 5 minutes.";
   portScanControl.hidden = !scan || !authState?.user;
+  updateScanIncludes(scan);
   customPortsControl.hidden = !customPortScan;
   bulkTargetsControl.hidden = !(bulkPortScan || pingScan);
   bulkPortControl.hidden = !bulkPortScan;
@@ -829,6 +839,60 @@ async function appendBlocklistCheck(name) {
   }
 }
 
+function featureAllowed(feature) {
+  const access = authState?.featureAccess?.[feature] || "user";
+  return access === "public" || Boolean(authState?.user) && (access !== "admin" || authState.user.role === "admin");
+}
+
+// Magic scan can include the Email check and SSLscan for users who may use those tools.
+function updateScanIncludes(scan = mode === "scan") {
+  const email = featureAllowed("email");
+  const ssl = featureAllowed("sslscan");
+  const grade = ssl && Boolean(authState?.user);
+  document.querySelector("#scan-email-option").hidden = !email;
+  document.querySelector("#scan-ssl-option").hidden = !ssl;
+  document.querySelector("#scan-tls-grade-option").hidden = !grade;
+  if (!email) scanEmailInput.checked = false;
+  if (!ssl) scanSslInput.checked = false;
+  if (!grade) scanTlsGradeInput.checked = false;
+  scanIncludesControl.hidden = !scan || !(email || ssl);
+}
+
+function scanIncludeSection(kind, html) {
+  return `<section class="scan-include" data-include="${kind}">${html}</section>`;
+}
+
+async function appendScanIncludes(domain) {
+  const jobs = [];
+  if (scanEmailInput.checked && featureAllowed("email")) {
+    jobs.push(["email", "Running the Email check…", `/api/email-check?${new URLSearchParams({ name: domain, selectors: "" })}`, emailResultHtml]);
+  }
+  if (scanSslInput.checked && featureAllowed("sslscan")) {
+    jobs.push(["sslscan", "Running SSLscan on port 443…", `/api/sslscan?${new URLSearchParams({ name: domain, port: "443" })}`, sslScanResultHtml]);
+  }
+  if (scanTlsGradeInput.checked && featureAllowed("sslscan") && authState?.user) void runTlsGrade(domain, 443);
+  await Promise.all(jobs.map(async ([kind, pending, url, render]) => {
+    const section = document.createElement("section");
+    section.className = "scan-include";
+    section.dataset.include = kind;
+    section.innerHTML = `<p class="detail-notice">${escapeHtml(pending)}</p>`;
+    resultPanel.append(section);
+    try {
+      const response = await fetch(url, { credentials: "same-origin" });
+      const data = await readApiResponse(response);
+      if (!response.ok) throw new Error(data.error || "The check failed.");
+      if (!section.isConnected) return;
+      section.innerHTML = render(data);
+      if (lastResult?.mode === "scan") {
+        lastResult.data.extras[kind] = data;
+        void saveHistory();
+      }
+    } catch (error) {
+      if (section.isConnected) section.innerHTML = `<p class="detail-notice">${escapeHtml(`${kind === "email" ? "Email check" : "SSLscan"}: ${error.message}`)}</p>`;
+    }
+  }));
+}
+
 function renderDnssecResult(data) {
   const check = data.dnssecCheck;
   resultPanel.innerHTML = `
@@ -1215,7 +1279,7 @@ function renderPingResult(data) {
   resultPanel.hidden = false;
 }
 
-function renderSslScanResult(data) {
+function sslScanResultHtml(data) {
   const handshakeSucceeded = Boolean(data.handshake);
   const trusted = handshakeSucceeded && Boolean(data.authorized);
   const certificates = Array.isArray(data.certificateChain) ? data.certificateChain : [];
@@ -1233,7 +1297,7 @@ function renderSslScanResult(data) {
       </div>
     </section>
   `).join("");
-  resultPanel.innerHTML = `
+  return `
     <div class="result-heading">
       <div><p class="eyebrow">SSL/TLS CHECK</p><h2>${copyableResult(data.target)}:${escapeHtml(String(data.port))}</h2></div>
       <span class="status-badge ${trusted ? "success" : "warning"}">${!handshakeSucceeded
@@ -1257,6 +1321,10 @@ function renderSslScanResult(data) {
     ? '<p class="empty-result">The server did not provide a certificate.</p>'
     : "")}
     <p class="scan-disclaimer">This performs one TLS handshake only. It does not enumerate supported protocol versions or cipher suites, or test for TLS vulnerabilities.</p>`;
+}
+
+function renderSslScanResult(data) {
+  resultPanel.innerHTML = sslScanResultHtml(data);
   resultPanel.hidden = false;
 }
 
@@ -1404,7 +1472,7 @@ async function runTlsGrade(target, port) {
       if (run !== tlsGradeRun) return;
       if (!response.ok) throw new Error(data.error || "The TLS test failed.");
       Object.assign(state, { stage: data.stage, elapsedMs: data.elapsedMs, error: data.error, result: data.result });
-      if (data.result && lastResult?.mode === "sslscan") {
+      if (data.result && ["sslscan", "scan"].includes(lastResult?.mode)) {
         lastResult.data.extras.tlsGrade = { result: data.result, address: data.address };
         void saveHistory();
       }
@@ -1870,7 +1938,7 @@ function renderAsnResult(data) {
   resultPanel.hidden = false;
 }
 
-function renderEmailResult(data) {
+function emailResultHtml(data) {
   const chips = (values) => values.length ? `<div class="status-list">${values.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div>` : "";
   const table = (head, rows) => rows.length ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
     <thead><tr>${head.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>` : "";
@@ -1927,7 +1995,7 @@ function renderEmailResult(data) {
   ];
   const serious = allIssues.filter((issue) => issue.severity === "high").length;
   const bimi = data.bimi || {};
-  resultPanel.innerHTML = `
+  return `
     <div class="result-heading">
       <div><p class="eyebrow">EMAIL CHECK</p><h2>${copyableResult(data.domain)}</h2></div>
       <span class="status-badge ${serious ? "warning" : "success"}">${escapeHtml(serious ? `${serious} serious issue(s)` : allIssues.length ? `${allIssues.length} suggestion(s)` : "Looks good")}</span>
@@ -1963,6 +2031,10 @@ function renderEmailResult(data) {
       ${bimi.error ? `<p class="detail-notice">${escapeHtml(bimi.error)}</p>` : bimi.found ? renderBimi(bimi) : '<p class="empty-result">No BIMI record (default._bimi). BIMI shows your logo in supporting inboxes once DMARC is enforced.</p>'}
     </section>
     <p class="scan-disclaimer">${escapeHtml(`Completed in ${data.durationMs} ms.`)}</p>`;
+}
+
+function renderEmailResult(data) {
+  resultPanel.innerHTML = emailResultHtml(data);
   resultPanel.hidden = false;
 }
 
@@ -2683,6 +2755,7 @@ form.addEventListener("submit", async (event) => {
       : requestMode === "forward" && !data.dnssecCheck ? `${lookupName} ${data.type || ""}`
       : lookupName;
     rememberResult(shareMode, data, shareSubject);
+    if (requestMode === "scan") void appendScanIncludes(data.domain);
   } catch (error) {
     if (nmapScan) {
       stopNmapStatusPolling();
@@ -2730,6 +2803,8 @@ function renderSharedResult(shareMode, payload) {
     renderTlsGradeSection({ result: extras.tlsGrade.result, address: extras.tlsGrade.address });
   }
   if (extras.blocklist) resultPanel.insertAdjacentHTML("beforeend", renderBlocklistSection(extras.blocklist));
+  if (extras.email) resultPanel.insertAdjacentHTML("beforeend", scanIncludeSection("email", emailResultHtml(extras.email)));
+  if (extras.sslscan) resultPanel.insertAdjacentHTML("beforeend", scanIncludeSection("sslscan", sslScanResultHtml(extras.sslscan)));
 }
 
 async function loadHistoryEntry(id, rerun) {
@@ -2763,6 +2838,10 @@ async function loadHistoryEntry(id, rerun) {
       if (params.scanType) nmapScanType.value = params.scanType;
       if (typeof params.ptr === "boolean") tracePtrInput.checked = params.ptr;
       if (typeof params.scanPorts === "boolean") portScanInput.checked = params.scanPorts;
+      if (typeof params.scanEmail === "boolean") scanEmailInput.checked = params.scanEmail;
+      if (typeof params.scanSsl === "boolean") scanSslInput.checked = params.scanSsl;
+      if (typeof params.scanTlsGrade === "boolean") scanTlsGradeInput.checked = params.scanTlsGrade;
+      updateScanIncludes();
       history.replaceState(null, "", `/?mode=${encodeURIComponent(formMode)}`);
       form.requestSubmit();
       return;
