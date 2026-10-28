@@ -15,6 +15,7 @@ services:
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
       TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
       BLOCKLIST_RESOLVER: "${BLOCKLIST_RESOLVER:-}"
+      WHOIS_SERVERS: "${WHOIS_SERVERS:-}"
     volumes:
       - app_data:/data
     restart: unless-stopped

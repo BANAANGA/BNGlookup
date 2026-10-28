@@ -911,7 +911,7 @@ function renderScanResult(data) {
     ? `<div class="status-list">${registration.statuses.map((status) => copyableResult(status)).join("")}</div>`
     : ""}
       ${registrationContacts ? `<div class="contact-list">${registrationContacts}</div>` : ""}`
-    : `<p class="detail-notice">${escapeHtml(data.registrationError || "No registration details were returned.")}</p>`;
+    : `<p class="detail-notice">${escapeHtml(data.registrationError || "No registration details were returned.")}${registryLinkHtml(data.registryUrl)}</p>`;
 
   resultPanel.innerHTML = `
     <div class="result-heading">
@@ -1809,6 +1809,11 @@ function renderDetail(label, value) {
   return `<div class="detail-row"><span>${escapeHtml(label)}</span><strong>${copyableResult(value)}</strong></div>`;
 }
 
+function registryLinkHtml(url) {
+  if (!/^https?:\/\//i.test(String(url || ""))) return "";
+  return ` <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Registry website</a>`;
+}
+
 function registrationSourceLabel(registration) {
   return registration?.source === "whois" ? `WHOIS · ${registration.whoisServer || "port 43"}` : "RDAP";
 }
@@ -1884,7 +1889,7 @@ function renderDomainInfo(data) {
     <div class="result-heading">
       <div><p class="eyebrow">DOMAIN DETAILS</p><h2>${copyableResult(data.domain)}</h2></div>
     </div>
-    ${data.registrationError ? `<p class="detail-notice">${escapeHtml(data.registrationError)}</p>` : ""}
+    ${data.registrationError ? `<p class="detail-notice">${escapeHtml(data.registrationError)}${registryLinkHtml(data.registryUrl)}</p>` : ""}
     ${registration ? `<section class="record-section">
       <h3>Registration <span>${escapeHtml(registrationSourceLabel(registration))}</span></h3>
       <div class="detail-list">
@@ -1974,7 +1979,7 @@ function ipRegistrationHtml(data) {
   }).join("");
 
   return `
-    ${data.registrationError ? `<p class="detail-notice">${escapeHtml(data.registrationError)}</p>` : ""}
+    ${data.registrationError ? `<p class="detail-notice">${escapeHtml(data.registrationError)}${registryLinkHtml(data.registryUrl)}</p>` : ""}
     ${registration ? `<section class="record-section">
       <h3>Network registration</h3>
       <div class="detail-list">

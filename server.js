@@ -782,13 +782,22 @@ function queryWhoisServer(server, query, { timeoutMs = 10000, maxBytes = 131072 
   });
 }
 
+// Optional overrides, e.g. WHOIS_SERVERS="ga=whois.example.ga,xyz=whois.nic.xyz".
+const whoisServerOverrides = new Map((process.env.WHOIS_SERVERS || "")
+  .split(/[\s,]+/)
+  .map((entry) => entry.split("=").map((part) => part.trim().toLowerCase()))
+  .filter(([tld, server]) => /^[a-z0-9-]{2,63}$/.test(tld || "") && /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(server || "")));
+
 async function whoisServerForTld(tld) {
+  if (whoisServerOverrides.has(tld)) return { server: whoisServerOverrides.get(tld), registryUrl: null };
   const cached = whoisServerCache.get(tld);
-  if (cached && Date.now() - cached.at < 24 * 3600_000) return cached.server;
+  if (cached && Date.now() - cached.at < 24 * 3600_000) return cached;
   const text = await queryWhoisServer("whois.iana.org", tld);
   const server = (text.match(/^whois:\s*([a-z0-9.-]+)\s*$/im) || text.match(/^refer:\s*([a-z0-9.-]+)\s*$/im) || [])[1]?.toLowerCase() || null;
-  whoisServerCache.set(tld, { server, at: Date.now() });
-  return server;
+  const registryUrl = text.match(/^remarks:\s*registration information:\s*(https?:\/\/\S+)\s*$/im)?.[1] || null;
+  const entry = { server, registryUrl, at: Date.now() };
+  whoisServerCache.set(tld, entry);
+  return entry;
 }
 
 // Parses "Key: value" WHOIS text, including indented multi-line blocks such as the .nl format.
@@ -857,8 +866,10 @@ function registrationFromWhois(domain, server, text) {
 
 async function fetchWhois(domain) {
   const tld = domain.split(".").pop();
-  const server = await whoisServerForTld(tld);
-  if (!server) throw new Error(`No WHOIS server is published for .${tld} domains.`);
+  const { server, registryUrl } = await whoisServerForTld(tld);
+  if (!server) {
+    throw Object.assign(new Error(`The .${tld} registry publishes no RDAP or WHOIS service, so registration details cannot be retrieved automatically.${registryUrl ? " Check the registry's website instead." : ""} DNS details are still shown.`), { noService: true, registryUrl });
+  }
   const query = server === "whois.denic.de" ? `-T dn,ace ${domain}` : domain;
   let text = await queryWhoisServer(server, query);
   let usedServer = server;
@@ -901,7 +912,8 @@ async function fetchRegistration(domain) {
       if (!error.notFound) break;
     }
   }
-  throw whoisError?.notFound ? whoisError : new Error(`${rdapError.message} WHOIS fallback: ${whoisError?.message || "unavailable"}`);
+  if (whoisError?.notFound || whoisError?.noService) throw whoisError;
+  throw Object.assign(new Error(`Registration details are unavailable: ${rdapError.message} WHOIS fallback: ${whoisError?.message || "unavailable"}`), { registryUrl: whoisError?.registryUrl || null });
 }
 
 async function fetchRdap(domain) {
@@ -913,7 +925,7 @@ async function fetchRdap(domain) {
     signal: AbortSignal.timeout(10000),
   });
   if (response.status === 404) {
-    throw new Error("No registration record was found for this domain.");
+    throw Object.assign(new Error("RDAP has no record for this domain (or no RDAP service for its TLD)."), { notFound: true });
   }
   if (!response.ok) {
     throw new Error(`RDAP provider returned HTTP ${response.status}.`);
@@ -2957,6 +2969,7 @@ async function bulkScan(request, url, response) {
     (error) => ({
       registration: null,
       error: error.message || "Unable to retrieve registration details.",
+      registryUrl: error.registryUrl || null,
     }),
   );
   const dnssecPromise = checkDnssec(domain).catch((error) => {
@@ -3134,6 +3147,7 @@ async function bulkScan(request, url, response) {
     hostsWithRecords: hosts.filter((host) => host.records.length).length,
     registration: registrationResult.registration,
     registrationError: registrationResult.error,
+    registryUrl: registrationResult.registryUrl || null,
     dnssec: await dnssecPromise,
     blocklists: await blocklistPromise,
     emailSecurity: {
@@ -3231,6 +3245,7 @@ async function domainInfo(url, response) {
     registrationError: rdapResult.status === "rejected"
       ? rdapResult.reason.message || "Unable to retrieve registration details."
       : null,
+    registryUrl: rdapResult.status === "rejected" ? rdapResult.reason.registryUrl || null : null,
     dnsNameservers: nameserverResult.status === "fulfilled" ? nameserverResult.value : null,
     dnsNameserversError: nameserverResult.status === "rejected"
       ? nameserverResult.reason.message || "Unable to retrieve DNS nameservers."
