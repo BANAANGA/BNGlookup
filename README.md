@@ -26,6 +26,9 @@ small Docker container with no application dependencies.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side, with optional PTR (reverse DNS) lookup for every hop.
 - **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, blocklists (DNSBL), SPF (with lookup counting), DKIM, DMARC, MTA-STS, TLS-RPT, certificate-transparency names, geolocation, optional port check.
 - **Propagation**: compare one record across Cloudflare, Google, Quad9, DNS4EU and the zone's authoritative nameservers.
+- **Email**: MX servers, SMTP STARTTLS on port 25, SPF, DMARC, DKIM key validation, MTA-STS, TLS-RPT and BIMI, and which email providers a domain uses.
+- **ASN**: which network (AS) announces an IP, its RPKI status, and every IPv4/IPv6 prefix that AS announces.
+- **History**: signed-in users can view, re-run and compare their recent lookups.
 - **Share links**: signed-in users can turn any result into a link that anyone can open for 30 days.
 - **Blocklist check**: Magic scan and Auto lookup check domains and public IPv4 addresses against common spam/abuse blocklists.
 - **Port scan / Bulk port scan**: custom TCP ports on one target, or one port across many addresses.
@@ -285,6 +288,27 @@ Several tools send data to external services; these are listed under
   delete their links on *My account*; admins can delete any link. Up to 200
   links per user and 1 MB per result. Links are unguessable but not
   password-protected, so only share what you are happy for the recipient to see.
+- **Email** (feature `email`) accepts a domain or an email address. It lists the
+  MX servers with addresses and reverse DNS, then connects to the first three on
+  port 25: reads the banner, sends EHLO, checks that STARTTLS is offered, upgrades
+  to TLS and reports protocol, cipher, certificate trust, name match and expiry,
+  and the server's capabilities. No mail is sent. Many cloud hosts block
+  outbound port 25; the result then says so. Private MX addresses are only tested
+  when the role allows local targets. It also checks SPF (with lookup counting),
+  DMARC, MTA-STS, TLS-RPT, BIMI and DKIM (common selectors plus up to five of
+  your own, validating key type and size, revoked and test-mode keys) and names
+  the providers it recognises in MX hosts (receiving) and SPF includes (sending).
+  `SMTP_TEST_HELO` sets the EHLO name (default `bnglookup.localdomain`).
+- **ASN** (feature `asn`) accepts an IP, a domain or an AS number and uses RIPE
+  Stat to show the announcing prefix and origin AS, the prefix's RPKI validity,
+  the AS holder, and all announced IPv4 and IPv6 prefixes (seen by at least three
+  RIS peers, up to 3,000 per family, with a filter). Responses are cached for 10
+  minutes.
+- **History** (feature `history`) stores each signed-in user's last 100 results
+  for 30 days (results over 512 KB are kept for re-running only). The History
+  page can view a stored result, re-run it with the same options, and compare two
+  runs of the same tool field by field (timing fields and answer order are
+  ignored). Entries are private to the user and removed with the account.
 - **Magic scan** checks A, AAAA, CAA, CNAME, HTTPS, MX, NS, SOA, SRV and TXT for the
   domain, common subdomains (`www`, `mail`, `api`, `staging`, …) and provider
   verification names (AWS/SES, Azure, Google Cloud, Cloudflare, Vercel, Netlify,

@@ -79,6 +79,8 @@ const staticFiles = new Set([
   "/admin-dashboard.html",
   "/about.html",
   "/about.js",
+  "/history.html",
+  "/history.js",
   "/styles.css",
   "/app.js",
   "/account.js",
@@ -115,6 +117,9 @@ const featureAccessDefaults = {
   dig: "user",
   blocklist: "user",
   propagation: "user",
+  email: "user",
+  asn: "user",
+  history: "user",
 };
 const featureNames = {
   forward: "DNS lookup",
@@ -133,6 +138,9 @@ const featureNames = {
   dig: "Custom dig command",
   blocklist: "Blocklist (DNSBL) check in auto lookup",
   propagation: "DNS propagation check",
+  email: "Email check (MX, SMTP STARTTLS, SPF, DMARC, DKIM)",
+  asn: "ASN and announced prefixes",
+  history: "Lookup history (saved per user)",
 };
 
 function parseNmapAllowedCidrs(value) {
@@ -201,6 +209,17 @@ database.exec(`
     expires_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS shared_results_user ON shared_results(user_id, created_at);
+  CREATE TABLE IF NOT EXISTS lookup_history (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL,
+    title TEXT NOT NULL,
+    query TEXT NOT NULL,
+    params TEXT NOT NULL,
+    payload TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS lookup_history_user ON lookup_history(user_id, id DESC);
   CREATE INDEX IF NOT EXISTS shared_results_expiry ON shared_results(expires_at);
   CREATE TABLE IF NOT EXISTS public_lookup_usage (
     client_hash TEXT NOT NULL,
@@ -1932,6 +1951,455 @@ async function analyzeMailSecurity(domain) {
     settle(analyzeSpf(domain)),
   ]);
   return { mxHosts, dmarc, mtaSts, tlsRpt, spf };
+}
+
+// Mail providers recognised from MX hosts (inbound) and SPF includes (outbound senders).
+const mailProviders = [
+  { name: "Google Workspace / Gmail", mx: [/(^|\.)google\.com$/, /(^|\.)googlemail\.com$/], spf: [/(^|\.)google\.com$/] },
+  { name: "Microsoft 365 / Exchange Online", mx: [/\.mail\.protection\.outlook\.com$/, /(^|\.)outlook\.com$/], spf: [/(^|\.)protection\.outlook\.com$/, /(^|\.)outlook\.com$/] },
+  { name: "Proton Mail", mx: [/(^|\.)protonmail\.ch$/, /(^|\.)proton\.me$/], spf: [/(^|\.)protonmail\.ch$/] },
+  { name: "Zoho Mail", mx: [/(^|\.)zoho\.(com|eu|in|com\.au|jp|com\.cn)$/, /(^|\.)zohomail\./], spf: [/(^|\.)zoho\.(com|eu|in|com\.au|jp)$/, /(^|\.)zcsend\.net$/] },
+  { name: "Fastmail", mx: [/(^|\.)messagingengine\.com$/, /(^|\.)fastmail\.com$/], spf: [/(^|\.)messagingengine\.com$/] },
+  { name: "iCloud Mail", mx: [/(^|\.)mail\.icloud\.com$/], spf: [/(^|\.)icloud\.com$/] },
+  { name: "Yahoo Mail", mx: [/(^|\.)yahoodns\.net$/, /(^|\.)yahoo\.com$/], spf: [/(^|\.)yahoo\.com$/] },
+  { name: "Amazon SES", mx: [/inbound-smtp\..*\.amazonaws\.com$/], spf: [/(^|\.)amazonses\.com$/] },
+  { name: "Amazon WorkMail", mx: [/(^|\.)awsapps\.com$/], spf: [] },
+  { name: "Mailgun", mx: [/(^|\.)mailgun\.org$/], spf: [/(^|\.)mailgun\.org$/] },
+  { name: "SendGrid (Twilio)", mx: [/(^|\.)sendgrid\.net$/], spf: [/(^|\.)sendgrid\.net$/] },
+  { name: "Mailchimp / Mandrill", mx: [], spf: [/(^|\.)mcsv\.net$/, /(^|\.)mandrillapp\.com$/, /(^|\.)mailchimpapp\.net$/] },
+  { name: "Postmark", mx: [/(^|\.)mtasv\.net$/], spf: [/(^|\.)mtasv\.net$/] },
+  { name: "SparkPost", mx: [], spf: [/(^|\.)sparkpostmail\.com$/] },
+  { name: "Brevo (Sendinblue)", mx: [/(^|\.)brevo\.com$/, /(^|\.)sendinblue\.com$/], spf: [/(^|\.)sendinblue\.com$/, /(^|\.)brevo\.com$/] },
+  { name: "Mailjet", mx: [], spf: [/(^|\.)mailjet\.com$/] },
+  { name: "Mimecast", mx: [/(^|\.)mimecast\.(com|co\.za)$/], spf: [/(^|\.)mimecast\.(com|co\.za)$/] },
+  { name: "Proofpoint", mx: [/(^|\.)pphosted\.com$/, /(^|\.)ppe-hosted\.com$/], spf: [/(^|\.)pphosted\.com$/, /(^|\.)ppe-hosted\.com$/] },
+  { name: "Cisco Secure Email (IronPort)", mx: [/(^|\.)iphmx\.com$/], spf: [/(^|\.)iphmx\.com$/] },
+  { name: "Barracuda", mx: [/(^|\.)barracudanetworks\.com$/], spf: [/(^|\.)barracudanetworks\.com$/] },
+  { name: "Sophos Email", mx: [/(^|\.)hydra\.sophos\.com$/], spf: [/(^|\.)sophos\.com$/] },
+  { name: "Hornetsecurity", mx: [/(^|\.)hornetsecurity\.com$/], spf: [/(^|\.)hornetsecurity\.com$/] },
+  { name: "N-able Mail Assure / SpamExperts", mx: [/(^|\.)antispamcloud\.com$/, /(^|\.)spamexperts\./], spf: [/(^|\.)antispamcloud\.com$/, /(^|\.)spamexperts\./] },
+  { name: "Cloudflare Email Routing", mx: [/(^|\.)mx\.cloudflare\.net$/], spf: [/(^|\.)mx\.cloudflare\.net$/] },
+  { name: "ImprovMX", mx: [/(^|\.)improvmx\.com$/], spf: [/(^|\.)improvmx\.com$/] },
+  { name: "Forward Email", mx: [/(^|\.)forwardemail\.net$/], spf: [/(^|\.)forwardemail\.net$/] },
+  { name: "Tuta (Tutanota)", mx: [/(^|\.)tutanota\.de$/], spf: [/(^|\.)tutanota\.de$/] },
+  { name: "mailbox.org", mx: [/(^|\.)mailbox\.org$/], spf: [/(^|\.)mailbox\.org$/] },
+  { name: "Migadu", mx: [/(^|\.)migadu\.com$/], spf: [/(^|\.)migadu\.com$/] },
+  { name: "Yandex Mail", mx: [/(^|\.)yandex\.(net|ru)$/], spf: [/(^|\.)yandex\.(net|ru)$/] },
+  { name: "GoDaddy / Microsoft 365 via GoDaddy", mx: [/(^|\.)secureserver\.net$/], spf: [/(^|\.)secureserver\.net$/] },
+  { name: "Namecheap Private Email", mx: [/(^|\.)privateemail\.com$/], spf: [/(^|\.)privateemail\.com$/, /(^|\.)spf\.efwd\.registrar-servers\.com$/] },
+  { name: "IONOS (1&1)", mx: [/(^|\.)ionos\.[a-z.]+$/, /(^|\.)kundenserver\.de$/], spf: [/(^|\.)ionos\.[a-z.]+$/, /(^|\.)kundenserver\.de$/] },
+  { name: "OVHcloud", mx: [/(^|\.)ovh\.net$/], spf: [/(^|\.)ovh\.com$/, /(^|\.)ovh\.net$/] },
+  { name: "Strato", mx: [/(^|\.)strato\.de$/], spf: [/(^|\.)strato\.de$/] },
+  { name: "Hostinger", mx: [/(^|\.)hostinger\.com$/], spf: [/(^|\.)hostinger\.com$/] },
+  { name: "Infomaniak", mx: [/(^|\.)infomaniak\.ch$/], spf: [/(^|\.)infomaniak\.ch$/] },
+  { name: "TransIP", mx: [/(^|\.)transip\.email$/, /(^|\.)transip\.nl$/], spf: [/(^|\.)transip\.(email|nl)$/] },
+  { name: "Salesforce", mx: [], spf: [/(^|\.)salesforce\.com$/, /(^|\.)exacttarget\.com$/] },
+  { name: "HubSpot", mx: [], spf: [/(^|\.)hubspotemail\.net$/] },
+  { name: "Zendesk", mx: [], spf: [/(^|\.)zendesk\.com$/] },
+  { name: "Freshworks", mx: [], spf: [/(^|\.)freshdesk\.com$/, /(^|\.)freshemail\.io$/] },
+  { name: "Atlassian", mx: [], spf: [/(^|\.)atlassian\.net$/] },
+  { name: "Mailerlite", mx: [], spf: [/(^|\.)mlsend\.com$/] },
+  { name: "Klaviyo", mx: [], spf: [/(^|\.)klaviyomail\.com$/] },
+];
+
+function identifyMailProvider(host, kind) {
+  const value = String(host || "").toLowerCase().replace(/\.$/, "");
+  return mailProviders.find((provider) => provider[kind].some((pattern) => pattern.test(value)))?.name || null;
+}
+
+function parseSmtpReplies(buffer) {
+  // Returns complete replies ({ code, lines }) and the text of any reply that is still incomplete.
+  const replies = [];
+  let current = [];
+  let consumed = 0;
+  let replyStart = 0;
+  let index;
+  while ((index = buffer.indexOf("\n", consumed)) !== -1) {
+    const line = buffer.slice(consumed, index).replace(/\r$/, "");
+    consumed = index + 1;
+    const match = line.match(/^(\d{3})([ -])(.*)$/);
+    if (!match) continue;
+    current.push(match[3]);
+    if (match[2] === " ") {
+      replies.push({ code: Number(match[1]), lines: current });
+      current = [];
+      replyStart = consumed;
+    }
+  }
+  return { replies, rest: buffer.slice(replyStart) };
+}
+
+const smtpHeloName = /^[a-z0-9.-]{1,253}$/i.test(process.env.SMTP_TEST_HELO || "") ? process.env.SMTP_TEST_HELO : "bnglookup.localdomain";
+
+function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const result = { host, address, connected: false, banner: null, ehlo: false, starttls: false, tls: null, capabilities: [], capabilitiesAfterTls: [], error: null };
+    let socket = net.connect({ host: address, port: 25, family: isIP(address) });
+    let buffer = "";
+    let stage = "banner";
+    let finished = false;
+    const finish = (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (error && !result.error) result.error = error;
+      result.durationMs = Date.now() - started;
+      try {
+        socket.end("QUIT\r\n");
+      } catch {
+        // The socket may already be closed.
+      }
+      setTimeout(() => socket.destroy(), 500).unref();
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish(stage === "banner" && !result.connected
+      ? "Could not connect to port 25 in time. Outbound port 25 may be blocked by this server's network or hosting provider."
+      : `The server stopped responding (${stage}).`), timeoutMs);
+    const send = (line) => socket.write(`${line}\r\n`);
+    const onReply = (reply) => {
+      const text = reply.lines.join(" ").slice(0, 300);
+      if (stage === "banner") {
+        if (reply.code !== 220) return finish(`The server refused the connection: ${reply.code} ${text}`);
+        result.banner = text;
+        stage = "ehlo";
+        send(`EHLO ${smtpHeloName}`);
+      } else if (stage === "ehlo") {
+        if (reply.code !== 250) return finish(`EHLO was rejected: ${reply.code} ${text}`);
+        result.ehlo = true;
+        result.capabilities = reply.lines.slice(1).map((line) => line.trim().toUpperCase()).filter(Boolean).slice(0, 30);
+        result.starttls = result.capabilities.some((capability) => capability.split(" ")[0] === "STARTTLS");
+        if (!result.starttls) return finish(null);
+        stage = "starttls";
+        send("STARTTLS");
+      } else if (stage === "starttls") {
+        if (reply.code !== 220) return finish(`STARTTLS was refused: ${reply.code} ${text}`);
+        stage = "tls";
+        socket.removeAllListeners("data");
+        const secure = tls.connect({ socket, servername: isIP(host) ? undefined : host, rejectUnauthorized: false, minVersion: "TLSv1" });
+        secure.once("secureConnect", () => {
+          const certificate = secure.getPeerCertificate();
+          const nameError = certificate && Object.keys(certificate).length ? tls.checkServerIdentity(host, certificate) : new Error("No certificate");
+          const validTo = certificate?.valid_to ? new Date(certificate.valid_to) : null;
+          result.tls = {
+            protocol: secure.getProtocol(),
+            cipher: secure.getCipher()?.name || null,
+            authorized: secure.authorized,
+            authorizationError: secure.authorized ? null : String(secure.authorizationError || "Certificate is not trusted."),
+            nameMatches: !nameError,
+            subject: certificate?.subject?.CN || null,
+            subjectAltName: certificate?.subjectaltname ? certificate.subjectaltname.slice(0, 500) : null,
+            issuer: certificate?.issuer ? [certificate.issuer.O, certificate.issuer.CN].filter(Boolean).join(" · ") : null,
+            validTo: validTo && !Number.isNaN(validTo.getTime()) ? validTo.toISOString() : null,
+            daysRemaining: validTo && !Number.isNaN(validTo.getTime()) ? Math.floor((validTo.getTime() - Date.now()) / 86400000) : null,
+          };
+          socket = secure;
+          buffer = "";
+          stage = "ehlo-tls";
+          secure.on("data", onData);
+          send(`EHLO ${smtpHeloName}`);
+        });
+        secure.once("error", (error) => finish(`The TLS handshake failed (${error.code || error.message}).`));
+      } else if (stage === "ehlo-tls") {
+        if (reply.code === 250) result.capabilitiesAfterTls = reply.lines.slice(1).map((line) => line.trim().toUpperCase()).filter(Boolean).slice(0, 30);
+        finish(null);
+      }
+    };
+    const onData = (chunk) => {
+      buffer += chunk.toString("utf8");
+      if (buffer.length > 65536) return finish("The server sent too much data.");
+      const parsed = parseSmtpReplies(buffer);
+      buffer = parsed.rest;
+      for (const reply of parsed.replies) {
+        if (finished) return;
+        onReply(reply);
+      }
+    };
+    socket.once("connect", () => { result.connected = true; });
+    socket.on("data", onData);
+    socket.once("error", (error) => finish(error.code === "ECONNREFUSED"
+      ? "Port 25 refused the connection."
+      : ["ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH"].includes(error.code)
+        ? `Could not reach port 25 (${error.code}). Outbound port 25 may be blocked by this server's network or hosting provider.`
+        : `The connection failed (${error.code || error.message}).`));
+  });
+}
+
+async function analyzeDkimSelector(domain, selector, provider) {
+  const { records } = await queryTxtRecords(`${selector}._domainkey.${domain}`);
+  const record = records.find((value) => /(^|;)\s*(v\s*=\s*DKIM1|p\s*=)/i.test(value));
+  if (!record) return null;
+  const tags = parseTagList(record);
+  const issues = [];
+  const keyType = (tags.k || "rsa").toLowerCase();
+  const publicKey = (tags.p || "").replace(/\s+/g, "");
+  let keyBits = null;
+  if (tags.v && tags.v.toUpperCase() !== "DKIM1") issues.push({ severity: "high", message: `Unsupported version v=${tags.v}.` });
+  if (!publicKey) {
+    issues.push({ severity: "medium", message: "The public key is empty (p=), which means this key has been revoked." });
+  } else if (keyType === "rsa") {
+    try {
+      keyBits = crypto.createPublicKey({ key: Buffer.from(publicKey, "base64"), format: "der", type: "spki" }).asymmetricKeyDetails?.modulusLength || null;
+    } catch {
+      issues.push({ severity: "high", message: "The public key is not a valid RSA key, so signatures cannot be verified." });
+    }
+    if (keyBits && keyBits < 1024) issues.push({ severity: "high", message: `The RSA key is only ${keyBits} bits; receivers ignore keys shorter than 1024 bits.` });
+    else if (keyBits && keyBits < 2048) issues.push({ severity: "low", message: `The RSA key is ${keyBits} bits; 2048 bits is recommended.` });
+  } else if (keyType === "ed25519") {
+    keyBits = Buffer.from(publicKey, "base64").length === 32 ? 256 : null;
+    if (!keyBits) issues.push({ severity: "high", message: "The Ed25519 public key has the wrong length." });
+  } else {
+    issues.push({ severity: "high", message: `Unknown key type k=${keyType}.` });
+  }
+  if (/(^|:)y(:|$)/i.test(tags.t || "")) issues.push({ severity: "low", message: "Test mode (t=y): receivers treat failures as if the message were unsigned." });
+  if (tags.h && !/sha256/i.test(tags.h)) issues.push({ severity: "medium", message: `Only ${tags.h} is allowed as hash algorithm; SHA-1 is no longer accepted.` });
+  return { selector, provider, record: record.slice(0, 2000), keyType, keyBits, revoked: !publicKey, testing: /(^|:)y(:|$)/i.test(tags.t || ""), issues };
+}
+
+async function analyzeBimi(domain) {
+  const { records } = await queryTxtRecords(`default._bimi.${domain}`);
+  const record = records.find((value) => /^v\s*=\s*BIMI1\b/i.test(value.trim()));
+  if (!record) return { found: false, record: null, issues: [] };
+  const tags = parseTagList(record);
+  const issues = [];
+  if (!tags.l) issues.push({ severity: "medium", message: "No logo location (l=)." });
+  else if (!/^https:\/\//i.test(tags.l)) issues.push({ severity: "medium", message: "The logo URL must use HTTPS." });
+  if (!tags.a) issues.push({ severity: "low", message: "No Verified Mark Certificate (a=); Gmail and Apple Mail only show BIMI logos with one." });
+  return { found: true, record, logo: tags.l || null, certificate: tags.a || null, issues };
+}
+
+async function emailCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 320, response);
+  const rawSelectors = queryInput(url, "selectors", 200, response);
+  if (rawName === null || rawSelectors === null) return;
+  const input = rawName.trim();
+  const inputWasEmail = input.includes("@");
+  const domain = normalizeDomain(hostFromInput(inputWasEmail ? input.slice(input.lastIndexOf("@") + 1) : input));
+  if (!domain) {
+    sendJson(response, 400, { error: "Enter a domain name or an email address." });
+    return;
+  }
+  const extraSelectors = [...new Set(rawSelectors.split(/[\s,]+/).map((value) => value.trim().toLowerCase()).filter(Boolean))];
+  if (extraSelectors.length > 5 || extraSelectors.some((value) => !/^[a-z0-9_-]{1,63}(?:\.[a-z0-9_-]{1,63}){0,3}$/.test(value))) {
+    sendJson(response, 400, { error: "Enter up to five DKIM selectors (letters, numbers, hyphens and underscores)." });
+    return;
+  }
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("emailCheck")) {
+    sendJson(response, 503, { error: "The server is busy with other email checks. Try again shortly." });
+    return;
+  }
+  try {
+    const started = Date.now();
+    const settle = (promise) => promise.catch((error) => ({ error: error.name === "TimeoutError" ? "The DNS provider timed out." : "The check could not be completed." }));
+    let mxRecords = [];
+    let nullMx = false;
+    let implicitMx = false;
+    try {
+      const mxData = await queryDohDns(domain, "MX");
+      mxRecords = mxData.answers
+        .filter((answer) => answer.type === 15 || answer.typeName === "MX")
+        .map((answer) => {
+          const [priority, host] = String(answer.data).split(/\s+/);
+          return { priority: Number(priority), host: String(host || "").replace(/\.$/, "").toLowerCase() };
+        })
+        .sort((left, right) => left.priority - right.priority || left.host.localeCompare(right.host));
+      nullMx = mxRecords.length === 1 && (!mxRecords[0].host || mxRecords[0].host === ".");
+      if (!mxRecords.length) {
+        implicitMx = true;
+        mxRecords = [{ priority: 0, host: domain }];
+      }
+    } catch (error) {
+      mxRecords = [];
+    }
+    if (nullMx) mxRecords = [];
+    const resolved = await Promise.all(mxRecords.slice(0, 10).map(async (record) => {
+      let addresses = [];
+      try {
+        const [v4, v6] = await Promise.all(["A", "AAAA"].map((type) => queryDohDns(record.host, type).then(
+          (data) => data.answers.filter((answer) => answer.type === (type === "A" ? 1 : 28) || answer.typeName === type).map((answer) => answer.data),
+          () => [],
+        )));
+        addresses = [...v4, ...v6];
+      } catch {
+        addresses = [];
+      }
+      return { ...record, addresses, provider: identifyMailProvider(record.host, "mx") };
+    }));
+    const smtpTargets = resolved
+      .filter((record) => record.addresses.length)
+      .slice(0, 3)
+      .map((record) => ({ host: record.host, address: record.addresses.find((address) => isIP(address) === 4 && isScannableAddress(address, allowLocal)) }));
+    const selectors = [...extraSelectors.map((selector) => [selector, "Your selector"]), ...dkimSelectors.filter(([selector]) => !extraSelectors.includes(selector))];
+    const [smtp, spf, dmarc, mtaSts, tlsRpt, bimi, dkimResults, ptrLookups] = await Promise.all([
+      Promise.all(smtpTargets.map((target) => target.address
+        ? testSmtpStartTls(target.host, target.address)
+        : Promise.resolve({ host: target.host, address: null, error: "No public IPv4 address to test (private or reserved addresses are not tested)." }))),
+      settle(analyzeSpf(domain)),
+      settle(analyzeDmarc(domain)),
+      settle(analyzeMtaSts(domain, resolved.map((record) => record.host))),
+      settle(analyzeTlsRpt(domain)),
+      settle(analyzeBimi(domain)),
+      Promise.all(selectors.map(([selector, provider]) => analyzeDkimSelector(domain, selector, provider).catch(() => null))),
+      fetchPtrLookups(resolved.flatMap((record) => record.addresses)),
+    ]);
+    const spfIncludes = (spf.tree || []).filter((node) => node.via).map((node) => node.name);
+    const providers = {
+      inbound: [...new Set(resolved.map((record) => record.provider).filter(Boolean))],
+      outbound: [...new Set(spfIncludes.map((name) => identifyMailProvider(name, "spf")).filter(Boolean))],
+      spfIncludes,
+    };
+    for (const result of smtp) {
+      result.issues = [];
+      if (result.error) continue;
+      if (!result.starttls) result.issues.push({ severity: "high", message: "STARTTLS is not offered, so mail to this server travels unencrypted." });
+      if (result.tls && !result.tls.authorized) result.issues.push({ severity: "medium", message: `The certificate is not trusted (${result.tls.authorizationError}). MTA-STS and DANE senders will refuse it.` });
+      if (result.tls && !result.tls.nameMatches) result.issues.push({ severity: "medium", message: `The certificate does not match ${result.host}.` });
+      if (result.tls?.daysRemaining !== null && result.tls?.daysRemaining !== undefined && result.tls.daysRemaining < 14) {
+        result.issues.push({ severity: result.tls.daysRemaining < 0 ? "high" : "medium", message: result.tls.daysRemaining < 0 ? "The certificate has expired." : `The certificate expires in ${result.tls.daysRemaining} days.` });
+      }
+      if (result.tls && /^TLSv1(\.1)?$/.test(result.tls.protocol || "")) result.issues.push({ severity: "medium", message: `Only ${result.tls.protocol} was negotiated; TLS 1.2 or newer is expected.` });
+    }
+    sendJson(response, 200, {
+      domain,
+      inputWasEmail,
+      mx: { records: resolved, nullMx, implicit: implicitMx },
+      providers,
+      smtp,
+      spf,
+      dmarc,
+      dkim: { checked: selectors.length, records: dkimResults.filter(Boolean) },
+      mtaSts,
+      tlsRpt,
+      bimi,
+      ptrLookups,
+      durationMs: Date.now() - started,
+    });
+  } catch (error) {
+    console.error("Email check failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the email check." });
+  } finally {
+    releaseHeavyJob("emailCheck");
+  }
+}
+
+const ripeStatCache = new Map();
+
+async function ripeStat(dataCall, params) {
+  const url = new URL(`https://stat.ripe.net/data/${dataCall}/data.json`);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  url.searchParams.set("sourceapp", "bnglookup");
+  const cached = ripeStatCache.get(url.href);
+  if (cached && Date.now() - cached.at < 10 * 60_000) return cached.data;
+  const response = await fetch(url, {
+    headers: { accept: "application/json", "user-agent": "BNGlookup (+https://github.com/BANAANGA/BNGlookup)" },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!response.ok) throw new Error(`RIPE Stat returned HTTP ${response.status}.`);
+  const body = await response.json();
+  if (body.status !== "ok" || !body.data) throw new Error("RIPE Stat returned no data.");
+  if (ripeStatCache.size > 500) ripeStatCache.clear();
+  ripeStatCache.set(url.href, { data: body.data, at: Date.now() });
+  return body.data;
+}
+
+function prefixAddressCount(prefix) {
+  const [network, length] = prefix.split("/");
+  const bits = (isIP(network) === 4 ? 32 : 128) - Number(length);
+  return isIP(network) === 4 ? 2 ** bits : null;
+}
+
+async function asnLookup(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  // Check for an AS number first: URL parsing would read a bare number such as 13335 as an IPv4 address.
+  const asMatch = rawName.trim().match(/^(?:as)?\s*(\d{1,10})$/i);
+  const input = asMatch ? rawName.trim() : hostFromInput(rawName.trim());
+  const started = Date.now();
+  try {
+    let asn = null;
+    let address = null;
+    let target = input;
+    if (asMatch && Number(asMatch[1]) <= 4294967295) {
+      asn = Number(asMatch[1]);
+      target = `AS${asn}`;
+    } else if (isIP(input)) {
+      address = input;
+    } else {
+      const domain = normalizeDomain(input);
+      if (!domain) {
+        sendJson(response, 400, { error: "Enter an IP address, a domain name or an AS number (for example AS13335)." });
+        return;
+      }
+      target = domain;
+      const answers = (await queryDohDns(domain, "A")).answers.filter((answer) => answer.type === 1 || answer.typeName === "A");
+      address = answers.map((answer) => answer.data).find((value) => isPublicAddress(value)) || null;
+      if (!address) {
+        sendJson(response, 400, { error: `${domain} has no public IPv4 address to look up.` });
+        return;
+      }
+    }
+    if (address && !isPublicAddress(address)) {
+      sendJson(response, 400, { error: "This is a private or reserved address. It is not announced on the internet, so it has no ASN." });
+      return;
+    }
+    let network = null;
+    if (address) {
+      const info = await ripeStat("network-info", { resource: address });
+      const asns = (Array.isArray(info.asns) ? info.asns : []).map(Number).filter(Number.isInteger);
+      network = { address, prefix: typeof info.prefix === "string" ? info.prefix : null, asns };
+      if (!asns.length) {
+        sendJson(response, 200, { target, network, as: null, prefixes: null, durationMs: Date.now() - started });
+        return;
+      }
+      asn = asns[0];
+    }
+    const settle = (promise) => promise.catch((error) => ({ error: error.message }));
+    const [overview, announced, rpki] = await Promise.all([
+      settle(ripeStat("as-overview", { resource: `AS${asn}` })),
+      settle(ripeStat("announced-prefixes", { resource: `AS${asn}`, min_peers_seeing: "3" })),
+      network?.prefix ? settle(ripeStat("rpki-validation", { resource: `AS${asn}`, prefix: network.prefix })) : Promise.resolve(null),
+    ]);
+    if (network && rpki && !rpki.error) {
+      network.rpki = {
+        status: typeof rpki.status === "string" ? rpki.status : null,
+        roas: (Array.isArray(rpki.validating_roas) ? rpki.validating_roas : []).slice(0, 10).map((roa) => ({
+          origin: roa.origin, prefix: roa.prefix, maxLength: roa.max_length, validity: roa.validity,
+        })),
+      };
+    }
+    const prefixList = (Array.isArray(announced.prefixes) ? announced.prefixes : [])
+      .map((entry) => entry?.prefix)
+      .filter((prefix) => typeof prefix === "string" && /^[0-9a-f:.]+\/\d{1,3}$/i.test(prefix));
+    const ipv4 = prefixList.filter((prefix) => isIP(prefix.split("/")[0]) === 4).sort((left, right) => {
+      const toNumber = (value) => value.split("/")[0].split(".").reduce((total, octet) => total * 256 + Number(octet), 0);
+      return toNumber(left) - toNumber(right);
+    });
+    const ipv6 = prefixList.filter((prefix) => isIP(prefix.split("/")[0]) === 6).sort();
+    const limit = 3000;
+    sendJson(response, 200, {
+      target,
+      network,
+      as: overview.error ? { asn, error: overview.error } : {
+        asn,
+        holder: typeof overview.holder === "string" ? overview.holder : null,
+        announced: Boolean(overview.announced),
+        registry: typeof overview.block?.desc === "string" ? overview.block.desc : null,
+      },
+      prefixes: announced.error ? { error: announced.error } : {
+        ipv4Count: ipv4.length,
+        ipv6Count: ipv6.length,
+        ipv4Addresses: ipv4.reduce((total, prefix) => total + (prefixAddressCount(prefix) || 0), 0),
+        ipv4: ipv4.slice(0, limit),
+        ipv6: ipv6.slice(0, limit),
+        truncated: ipv4.length > limit || ipv6.length > limit,
+      },
+      durationMs: Date.now() - started,
+    });
+  } catch (error) {
+    sendJson(response, 502, { error: error.name === "TimeoutError" ? "RIPE Stat did not respond in time." : `Unable to look up routing data: ${error.message}` });
+  }
 }
 
 const propagationTypes = new Set(["A", "AAAA", "CAA", "CNAME", "DNSKEY", "DS", "HTTPS", "MX", "NS", "PTR", "SOA", "SRV", "SVCB", "TLSA", "TXT"]);
@@ -4935,7 +5403,7 @@ function handleAdminAbout(request, response) {
 
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
-  "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec",
+  "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 
@@ -5052,6 +5520,129 @@ async function handleShares(request, url, response) {
   `).run(row.id, row.user_id, row.mode, row.title, row.payload, row.created_at, row.expires_at);
   recordAdminLog("audit", request, "Result shared", `${mode}: ${title}`, 200, user.username);
   sendJson(response, 201, describeShare(row));
+}
+
+const historyLimits = { perUser: 100, lifetimeMs: 30 * 24 * 3600_000, payloadBytes: 512 * 1024 };
+const historyParamKeys = ["type", "method", "port", "selectors", "ports", "targets", "bulkPort", "scanType", "ptr", "tlsGrade", "scanPorts"];
+
+function cleanHistoryParams(params) {
+  const clean = {};
+  if (!params || typeof params !== "object") return clean;
+  for (const key of historyParamKeys) {
+    const value = params[key];
+    if (typeof value === "boolean") clean[key] = value;
+    else if (typeof value === "string" && value.length <= 8192) clean[key] = value;
+  }
+  return clean;
+}
+
+function describeHistory(row, withData = false) {
+  let params = {};
+  try {
+    params = JSON.parse(row.params);
+  } catch {
+    params = {};
+  }
+  const entry = {
+    id: row.id,
+    mode: row.mode,
+    title: row.title,
+    query: row.query,
+    params,
+    createdAt: new Date(row.created_at).toISOString(),
+    hasResult: row.payload !== null && row.payload !== undefined,
+  };
+  if (withData && entry.hasResult) {
+    try {
+      entry.data = JSON.parse(row.payload);
+    } catch {
+      entry.hasResult = false;
+    }
+  }
+  return entry;
+}
+
+async function handleHistory(request, url, response) {
+  const user = currentUser(request);
+  if (!user) {
+    sendJson(response, 401, { error: "Log in to use your lookup history.", loginRequired: true });
+    return;
+  }
+  database.prepare("DELETE FROM lookup_history WHERE created_at <= ?").run(Date.now() - historyLimits.lifetimeMs);
+  const idText = url.pathname.slice("/api/history/".length);
+  if (url.pathname.startsWith("/api/history/")) {
+    if (!/^\d{1,15}$/.test(idText)) {
+      sendJson(response, 404, { error: "This history entry was not found." });
+      return;
+    }
+    const row = database.prepare("SELECT * FROM lookup_history WHERE id = ? AND user_id = ?").get(Number(idText), user.id);
+    if (!row) {
+      sendJson(response, 404, { error: "This history entry was not found." });
+      return;
+    }
+    if (request.method === "GET") {
+      sendJson(response, 200, describeHistory(row, true));
+    } else if (request.method === "DELETE") {
+      database.prepare("DELETE FROM lookup_history WHERE id = ?").run(row.id);
+      sendJson(response, 200, { deleted: true });
+    } else if (request.method === "PUT") {
+      // Later updates add results that finish after the main one (TLS grade, blocklists).
+      const body = await readJsonRequest(request, historyLimits.payloadBytes + 4096);
+      const payload = JSON.stringify(body.data ?? null);
+      if (!body.data || typeof body.data !== "object" || Buffer.byteLength(payload) > historyLimits.payloadBytes) {
+        sendJson(response, 400, { error: "The result is missing or too large to store." });
+        return;
+      }
+      database.prepare("UPDATE lookup_history SET payload = ? WHERE id = ?").run(payload, row.id);
+      sendJson(response, 200, { updated: true });
+    } else {
+      sendJson(response, 405, { error: "Method not allowed." });
+    }
+    return;
+  }
+  if (request.method === "GET") {
+    const rows = database.prepare(`
+      SELECT id, mode, title, query, params, created_at, payload IS NOT NULL AS has_payload
+      FROM lookup_history WHERE user_id = ? ORDER BY id DESC LIMIT ?
+    `).all(user.id, historyLimits.perUser);
+    sendJson(response, 200, { entries: rows.map((row) => describeHistory({ ...row, payload: row.has_payload ? "" : null })) });
+    return;
+  }
+  if (request.method === "DELETE") {
+    const result = database.prepare("DELETE FROM lookup_history WHERE user_id = ?").run(user.id);
+    sendJson(response, 200, { deleted: Number(result.changes) });
+    return;
+  }
+  if (request.method !== "POST") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  const access = getFeatureAccess().history;
+  if (access === "admin" && user.role !== "admin") {
+    sendJson(response, 403, { error: "Lookup history is restricted to administrators." });
+    return;
+  }
+  const body = await readJsonRequest(request, historyLimits.payloadBytes + 16384);
+  const mode = typeof body.mode === "string" ? body.mode : "";
+  const clip = (value, length) => typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, length) : "";
+  const title = clip(body.title, 200);
+  const query = clip(body.query, 2048);
+  if (!shareableModes.has(mode) || !title) {
+    sendJson(response, 400, { error: "This result cannot be stored in history." });
+    return;
+  }
+  let payload = body.data && typeof body.data === "object" ? JSON.stringify(body.data) : null;
+  if (payload && Buffer.byteLength(payload) > historyLimits.payloadBytes) payload = null;
+  const insert = database.prepare(`
+    INSERT INTO lookup_history (user_id, mode, title, query, params, payload, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(user.id, mode, title, query, JSON.stringify(cleanHistoryParams(body.params)), payload, Date.now());
+  database.prepare(`
+    DELETE FROM lookup_history WHERE user_id = ? AND id NOT IN (
+      SELECT id FROM lookup_history WHERE user_id = ? ORDER BY id DESC LIMIT ?
+    )
+  `).run(user.id, user.id, historyLimits.perUser);
+  sendJson(response, 201, { id: Number(insert.lastInsertRowid), stored: payload !== null });
 }
 
 function handleAdminSystem(request, response) {
@@ -5838,8 +6429,8 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8 };
-const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0, zmap: 0, tlsGrade: 0, dig: 0 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4 };
+const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0, zmap: 0, tlsGrade: 0, dig: 0, emailCheck: 0 };
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
 
@@ -7011,6 +7602,8 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/dig": { method: "GET", action: "Dig command", keys: ["command"] },
     "/api/blocklist": { method: "GET", action: "Blocklist check", keys: ["name"] },
     "/api/propagation": { method: "GET", action: "Propagation check", keys: ["name", "type"] },
+    "/api/email-check": { method: "GET", action: "Email check", keys: ["name", "selectors"] },
+    "/api/asn": { method: "GET", action: "ASN lookup", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
     "/api/sslscan": { method: "GET", action: "SSL/TLS check", keys: ["name", "port"] },
     "/api/tls-grade": { method: "POST", action: "TLS test and grade" },
@@ -7043,6 +7636,14 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     handleAuthStatus(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/history" || url.pathname.startsWith("/api/history/")) {
+    void handleHistory(request, url, response).catch((error) => {
+      if (!response.headersSent) sendJson(response, error.statusCode || 500, { error: error.statusCode ? error.message : "Unable to complete the request." });
+      if (!error.statusCode) console.error("History request failed:", error);
+    });
     return;
   }
 
@@ -7208,6 +7809,8 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/dig": "dig",
     "/api/blocklist": "blocklist",
     "/api/propagation": "propagation",
+    "/api/email-check": "email",
+    "/api/asn": "asn",
     "/api/ping": "ping",
     "/api/sslscan": "sslscan",
     "/api/tls-grade": "sslscan",
@@ -7339,6 +7942,24 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/asn") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void asnLookup(request, url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/email-check") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void emailCheck(request, url, response);
+    return;
+  }
+
   if (url.pathname === "/api/propagation") {
     if (request.method !== "GET") {
       sendJson(response, 405, { error: "Method not allowed." });
@@ -7413,6 +8034,10 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
   }
+  if ((url.pathname === "/history.html" || url.pathname === "/history") && !currentUser(request)) {
+    sendRedirect(response, `/login.html?next=${encodeURIComponent("/history.html")}`);
+    return;
+  }
   if (url.pathname === "/login.html") {
     const user = currentUser(request);
     if (!user && currentUser(request, { allowPending: true })) {
@@ -7447,7 +8072,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
   }
-  const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname;
+  const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname;
   if (!staticFiles.has(requestedPath)) {
     response.writeHead(404);
     response.end();

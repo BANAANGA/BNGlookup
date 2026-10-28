@@ -20,6 +20,7 @@
         <div class="topbar-actions">
           <span class="online"><span></span> DNS over HTTPS</span>
           <nav class="account-nav" id="account-nav" aria-label="Account" hidden>
+            <a id="history-link" href="/history.html" hidden>History</a>
             <a id="account-name" href="/my-account.html"></a>
             <a id="login-link" href="/login.html">Log in</a>
             <button id="logout-button" type="button" hidden>Log out</button>
@@ -43,6 +44,12 @@
           </button>
           <button class="mode-tab" id="dig-tab" type="button" role="tab" aria-selected="false" data-mode="dig" hidden>
             <span aria-hidden="true">$</span> Dig
+          </button>
+          <button class="mode-tab" id="asn-tab" type="button" role="tab" aria-selected="false" data-mode="asn" hidden>
+            <span aria-hidden="true">⌘</span> ASN
+          </button>
+          <button class="mode-tab" id="email-tab" type="button" role="tab" aria-selected="false" data-mode="email" hidden>
+            <span aria-hidden="true">✉</span> Email
           </button>
           <button class="mode-tab" id="propagation-tab" type="button" role="tab" aria-selected="false" data-mode="propagation" hidden>
             <span aria-hidden="true">≋</span> Propagation
@@ -153,6 +160,11 @@
             <label for="sslscan-port">TLS port</label>
             <input id="sslscan-port" type="number" min="1" max="65535" value="443" inputmode="numeric">
             <span>Tests one TLS handshake and reports the negotiated protocol, cipher, certificate chain and trust status. Private addresses are checked only when allowed for your role.</span>
+          </div>
+          <div class="scan-extra-control" id="email-control" hidden>
+            <label for="dkim-selectors">DKIM selectors (optional)</label>
+            <input id="dkim-selectors" type="text" maxlength="200" placeholder="e.g. s1, mailjet" autocomplete="off" spellcheck="false">
+            <span>Common provider selectors (Google, Microsoft 365, Mailchimp, Amazon SES, Zoho, Proton and others) are always checked. Add your own if your provider uses a custom selector; it is shown in the DKIM-Signature header (s=) of a received message.</span>
           </div>
           <div class="port-scan-control" id="tls-grade-control" hidden>
             <label><input id="tls-grade-input" type="checkbox"> Also run the full TLS test and grade it (SSL Labs rating guide)</label>

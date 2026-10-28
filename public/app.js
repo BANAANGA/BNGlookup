@@ -26,6 +26,8 @@ const pingMethodControl = document.querySelector("#ping-method-control");
 const pingMethodInput = document.querySelector("#ping-method-input");
 const sslScanControl = document.querySelector("#sslscan-control");
 const sslScanPort = document.querySelector("#sslscan-port");
+const emailControl = document.querySelector("#email-control");
+const dkimSelectorsInput = document.querySelector("#dkim-selectors");
 const tlsGradeControl = document.querySelector("#tls-grade-control");
 const tlsGradeInput = document.querySelector("#tls-grade-input");
 let tlsGradeRun = 0;
@@ -46,19 +48,84 @@ const shareResultsButton = document.querySelector("#share-results-button");
 const shareResultsLink = document.querySelector("#share-results-link");
 const shareResultsStatus = document.querySelector("#share-results-status");
 let lastResult = null;
+const historyLink = document.querySelector("#history-link");
 let viewingShare = false;
 const shareModeLabels = {
   forward: "DNS lookup", reverse: "Reverse lookup", details: "Whois", mac: "MAC lookup", dig: "Dig",
-  propagation: "Propagation", ping: "Ping", sslscan: "SSLscan", "ping-scan": "Ping scan", traceroute: "Traceroute",
+  propagation: "Propagation", email: "Email check", asn: "ASN", ping: "Ping", sslscan: "SSLscan", "ping-scan": "Ping scan", traceroute: "Traceroute",
   "multi-traceroute": "Multi traceroute", scan: "Magic scan", "custom-port": "Port scan", "bulk-port": "Bulk port scan",
   nmap: "Nmap", dnssec: "DNSSEC check",
 };
 
+function historyEnabled() {
+  const access = authState?.featureAccess?.history || "user";
+  return Boolean(authState?.user) && (access !== "admin" || authState.user.role === "admin");
+}
+
+// The form state needed to run the same lookup again from the history page.
+function currentHistoryParams(resultMode) {
+  const params = {};
+  if (["forward", "propagation"].includes(resultMode)) params.type = recordType.value === "custom" ? customType.value.trim() : recordType.value;
+  if (resultMode === "dnssec") params.type = "DNSSEC";
+  if (resultMode === "ping") params.method = pingMethodInput.value;
+  if (resultMode === "sslscan") {
+    params.port = sslScanPort.value.trim();
+    params.tlsGrade = tlsGradeInput.checked;
+  }
+  if (resultMode === "email") params.selectors = dkimSelectorsInput.value.trim();
+  if (resultMode === "custom-port") params.ports = customPortsInput.value.trim();
+  if (resultMode === "bulk-port") {
+    params.targets = bulkTargetsInput.value;
+    params.bulkPort = bulkPortInput.value.trim();
+  }
+  if (resultMode === "ping-scan") params.targets = bulkTargetsInput.value;
+  if (resultMode === "multi-traceroute") {
+    params.targets = multiTraceInput.value;
+    params.ptr = tracePtrInput.checked;
+  }
+  if (resultMode === "traceroute") params.ptr = tracePtrInput.checked;
+  if (resultMode === "nmap") params.scanType = nmapScanType.value;
+  if (resultMode === "scan") params.scanPorts = portScanInput.checked;
+  return params;
+}
+
+async function saveHistory() {
+  const entry = lastResult;
+  if (!entry || viewingShare || !historyEnabled()) return;
+  try {
+    if (entry.historyId) {
+      await fetch(`/api/history/${entry.historyId}`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ data: entry.data }),
+      });
+      return;
+    }
+    const response = await fetch("/api/history", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: entry.mode, title: entry.title, query: entry.query, params: entry.params, data: entry.data }),
+    });
+    if (response.ok) entry.historyId = (await response.json()).id;
+  } catch {
+    // History is a convenience; a failed save must not disturb the result.
+  }
+}
+
 function rememberResult(resultMode, data, subject) {
-  lastResult = { mode: resultMode, data: { result: data, extras: {} }, title: `${shareModeLabels[resultMode] || resultMode}: ${String(subject || "").slice(0, 150)}` };
+  lastResult = {
+    mode: resultMode,
+    data: { result: data, extras: {} },
+    title: `${shareModeLabels[resultMode] || resultMode}: ${String(subject || "").slice(0, 150)}`,
+    query: ["ping-scan", "bulk-port", "multi-traceroute"].includes(resultMode) ? "" : input.value.trim(),
+    params: currentHistoryParams(resultMode),
+  };
   shareResultsLink.hidden = true;
   shareResultsStatus.textContent = "";
   updateShareResults();
+  void saveHistory();
 }
 
 function updateShareResults() {
@@ -174,6 +241,8 @@ function submitLabel(currentMode) {
     mac: "Lookup MAC",
     dig: "Run dig",
     propagation: "Check propagation",
+    email: "Check email",
+    asn: "Look up ASN",
     ping: "Ping host",
     sslscan: "Check SSL/TLS",
     "ping-scan": "Run ping scan",
@@ -191,6 +260,8 @@ function setMode(nextMode) {
   const mac = mode === "mac";
   const dig = mode === "dig";
   const propagation = mode === "propagation";
+  const email = mode === "email";
+  const asnMode = mode === "asn";
   const ping = mode === "ping";
   const sslscan = mode === "sslscan";
   const scan = mode === "scan";
@@ -214,9 +285,13 @@ function setMode(nextMode) {
   input.required = !listMode;
   nameLabel.textContent = automatic
     ? "Search"
-    : reverse ? "IP address" : mac ? "MAC address" : dig ? "dig command" : propagation ? "DNS name" : "Domain name or IP address";
+    : reverse ? "IP address" : mac ? "MAC address" : dig ? "dig command" : propagation ? "DNS name" : email ? "Domain or email address" : asnMode ? "IP address, domain or AS number" : "Domain name or IP address";
   input.placeholder = dig
     ? "e.g. @1.1.1.1 example.com MX +dnssec"
+    : email
+    ? "e.g. example.com or someone@example.com"
+    : asnMode
+    ? "e.g. 1.1.1.1, example.com or AS13335"
     : reverse
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
@@ -230,8 +305,8 @@ function setMode(nextMode) {
       : "e.g. example.com";
   input.autocomplete = reverse || mac || dig || portScan ? "off" : "url";
   input.classList.toggle("dig-input", dig);
-  typeControl.hidden = automatic || reverse || details || mac || dig || ping || sslscan || traceroute || listMode || scan || portScan;
-  customType.hidden = automatic || reverse || details || mac || dig || ping || sslscan || traceroute || listMode || scan || portScan || recordType.value !== "custom";
+  typeControl.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan;
+  customType.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || recordType.value !== "custom";
   nameserverControl.hidden = !supportsNameserver;
   if (!isAdmin) nameserverInput.value = "";
   pingMethodControl.hidden = !ping;
@@ -252,6 +327,7 @@ function setMode(nextMode) {
   bulkPortControl.hidden = !bulkPortScan;
   nmapControl.hidden = !nmapScan;
   multiTraceControl.hidden = !multiTraceroute;
+  emailControl.hidden = !email;
   tracePtrControl.hidden = !(traceroute || multiTraceroute);
   bulkTargetsHint.textContent = pingScan
     ? "Separate targets with commas or new lines. IPv4 and IPv6 are supported; each CIDR must contain at most 256 addresses."
@@ -274,6 +350,10 @@ function setMode(nextMode) {
         ? "Test one TLS handshake and inspect the remote server's negotiated protocol, cipher, certificate chain, and trust status."
       : mac
         ? "Find the registered hardware vendor and MAC address type."
+      : asnMode
+        ? "See which network (AS) announces an IP address, and every IPv4 and IPv6 range that network announces. Routing data comes from RIPE Stat."
+      : email
+        ? "Check a domain's mail setup: MX servers, SMTP STARTTLS on port 25, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, and which email providers it uses."
       : propagation
         ? "Compare the record across Cloudflare, Google, Quad9, DNS4EU and the zone's authoritative nameservers to see whether a change has propagated."
       : dig
@@ -303,6 +383,8 @@ function setMode(nextMode) {
 
 async function initializeAccount() {
   const sharedId = new URLSearchParams(window.location.search).get("share");
+  const historyId = new URLSearchParams(window.location.search).get("history");
+  const rerunId = new URLSearchParams(window.location.search).get("rerun");
   try {
     const response = await fetch("/api/auth/status", { credentials: "same-origin" });
     authState = await response.json();
@@ -312,6 +394,7 @@ async function initializeAccount() {
     }
     accountNav.hidden = false;
     loginLink.hidden = Boolean(authState.user);
+    historyLink.hidden = !historyEnabled();
     logoutButton.hidden = !authState.user;
     adminTabs.hidden = authState.user?.role !== "admin";
     accountName.textContent = authState.user
@@ -346,7 +429,7 @@ async function initializeAccount() {
       const requestedTab = availableTabs.find((tab) => tab.dataset.mode === requested);
       setMode(requestedTab ? requested : "auto");
       const query = new URLSearchParams(window.location.search).get("q");
-      if (sharedId) {
+      if (sharedId || historyId || rerunId) {
         // A shared link shows the stored result instead of running a query.
       } else if (query) {
         input.value = query.slice(0, 2048);
@@ -355,6 +438,8 @@ async function initializeAccount() {
       }
     }
     if (sharedId) await loadSharedResult(sharedId);
+    else if (historyId && authState.user) await loadHistoryEntry(historyId, false);
+    else if (rerunId && authState.user) await loadHistoryEntry(rerunId, true);
   } catch {
     lookupForm.hidden = true;
     modeTabs.hidden = true;
@@ -735,7 +820,10 @@ async function appendBlocklistCheck(name) {
     const data = await readApiResponse(response);
     if (!response.ok) throw new Error(data.error || "Blocklist check failed.");
     if (section.isConnected) section.innerHTML = renderBlocklistSection(data);
-    if (lastResult && section.isConnected) lastResult.data.extras.blocklist = data;
+    if (lastResult && section.isConnected) {
+      lastResult.data.extras.blocklist = data;
+      void saveHistory();
+    }
   } catch (error) {
     if (section.isConnected) section.innerHTML = `<p class="detail-notice">${escapeHtml(error.message)}</p>`;
   }
@@ -1316,7 +1404,10 @@ async function runTlsGrade(target, port) {
       if (run !== tlsGradeRun) return;
       if (!response.ok) throw new Error(data.error || "The TLS test failed.");
       Object.assign(state, { stage: data.stage, elapsedMs: data.elapsedMs, error: data.error, result: data.result });
-      if (data.result && lastResult?.mode === "sslscan") lastResult.data.extras.tlsGrade = { result: data.result, address: data.address };
+      if (data.result && lastResult?.mode === "sslscan") {
+        lastResult.data.extras.tlsGrade = { result: data.result, address: data.address };
+        void saveHistory();
+      }
       if (!renderTlsGradeSection(state) || data.status !== "running") return;
     }
   } catch (error) {
@@ -1723,6 +1814,155 @@ async function streamTraceroute(multiple) {
   cancelAnimationFrame(frame);
   draw();
   rememberResult(multiple ? "multi-traceroute" : "traceroute", { results }, results.map((entry) => entry.target).join(", "));
+}
+
+function renderAsnResult(data) {
+  const as = data.as;
+  const network = data.network;
+  const prefixes = data.prefixes || {};
+  const rpkiLabels = { valid: ["found", "RPKI valid"], invalid: ["danger", "RPKI invalid"], "invalid_asn": ["danger", "RPKI invalid (wrong origin AS)"], "invalid_length": ["danger", "RPKI invalid (too specific)"], unknown: ["missing", "No ROA (RPKI unknown)"] };
+  const rpki = network?.rpki?.status ? rpkiLabels[network.rpki.status] || ["missing", `RPKI ${network.rpki.status}`] : null;
+  const list = (items, family) => items?.length ? `
+    <details class="asn-prefixes" ${items.length <= 50 ? "open" : ""}>
+      <summary>${escapeHtml(`${family} prefixes (${items.length.toLocaleString()}${prefixes.truncated ? "+" : ""})`)}</summary>
+      <div class="asn-prefix-grid">${items.map((prefix) => `<span data-prefix="${escapeHtml(prefix)}">${copyableResult(prefix)}</span>`).join("")}</div>
+    </details>` : "";
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">ASN / PREFIXES</p><h2>${copyableResult(data.target)}</h2></div>
+      ${as ? `<span class="status-badge ${as.announced === false ? "warning" : "success"}">${escapeHtml(`AS${as.asn}`)}</span>` : '<span class="status-badge warning">Not announced</span>'}
+    </div>
+    ${network ? `<section class="record-section">
+      <h3>Network for ${copyableResult(network.address)}</h3>
+      <div class="detail-list">
+        ${renderDetail("Announced prefix", network.prefix || "Not announced in the global routing table")}
+        ${renderDetail("Origin AS", network.asns?.length ? network.asns.map((value) => `AS${value}`).join(", ") : "")}
+      </div>
+      ${rpki ? `<p class="dnssec-summary"><span class="email-auth-status ${rpki[0]}">${escapeHtml(rpki[1])}</span> ${escapeHtml(network.rpki.roas?.length ? `ROA: ${network.rpki.roas.map((roa) => `${roa.prefix} max /${roa.maxLength} AS${roa.origin}`).join(", ")}` : "")}</p>` : ""}
+    </section>` : ""}
+    ${as ? `<section class="record-section">
+      <h3>${escapeHtml(`AS${as.asn}`)}</h3>
+      ${as.error ? `<p class="detail-notice">${escapeHtml(as.error)}</p>` : `<div class="detail-list">
+        ${renderDetail("Holder", as.holder)}
+        ${renderDetail("Currently announced", as.announced ? "Yes" : "No")}
+        ${renderDetail("Registry", as.registry)}
+        ${renderDetail("IPv4 prefixes", prefixes.ipv4Count !== undefined ? `${prefixes.ipv4Count.toLocaleString()} (${prefixes.ipv4Addresses.toLocaleString()} addresses)` : "")}
+        ${renderDetail("IPv6 prefixes", prefixes.ipv6Count !== undefined ? prefixes.ipv6Count.toLocaleString() : "")}
+      </div>`}
+    </section>` : ""}
+    ${prefixes.error ? `<p class="detail-notice">${escapeHtml(prefixes.error)}</p>` : ""}
+    ${(prefixes.ipv4?.length || prefixes.ipv6?.length) ? `<section class="record-section">
+      <h3>Announced prefixes</h3>
+      <input class="asn-filter" id="asn-filter" type="search" placeholder="Filter prefixes, e.g. 104.16 or 2606:" aria-label="Filter prefixes">
+      ${list(prefixes.ipv4, "IPv4")}
+      ${list(prefixes.ipv6, "IPv6")}
+      ${prefixes.truncated ? '<p class="detail-notice">Only the first 3,000 prefixes per family are listed.</p>' : ""}
+    </section>` : ""}
+    <p class="scan-disclaimer">Routing data from RIPE Stat (RIS route collectors), counting prefixes seen by at least three peers. ${escapeHtml(data.durationMs ? `Took ${data.durationMs} ms.` : "")}</p>`;
+  const filter = resultPanel.querySelector("#asn-filter");
+  filter?.addEventListener("input", () => {
+    const term = filter.value.trim().toLowerCase();
+    resultPanel.querySelectorAll(".asn-prefix-grid [data-prefix]").forEach((item) => {
+      item.hidden = Boolean(term) && !item.dataset.prefix.toLowerCase().includes(term);
+    });
+    if (term) resultPanel.querySelectorAll(".asn-prefixes").forEach((details) => { details.open = true; });
+  });
+  resultPanel.hidden = false;
+}
+
+function renderEmailResult(data) {
+  const chips = (values) => values.length ? `<div class="status-list">${values.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div>` : "";
+  const table = (head, rows) => rows.length ? `<div class="dns-results-table-wrap"><table class="dns-results-table net-table">
+    <thead><tr>${head.map((cell) => `<th>${escapeHtml(cell)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>` : "";
+  const ptrFor = (address) => {
+    const ptr = data.ptrLookups?.[address];
+    return ptr?.answers?.length ? ptr.answers.join(", ") : "";
+  };
+  const mxRows = (data.mx?.records || []).map((record) => `
+    <tr>
+      <td>${escapeHtml(record.priority)}</td>
+      <td>${copyableResult(record.host)}</td>
+      <td>${record.addresses.length ? record.addresses.map((address) => `${copyableResult(address)}${ptrFor(address) ? ` <span class="trace-silent">${escapeHtml(ptrFor(address))}</span>` : ""}`).join("<br>") : '<span class="dnssec-bad">Does not resolve</span>'}</td>
+      <td>${escapeHtml(record.provider || "")}</td>
+    </tr>`);
+  const smtpCards = (data.smtp || []).map((result) => {
+    const status = result.error
+      ? ["missing", "Not tested"]
+      : !result.starttls ? ["danger", "No STARTTLS"]
+      : result.tls && result.tls.authorized && result.tls.nameMatches ? ["found", "STARTTLS · trusted"]
+      : result.tls ? ["warning", "STARTTLS · certificate problem"] : ["warning", "STARTTLS"];
+    const tlsInfo = result.tls ? `
+      ${renderDetail("TLS", [result.tls.protocol, result.tls.cipher].filter(Boolean).join(" · "))}
+      ${renderDetail("Certificate", result.tls.subject)}
+      ${renderDetail("Issuer", result.tls.issuer)}
+      ${renderDetail("Trusted", result.tls.authorized ? "Yes" : `No (${result.tls.authorizationError})`)}
+      ${renderDetail("Name matches", result.tls.nameMatches ? "Yes" : "No")}
+      ${renderDetail("Expires", result.tls.validTo ? `${new Date(result.tls.validTo).toLocaleDateString()} (${result.tls.daysRemaining} days)` : "")}` : "";
+    return `
+      <div class="smtp-card">
+        <h4>${copyableResult(result.host)} ${result.address ? `<span class="trace-silent">${escapeHtml(result.address)}</span>` : ""} <span class="email-auth-status ${status[0]}">${escapeHtml(status[1])}</span></h4>
+        ${result.error ? `<p class="detail-notice">${escapeHtml(result.error)}</p>` : ""}
+        <div class="detail-list">
+          ${renderDetail("Banner", result.banner)}
+          ${tlsInfo}
+          ${renderDetail("Response time", result.durationMs ? `${result.durationMs} ms` : "")}
+        </div>
+        ${chips(result.capabilitiesAfterTls?.length ? result.capabilitiesAfterTls : result.capabilities || [])}
+        ${renderMailIssues(result.issues)}
+      </div>`;
+  }).join("");
+  const dkimRows = (data.dkim?.records || []).map((record) => `
+    <tr>
+      <td>${copyableResult(record.selector)}</td>
+      <td>${escapeHtml(record.provider || "")}</td>
+      <td>${escapeHtml(record.revoked ? "Revoked (empty key)" : `${record.keyType.toUpperCase()}${record.keyBits ? ` · ${record.keyBits} bits` : ""}`)}${record.testing ? " · test mode" : ""}</td>
+      <td>${record.issues.length ? record.issues.map((issue) => `<span class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</span>`).join("<br>") : '<span class="dnssec-ok">Valid</span>'}</td>
+    </tr>`);
+  const providers = data.providers || { inbound: [], outbound: [], spfIncludes: [] };
+  const allIssues = [
+    ...(data.smtp || []).flatMap((result) => result.issues || []),
+    ...(data.spf?.issues || []), ...(data.dmarc?.issues || []), ...(data.mtaSts?.issues || []),
+    ...(data.dkim?.records || []).flatMap((record) => record.issues),
+  ];
+  const serious = allIssues.filter((issue) => issue.severity === "high").length;
+  const bimi = data.bimi || {};
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">EMAIL CHECK</p><h2>${copyableResult(data.domain)}</h2></div>
+      <span class="status-badge ${serious ? "warning" : "success"}">${escapeHtml(serious ? `${serious} serious issue(s)` : allIssues.length ? `${allIssues.length} suggestion(s)` : "Looks good")}</span>
+    </div>
+    <section class="email-auth">
+      <h3>Email providers</h3>
+      <div class="email-auth-grid">
+        <div><h4>Receives mail (MX)</h4>${chips(providers.inbound) || '<p class="empty-result">No known provider; the domain may run its own mail server.</p>'}</div>
+        <div><h4>Sends mail (SPF)</h4>${chips(providers.outbound) || '<p class="empty-result">No known sending service in SPF.</p>'}${providers.spfIncludes?.length ? `<p class="dnssec-summary">${escapeHtml(`SPF includes: ${providers.spfIncludes.join(", ")}`)}</p>` : ""}</div>
+      </div>
+    </section>
+    <section class="email-auth">
+      <h3>MX records <span class="email-auth-status ${data.mx?.records?.length ? "found" : "missing"}">${escapeHtml(data.mx?.nullMx ? "Null MX" : `${data.mx?.records?.length || 0} server(s)`)}</span></h3>
+      ${data.mx?.nullMx ? '<p class="detail-notice">This domain publishes a null MX record: it explicitly does not accept email.</p>' : ""}
+      ${data.mx?.implicit ? '<p class="detail-notice">No MX record. Senders fall back to the domain\'s own address (implicit MX), which is rarely intended.</p>' : ""}
+      ${table(["Priority", "Server", "Addresses / reverse DNS", "Provider"], mxRows)}
+    </section>
+    <section class="email-auth">
+      <h3>SMTP and STARTTLS (port 25)</h3>
+      ${smtpCards || '<p class="empty-result">No mail server could be tested.</p>'}
+      <p class="scan-disclaimer">Connects to the first three MX servers on port 25, checks that STARTTLS is offered, upgrades to TLS and inspects the certificate. No mail is sent. Many cloud hosts block outbound port 25.</p>
+    </section>
+    <section class="email-auth">
+      <h3>Authentication and transport policies</h3>
+      ${renderMailSecurity({ dmarc: data.dmarc, spf: data.spf, mtaSts: data.mtaSts, tlsRpt: data.tlsRpt })}
+    </section>
+    <section class="email-auth">
+      <h3>DKIM <span class="email-auth-status ${dkimRows.length ? "found" : "missing"}">${escapeHtml(dkimRows.length ? `${dkimRows.length} key(s) found` : "No keys found")}</span></h3>
+      ${table(["Selector", "Typical provider", "Key", "Validation"], dkimRows) || `<p class="empty-result">${escapeHtml(`No DKIM key was found for the ${data.dkim?.checked || 0} selectors checked. Add your provider's selector above.`)}</p>`}
+    </section>
+    <section class="email-auth">
+      <h3>BIMI <span class="email-auth-status ${bimi.found ? "found" : "missing"}">${bimi.found ? "Found" : "Not configured"}</span></h3>
+      ${bimi.found ? `<div class="email-auth-record"><span>${escapeHtml(bimi.record)}</span></div>${renderMailIssues(bimi.issues)}` : '<p class="empty-result">No BIMI record (default._bimi). BIMI shows your logo in supporting inboxes once DMARC is enforced.</p>'}
+    </section>
+    <p class="scan-disclaimer">${escapeHtml(`Completed in ${data.durationMs} ms.`)}</p>`;
+  resultPanel.hidden = false;
 }
 
 function renderPropagationResult(data) {
@@ -2270,6 +2510,15 @@ form.addEventListener("submit", async (event) => {
     [...params.keys()].forEach((key) => params.delete(key));
     params.set("command", lookupName);
   }
+  if (requestMode === "asn") {
+    [...params.keys()].forEach((key) => params.delete(key));
+    params.set("name", lookupName);
+  }
+  if (requestMode === "email") {
+    [...params.keys()].forEach((key) => params.delete(key));
+    params.set("name", lookupName);
+    params.set("selectors", dkimSelectorsInput.value.trim());
+  }
   if (requestMode === "propagation") {
     const type = params.get("type");
     [...params.keys()].forEach((key) => params.delete(key));
@@ -2309,6 +2558,10 @@ form.addEventListener("submit", async (event) => {
         ? "/api/dig"
         : requestMode === "propagation"
         ? "/api/propagation"
+        : requestMode === "email"
+        ? "/api/email-check"
+        : requestMode === "asn"
+        ? "/api/asn"
         : requestMode === "scan"
         ? "/api/scan"
         : "/api/lookup";
@@ -2376,6 +2629,8 @@ form.addEventListener("submit", async (event) => {
     else if (requestMode === "mac") renderMacResult(data);
     else if (requestMode === "dig") renderDigResult(data);
     else if (requestMode === "propagation") renderPropagationResult(data);
+    else if (requestMode === "email") renderEmailResult(data);
+    else if (requestMode === "asn") renderAsnResult(data);
     else if (requestMode === "scan") renderScanResult(data);
     else if (data.dnssecCheck) renderDnssecResult(data);
     else if (isPortScan) renderPortScanResult(data, customPortScan ? "Port scan" : "Bulk port scan");
@@ -2421,6 +2676,8 @@ function renderSharedResult(shareMode, payload) {
     case "mac": renderMacResult(data); break;
     case "dig": renderDigResult(data); break;
     case "propagation": renderPropagationResult(data); break;
+    case "email": renderEmailResult(data); break;
+    case "asn": renderAsnResult(data); break;
     case "ping": renderPingResult(data); break;
     case "sslscan": renderSslScanResult(data); break;
     case "ping-scan": renderPingScanResult(data); break;
@@ -2438,6 +2695,55 @@ function renderSharedResult(shareMode, payload) {
     renderTlsGradeSection({ result: extras.tlsGrade.result, address: extras.tlsGrade.address });
   }
   if (extras.blocklist) resultPanel.insertAdjacentHTML("beforeend", renderBlocklistSection(extras.blocklist));
+}
+
+async function loadHistoryEntry(id, rerun) {
+  try {
+    const response = await fetch(`/api/history/${encodeURIComponent(id)}`, { credentials: "same-origin" });
+    const entry = await readApiResponse(response);
+    if (!response.ok) throw new Error(entry.error || "This history entry could not be loaded.");
+    const formMode = entry.mode === "dnssec" ? "forward" : entry.mode;
+    if (rerun) {
+      const tab = tabs.find((candidate) => candidate.dataset.mode === formMode && !candidate.hidden);
+      if (!tab) throw new Error("You no longer have access to this tool.");
+      setMode(formMode);
+      const params = entry.params || {};
+      input.value = entry.query || "";
+      if (params.type) {
+        const known = [...recordType.options].some((option) => option.value === params.type);
+        recordType.value = known ? params.type : "custom";
+        customType.value = known ? "" : params.type;
+        customType.hidden = recordType.value !== "custom";
+      }
+      if (params.method) pingMethodInput.value = params.method;
+      if (params.port) sslScanPort.value = params.port;
+      if (typeof params.tlsGrade === "boolean") tlsGradeInput.checked = params.tlsGrade;
+      if (typeof params.selectors === "string") dkimSelectorsInput.value = params.selectors;
+      if (typeof params.ports === "string") customPortsInput.value = params.ports;
+      if (typeof params.targets === "string") {
+        bulkTargetsInput.value = params.targets;
+        multiTraceInput.value = params.targets;
+      }
+      if (params.bulkPort) bulkPortInput.value = params.bulkPort;
+      if (params.scanType) nmapScanType.value = params.scanType;
+      if (typeof params.ptr === "boolean") tracePtrInput.checked = params.ptr;
+      if (typeof params.scanPorts === "boolean") portScanInput.checked = params.scanPorts;
+      history.replaceState(null, "", `/?mode=${encodeURIComponent(formMode)}`);
+      form.requestSubmit();
+      return;
+    }
+    if (!entry.hasResult) throw new Error("This result was too large to store. Use Re-run on the History page instead.");
+    viewingShare = true;
+    renderSharedResult(entry.mode, entry.data);
+    const banner = document.createElement("div");
+    banner.className = "share-banner";
+    banner.innerHTML = `<strong>From your history</strong> ${escapeHtml(entry.title)}<span>${escapeHtml(`Saved ${new Date(entry.createdAt).toLocaleString()}`)}</span> <a href="/?rerun=${encodeURIComponent(entry.id)}">Run again</a>`;
+    resultPanel.prepend(banner);
+    resultPanel.hidden = false;
+  } catch (error) {
+    errorMessage.textContent = error.message;
+    errorMessage.hidden = false;
+  }
 }
 
 async function loadSharedResult(id) {
