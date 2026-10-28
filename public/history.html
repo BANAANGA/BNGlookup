@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101810">
+    <title>History · BNGlookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/branding.js" defer></script>
+    <script src="/history.js" defer></script>
+  </head>
+  <body>
+    <main class="page account-page history-page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Home">
+          <img class="brand-logo" src="/logo.svg" alt="" width="40" height="40">
+          <span class="brand-name">DNSLookup</span>
+        </a>
+      </header>
+      <section class="account-card history-card">
+        <p class="eyebrow">YOUR LOOKUPS</p>
+        <h1>Lookup history</h1>
+        <p class="account-description">Your last 100 lookups from the past 30 days. View a stored result, run it again with the same options, or tick two runs of the same tool and compare them.</p>
+        <div class="history-toolbar">
+          <input id="history-filter" type="search" placeholder="Filter by tool or query" aria-label="Filter history">
+          <button class="dash-version-check" id="history-compare" type="button" disabled>Compare selected</button>
+          <button class="dash-version-check history-clear" id="history-clear" type="button">Clear history</button>
+        </div>
+        <p class="error-message" id="history-error" role="alert" hidden></p>
+        <p class="logs-status" id="history-status" role="status">Loading…</p>
+        <div class="history-list" id="history-list"></div>
+        <section class="history-compare" id="history-compare-result" hidden></section>
+        <p class="form-hint"><a href="/">← Back to lookup</a></p>
+      </section>
+    </main>
+  </body>
+</html>
