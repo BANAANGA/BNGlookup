@@ -1302,3 +1302,55 @@ footer a:hover { color: #e4ffef; }
 .scan-includes-control label + label { margin-top: 6px; }
 .scan-include { margin-top: 28px; padding-top: 22px; border-top: 1px dashed #2b4a35; }
 .scan-includes-control label[hidden] { display: none; }
+
+/* Email check: overview scorecard, fix list and compact facts */
+.mail-scorecard { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 16px 0; }
+.mail-score {
+  display: flex; align-items: center; gap: 10px; min-width: 0; padding: 10px 12px;
+  border: 1px solid #262626; border-left: 3px solid #4a4a4a; border-radius: 7px;
+  color: inherit; background: #0d0d0d; font: inherit; text-align: left; cursor: pointer;
+}
+.mail-score:hover, .mail-score:focus-visible { border-color: #3a3a3a; background: #141414; }
+.mail-score-icon {
+  display: grid; flex: none; place-items: center; width: 22px; height: 22px; border-radius: 50%;
+  color: #c0c0c0; background: #252525; font-size: 11px; font-weight: 700;
+}
+.mail-score-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mail-score-text strong { color: #e6e6e6; font-size: 11px; }
+.mail-score-text span { overflow: hidden; color: #9a9a9a; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.mail-score.ok { border-left-color: #3fbf77; }
+.mail-score.ok .mail-score-icon { color: #8aeab1; background: #173421; }
+.mail-score.warn { border-left-color: #d9a441; }
+.mail-score.warn .mail-score-icon { color: #f0cb86; background: #2a2112; }
+.mail-score.bad { border-left-color: #e06767; }
+.mail-score.bad .mail-score-icon { color: #ffb4b4; background: #2c1515; }
+.mail-fix-list ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.mail-fix-list li {
+  display: flex; align-items: baseline; gap: 10px; padding: 7px 10px;
+  border-left: 3px solid #4a4a4a; border-radius: 5px; color: #d6d6d6; background: #0f0f0f; font-size: 12px; line-height: 1.45;
+}
+.mail-fix-list li.high { border-left-color: #e06767; }
+.mail-fix-list li.medium { border-left-color: #d9a441; }
+.mail-fix-list li.low { border-left-color: #6b8f7a; }
+.mail-fix-area { flex: none; min-width: 64px; color: #8f8f8f; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.mail-all-good { margin: 0 0 16px; padding: 10px 12px; border: 1px solid #294c36; border-radius: 7px; color: #8aeab1; background: #0a120d; font-size: 12px; }
+.mail-facts {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px 18px; margin: 8px 0;
+  padding: 12px 14px; border: 1px solid #242424; border-radius: 7px; background: #0d0d0d;
+}
+.mail-facts > div { min-width: 0; }
+.mail-facts dt { margin-bottom: 3px; color: #7c7c7c; font-size: 10px; }
+.mail-facts dd { margin: 0; overflow-wrap: anywhere; color: #e2e2e2; font-size: 12px; font-weight: 600; }
+.smtp-card h4 { font-size: 13px; }
+.smtp-card .trace-silent { font-size: 11px; font-weight: 400; }
+.bimi-result .mail-facts { flex: 1; margin: 0; }
+[data-mail-section] { scroll-margin-top: 16px; }
+.mail-flash { animation: mail-flash 1.2s ease-out; }
+@keyframes mail-flash { from { box-shadow: 0 0 0 2px #54d88f; } to { box-shadow: 0 0 0 2px transparent; } }
+@media (prefers-reduced-motion: reduce) { .mail-flash { animation: none; } }
+@media (max-width: 680px) {
+  .mail-scorecard { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mail-score { padding: 8px 10px; }
+  .mail-facts { grid-template-columns: 1fr; }
+  .mail-fix-list li { flex-direction: column; gap: 3px; }
+}
