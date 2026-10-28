@@ -1662,7 +1662,7 @@ function drawPingMonitorChart() {
   const latencies = pingMonitorSamples.map((sample) => sample.latency).filter(Number.isFinite);
   const maxLatency = Math.max(100, ...latencies) * 1.15;
   context.clearRect(0, 0, width, height);
-  context.font = "11px sans-serif";
+  context.font = "13px sans-serif";
   context.textAlign = "right";
   context.textBaseline = "middle";
   context.strokeStyle = "#343434";
