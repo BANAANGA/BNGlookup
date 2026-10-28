@@ -24,7 +24,7 @@ small Docker container with no application dependencies.
 - **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status, plus an optional full TLS test with an SSL Labs-style A+–F grade.
 - **Ping scan**: one echo request to every host in a list or CIDR block.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side, with optional PTR (reverse DNS) lookup for every hop.
-- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, blocklists (DNSBL), SPF (with lookup counting), DKIM, DMARC, MTA-STS, TLS-RPT, certificate-transparency names, geolocation, optional port check.
+- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, blocklists (DNSBL), SPF (with lookup counting), DKIM, DMARC, MTA-STS, TLS-RPT, certificate-transparency names, geolocation, optional port check, Email check and SSLscan/TLS grade.
 - **Propagation**: compare one record across Cloudflare, Google, Quad9, DNS4EU and the zone's authoritative nameservers.
 - **Email**: MX servers, SMTP STARTTLS on port 25, SPF, DMARC, DKIM key validation, MTA-STS, TLS-RPT and BIMI, and which email providers a domain uses.
 - **ASN**: which network (AS) announces an IP, its RPKI status, and every IPv4/IPv6 prefix that AS announces.
@@ -326,6 +326,11 @@ Several tools send data to external services; these are listed under
 - **Optional port check** in Magic scan: 26 common TCP ports (including 2222 and
   8443) on up to 8 eligible IPs. It reports ports that accept a connection; it is
   not a vulnerability assessment.
+- **Optional Email check and SSLscan** in Magic scan: tick them to also run the
+  full Email check (MX, SMTP STARTTLS, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI)
+  and an SSLscan of port 443, optionally with the full testssl.sh grade, on the
+  scanned domain. They run after the DNS scan, follow the access settings of the
+  Email and SSLscan tools, and are kept in share links and history.
 - **Port scans** always require a signed-in account. Private/local targets follow
   the role setting (default: allowed for Admins, not Users); other reserved
   addresses are always skipped. Only scan systems you are authorized to test.

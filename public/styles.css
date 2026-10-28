@@ -1299,3 +1299,6 @@ footer a:hover { color: #e4ffef; }
 .history-diff tr.diff-removed td:nth-child(2) { color: #ffb4b4; }
 .history-diff tr.diff-changed td:nth-child(2) { color: #f0cb86; }
 .history-diff tr.diff-changed td:nth-child(3) { color: #a9e5c5; }
+.scan-includes-control label + label { margin-top: 6px; }
+.scan-include { margin-top: 28px; padding-top: 22px; border-top: 1px dashed #2b4a35; }
+.scan-includes-control label[hidden] { display: none; }

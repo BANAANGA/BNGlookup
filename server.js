@@ -5801,7 +5801,7 @@ async function handleShares(request, url, response) {
 }
 
 const historyLimits = { perUser: 100, lifetimeMs: 30 * 24 * 3600_000, payloadBytes: 512 * 1024 };
-const historyParamKeys = ["type", "method", "port", "selectors", "ports", "targets", "bulkPort", "scanType", "ptr", "tlsGrade", "scanPorts"];
+const historyParamKeys = ["type", "method", "port", "selectors", "ports", "targets", "bulkPort", "scanType", "ptr", "tlsGrade", "scanPorts", "scanEmail", "scanSsl", "scanTlsGrade"];
 
 function cleanHistoryParams(params) {
   const clean = {};
