@@ -187,6 +187,22 @@ sudo docker image prune -f
 sudo docker compose logs --tail 50
 ```
 
+### Publishing a release (maintainers)
+
+Push a version tag from `main`; the *Release and publish Docker image* workflow
+checks that it looks like `v1.2.3`, creates the GitHub release with generated
+notes (an existing release is kept as written) and publishes the image as
+`1.2.3`, `1.2` and `latest`:
+
+```sh
+git checkout main && git pull
+git tag v2.3.0 && git push origin v2.3.0
+```
+
+Publishing a release in the GitHub web UI with a new tag does the same. Tags
+that do not match `v1.2.3` (for example `v.2.1.1` or `v2.3`) fail the workflow
+without creating a release or an image; delete the tag and push a correct one.
+
 To pin a release: `git fetch --tags && git checkout v1.1`, then rebuild. To roll
 back, check out the previous tag or commit and rebuild; `git checkout main && git pull`
 returns to the latest code.
