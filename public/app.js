@@ -739,6 +739,76 @@ function renderDnssecSection(check) {
     </section>`;
 }
 
+function renderFacts(pairs) {
+  const items = pairs.filter(([, value]) => value !== null && value !== undefined && value !== "");
+  if (!items.length) return "";
+  return `<dl class="mail-facts">${items.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${copyableResult(value)}</dd></div>`).join("")}</dl>`;
+}
+
+const mailSeverityOrder = { high: 0, medium: 1, low: 2 };
+
+// One tile per area with a pass/warn/fail state, so the result can be read at a glance.
+function mailScorecard(data) {
+  const smtp = (data.smtp || []).filter((result) => !result.error);
+  const mxCount = data.mx?.records?.length || 0;
+  const unresolved = (data.mx?.records || []).filter((record) => !record.addresses.length).length;
+  const spf = data.spf || {};
+  const dmarc = data.dmarc || {};
+  const dkim = data.dkim?.records || [];
+  const sts = data.mtaSts || {};
+  const rpt = data.tlsRpt || {};
+  const bimi = data.bimi || {};
+  const hasHigh = (issues) => (issues || []).some((issue) => issue.severity === "high");
+  return [
+    ["mx", "MX", data.mx?.nullMx ? ["none", "Null MX"] : !mxCount ? ["bad", "None"] : unresolved ? ["warn", `${unresolved} of ${mxCount} unresolved`] : ["ok", `${mxCount} server${mxCount === 1 ? "" : "s"}`]],
+    ["smtp", "STARTTLS", !smtp.length ? ["none", "Not tested"]
+      : smtp.some((result) => !result.starttls) ? ["bad", "Not offered"]
+      : smtp.some((result) => result.issues?.length) ? ["warn", "Certificate issue"] : ["ok", "Trusted TLS"]],
+    ["spf", "SPF", spf.error ? ["none", "Unavailable"] : !spf.found ? ["bad", "Missing"]
+      : spf.lookups === null || spf.lookups > 10 ? ["bad", spf.lookups === null ? "Invalid" : `${spf.lookups}/10 lookups`]
+      : hasHigh(spf.issues) || spf.lookups >= 8 ? ["warn", `${spf.lookups}/10 lookups`] : ["ok", spf.all ? `${spf.all} · ${spf.lookups}/10` : `${spf.lookups}/10 lookups`]],
+    ["dmarc", "DMARC", dmarc.error ? ["none", "Unavailable"] : !dmarc.found ? ["bad", "Missing"]
+      : dmarc.policy === "reject" || dmarc.policy === "quarantine" ? [hasHigh(dmarc.issues) ? "warn" : "ok", `p=${dmarc.policy}`] : ["warn", `p=${dmarc.policy || "?"}`]],
+    ["dkim", "DKIM", !dkim.length ? ["warn", "No keys found"] : dkim.some((record) => hasHigh(record.issues)) ? ["warn", `${dkim.length} key${dkim.length === 1 ? "" : "s"} · issues`] : ["ok", `${dkim.length} key${dkim.length === 1 ? "" : "s"}`]],
+    ["mta-sts", "MTA-STS", sts.error ? ["none", "Unavailable"] : !sts.found ? ["none", "Not configured"] : sts.policy?.mode === "enforce" && !hasHigh(sts.issues) ? ["ok", "enforce"] : ["warn", sts.policy?.mode || "Policy problem"]],
+    ["tls-rpt", "TLS-RPT", rpt.error ? ["none", "Unavailable"] : !rpt.found ? ["none", "Not configured"] : rpt.issues?.length ? ["warn", "Found"] : ["ok", "Found"]],
+    ["bimi", "BIMI", bimi.error ? ["none", "Unavailable"] : !bimi.found ? ["none", "Not configured"] : hasHigh(bimi.issues) ? ["bad", "Problems"] : bimi.certificateCheck?.kind ? ["ok", bimi.certificateCheck.kind] : ["warn", "No certificate"]],
+  ];
+}
+
+function renderMailScorecard(data) {
+  const icons = { ok: "✓", warn: "!", bad: "✕", none: "–" };
+  return `<div class="mail-scorecard">${mailScorecard(data).map(([id, label, [state, value]]) => `
+    <button type="button" class="mail-score ${state}" data-scroll-to="${id}">
+      <span class="mail-score-icon" aria-hidden="true">${icons[state]}</span>
+      <span class="mail-score-text"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value)}</span></span>
+    </button>`).join("")}</div>`;
+}
+
+function renderMailFixList(groups) {
+  const issues = groups.flatMap(([area, list]) => (list || []).map((issue) => ({ area, ...issue })))
+    .sort((left, right) => (mailSeverityOrder[left.severity] ?? 3) - (mailSeverityOrder[right.severity] ?? 3));
+  if (!issues.length) return '<p class="mail-all-good">✓ No problems found in the checks below.</p>';
+  const shown = issues.slice(0, 12);
+  return `
+    <section class="email-auth mail-fix-list">
+      <h3>What to fix <span class="email-auth-status ${issues.some((issue) => issue.severity === "high") ? "danger" : "warning"}">${escapeHtml(`${issues.length} item${issues.length === 1 ? "" : "s"}`)}</span></h3>
+      <ul>${shown.map((issue) => `<li class="${escapeHtml(issue.severity)}"><span class="mail-fix-area">${escapeHtml(issue.area)}</span>${escapeHtml(issue.message)}</li>`).join("")}</ul>
+      ${issues.length > shown.length ? `<p class="scan-disclaimer">${escapeHtml(`${issues.length - shown.length} more below, in their sections.`)}</p>` : ""}
+    </section>`;
+}
+
+resultPanel.addEventListener("click", (event) => {
+  const tile = event.target.closest("[data-scroll-to]");
+  if (!tile) return;
+  const target = tile.closest(".email-result")?.querySelector(`[data-mail-section="${tile.dataset.scrollTo}"]`);
+  if (!target) return;
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+  target.classList.remove("mail-flash");
+  void target.offsetWidth;
+  target.classList.add("mail-flash");
+});
+
 function renderMailIssues(issues) {
   if (!issues?.length) return "";
   return `<ul class="dnssec-issues">${issues.map((issue) => `<li class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join("")}</ul>`;
@@ -747,7 +817,7 @@ function renderMailIssues(issues) {
 function renderMailSecurity(security) {
   if (!security || (!security.dmarc && !security.spf)) return "";
   const card = (title, found, label, body) => `
-    <div>
+    <div data-mail-section="${escapeHtml({ DMARC: "dmarc", "SPF evaluation": "spf", "MTA-STS": "mta-sts", "TLS-RPT": "tls-rpt" }[title] || "")}">
       <h4>${escapeHtml(title)} <span class="email-auth-status ${found}">${escapeHtml(label)}</span></h4>
       ${body}
     </div>`;
@@ -1965,22 +2035,21 @@ function emailResultHtml(data) {
       : !result.starttls ? ["danger", "No STARTTLS"]
       : result.tls && result.tls.authorized && result.tls.nameMatches ? ["found", "STARTTLS · trusted"]
       : result.tls ? ["warning", "STARTTLS · certificate problem"] : ["warning", "STARTTLS"];
-    const tlsInfo = result.tls ? `
-      ${renderDetail("TLS", [result.tls.protocol, result.tls.cipher].filter(Boolean).join(" · "))}
-      ${renderDetail("Certificate", result.tls.subject)}
-      ${renderDetail("Issuer", result.tls.issuer)}
-      ${renderDetail("Trusted", result.tls.authorized ? "Yes" : `No (${result.tls.authorizationError})`)}
-      ${renderDetail("Name matches", result.tls.nameMatches ? "Yes" : "No")}
-      ${renderDetail("Expires", result.tls.validTo ? `${new Date(result.tls.validTo).toLocaleDateString()} (${result.tls.daysRemaining} days)` : "")}` : "";
+    const tls = result.tls;
     return `
       <div class="smtp-card">
         <h4>${copyableResult(result.host)} ${result.address ? `<span class="trace-silent">${escapeHtml(result.address)}</span>` : ""} <span class="email-auth-status ${status[0]}">${escapeHtml(status[1])}</span></h4>
         ${result.error ? `<p class="detail-notice">${escapeHtml(result.error)}</p>` : ""}
-        <div class="detail-list">
-          ${renderDetail("Banner", result.banner)}
-          ${tlsInfo}
-          ${renderDetail("Response time", result.durationMs ? `${result.durationMs} ms` : "")}
-        </div>
+        ${renderFacts([
+          ["Banner", result.banner],
+          ["TLS", tls ? [tls.protocol, tls.cipher].filter(Boolean).join(" · ") : ""],
+          ["Certificate", tls?.subject],
+          ["Issuer", tls?.issuer],
+          ["Trusted", tls ? (tls.authorized ? "Yes" : `No (${tls.authorizationError})`) : ""],
+          ["Name matches", tls ? (tls.nameMatches ? "Yes" : "No") : ""],
+          ["Expires", tls?.validTo ? `${new Date(tls.validTo).toLocaleDateString()} (${tls.daysRemaining} days)` : ""],
+          ["Response time", result.durationMs ? `${result.durationMs} ms` : ""],
+        ])}
         ${chips(result.capabilitiesAfterTls?.length ? result.capabilitiesAfterTls : result.capabilities || [])}
         ${renderMailIssues(result.issues)}
       </div>`;
@@ -2001,11 +2070,17 @@ function emailResultHtml(data) {
   ];
   const serious = allIssues.filter((issue) => issue.severity === "high").length;
   const bimi = data.bimi || {};
-  return `
+  return `<div class="email-result">
     <div class="result-heading">
       <div><p class="eyebrow">EMAIL CHECK</p><h2>${copyableResult(data.domain)}</h2></div>
       <span class="status-badge ${serious ? "warning" : "success"}">${escapeHtml(serious ? `${serious} serious issue(s)` : allIssues.length ? `${allIssues.length} suggestion(s)` : "Looks good")}</span>
     </div>
+    ${renderMailScorecard(data)}
+    ${renderMailFixList([
+      ["STARTTLS", (data.smtp || []).flatMap((result) => result.issues || [])],
+      ["SPF", data.spf?.issues], ["DMARC", data.dmarc?.issues], ["DKIM", (data.dkim?.records || []).flatMap((record) => record.issues)],
+      ["MTA-STS", data.mtaSts?.issues], ["TLS-RPT", data.tlsRpt?.issues], ["BIMI", bimi.issues],
+    ])}
     <section class="email-auth">
       <h3>Email providers</h3>
       <div class="email-auth-grid">
@@ -2013,13 +2088,13 @@ function emailResultHtml(data) {
         <div><h4>Sends mail (SPF)</h4>${chips(providers.outbound) || '<p class="empty-result">No known sending service in SPF.</p>'}${providers.spfIncludes?.length ? `<p class="dnssec-summary">${escapeHtml(`SPF includes: ${providers.spfIncludes.join(", ")}`)}</p>` : ""}</div>
       </div>
     </section>
-    <section class="email-auth">
+    <section class="email-auth" data-mail-section="mx">
       <h3>MX records <span class="email-auth-status ${data.mx?.records?.length ? "found" : "missing"}">${escapeHtml(data.mx?.nullMx ? "Null MX" : `${data.mx?.records?.length || 0} server(s)`)}</span></h3>
       ${data.mx?.nullMx ? '<p class="detail-notice">This domain publishes a null MX record: it explicitly does not accept email.</p>' : ""}
       ${data.mx?.implicit ? '<p class="detail-notice">No MX record. Senders fall back to the domain\'s own address (implicit MX), which is rarely intended.</p>' : ""}
       ${table(["Priority", "Server", "Addresses / reverse DNS", "Provider"], mxRows)}
     </section>
-    <section class="email-auth">
+    <section class="email-auth" data-mail-section="smtp">
       <h3>SMTP and STARTTLS (port 25)</h3>
       ${smtpCards || '<p class="empty-result">No mail server could be tested.</p>'}
       <p class="scan-disclaimer">Connects to the first three MX servers on port 25, checks that STARTTLS is offered, upgrades to TLS and inspects the certificate. No mail is sent. Many cloud hosts block outbound port 25.</p>
@@ -2028,15 +2103,15 @@ function emailResultHtml(data) {
       <h3>Authentication and transport policies</h3>
       ${renderMailSecurity({ dmarc: data.dmarc, spf: data.spf, mtaSts: data.mtaSts, tlsRpt: data.tlsRpt })}
     </section>
-    <section class="email-auth">
+    <section class="email-auth" data-mail-section="dkim">
       <h3>DKIM <span class="email-auth-status ${dkimRows.length ? "found" : "missing"}">${escapeHtml(dkimRows.length ? `${dkimRows.length} key(s) found` : "No keys found")}</span></h3>
       ${table(["Selector", "Typical provider", "Key", "Validation"], dkimRows) || `<p class="empty-result">${escapeHtml(`No DKIM key was found for the ${data.dkim?.checked || 0} selectors checked. Add your provider's selector above.`)}</p>`}
     </section>
-    <section class="email-auth">
+    <section class="email-auth" data-mail-section="bimi">
       <h3>BIMI ${renderBimiStatus(bimi)}</h3>
       ${bimi.error ? `<p class="detail-notice">${escapeHtml(bimi.error)}</p>` : bimi.found ? renderBimi(bimi) : '<p class="empty-result">No BIMI record (default._bimi). BIMI shows your logo in supporting inboxes once DMARC is enforced.</p>'}
     </section>
-    <p class="scan-disclaimer">${escapeHtml(`Completed in ${data.durationMs} ms.`)}</p>`;
+    <p class="scan-disclaimer">${escapeHtml(`Completed in ${data.durationMs} ms.`)}</p></div>`;
 }
 
 function renderEmailResult(data) {
@@ -2059,22 +2134,23 @@ function renderBimi(bimi) {
     <div class="email-auth-record"><span>${escapeHtml(bimi.record)}</span></div>
     <div class="bimi-result">
       ${logo?.preview ? `<img class="bimi-result-logo" src="${escapeHtml(logo.preview)}" alt="BIMI logo" width="96" height="96">` : ""}
-      <div class="detail-list">
-        ${renderDetail("Logo (l=)", bimi.logo || "None")}
-        ${logo ? renderDetail("Logo file", logo.error ? `Not fetched: ${logo.error}` : `${(logo.bytes / 1024).toFixed(1)} KB · ${logo.contentType || "no content type"}`) : ""}
-        ${renderDetail("DMARC enforced", yesNo(bimi.dmarcReady))}
-        ${renderDetail("Mark certificate (a=)", bimi.certificate || "None")}
-        ${certificate && !certificate.error ? `
-          ${renderDetail("Certificate type", certificate.kind ? `${certificate.kind}${certificate.markType ? ` (${certificate.markType})` : ""}` : "Unknown")}
-          ${renderDetail("Organization", certificate.subject)}
-          ${renderDetail("Trademark", certificate.trademark)}
-          ${renderDetail("Issuer", certificate.issuer)}
-          ${renderDetail("Domains", (certificate.names || []).join(", "))}
-          ${renderDetail("Expires", `${new Date(certificate.validTo).toLocaleDateString()} (${certificate.daysRemaining} days)`)}
-          ${renderDetail("Logo matches certificate", yesNo(certificate.embeddedLogoMatches))}` : ""}
-      </div>
+      ${renderFacts([
+        ["Logo (l=)", bimi.logo || "None"],
+        ["Logo file", logo ? (logo.error ? `Not fetched: ${logo.error}` : `${(logo.bytes / 1024).toFixed(1)} KB · ${logo.contentType || "no content type"}`) : ""],
+        ["DMARC enforced", yesNo(bimi.dmarcReady)],
+        ["Mark certificate (a=)", bimi.certificate || "None"],
+        ...(certificate && !certificate.error ? [
+          ["Certificate type", certificate.kind ? `${certificate.kind}${certificate.markType ? ` (${certificate.markType})` : ""}` : "Unknown"],
+          ["Organization", certificate.subject],
+          ["Trademark", certificate.trademark],
+          ["Issuer", certificate.issuer],
+          ["Domains", (certificate.names || []).join(", ")],
+          ["Expires", `${new Date(certificate.validTo).toLocaleDateString()} (${certificate.daysRemaining} days)`],
+          ["Logo matches certificate", yesNo(certificate.embeddedLogoMatches)],
+        ] : []),
+      ])}
     </div>
-    ${(bimi.issues || []).length ? renderMailIssues(bimi.issues) : '<p class="dnssec-ok">No BIMI problems found.</p>'}
+    ${renderMailIssues(bimi.issues)}
     <p class="scan-disclaimer">Checks the default._bimi record, fetches the logo and mark certificate, validates the logo against SVG Tiny PS, compares it with the logo embedded in the certificate and checks that DMARC is enforced. The certificate chain is not checked against the BIMI root list.</p>`;
 }
 
