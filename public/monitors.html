@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101810">
+    <title>Monitors · BNGlookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/branding.js" defer></script>
+    <script src="/monitors.js" defer></script>
+  </head>
+  <body>
+    <main class="page account-page history-page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Home">
+          <img class="brand-logo" src="/brand-logo.svg" alt="" width="40" height="40">
+          <span class="brand-name">DNSLookup</span>
+        </a>
+      </header>
+      <section class="account-card history-card">
+        <p class="eyebrow">MONITORING</p>
+        <h1>Monitors</h1>
+        <p class="account-description">Check websites, certificates, DNS records, email security and blocklists on a schedule, and get an email when something changes or breaks.</p>
+        <p class="detail-notice" id="monitor-mail-notice" hidden></p>
+        <form class="monitor-form" id="monitor-form">
+          <label>What to check
+            <select id="monitor-kind" name="kind"></select>
+          </label>
+          <label>Target
+            <input id="monitor-target" name="target" type="text" maxlength="2048" required spellcheck="false" autocomplete="off">
+          </label>
+          <label>Every
+            <select id="monitor-interval" name="intervalHours"></select>
+          </label>
+          <label class="monitor-notify"><input id="monitor-notify" name="notify" type="checkbox" checked> Email me on changes</label>
+          <button class="submit-button" id="monitor-add" type="submit"><span>Add monitor</span><span aria-hidden="true">→</span></button>
+          <span class="form-hint" id="monitor-kind-hint"></span>
+        </form>
+        <p class="error-message" id="monitor-error" role="alert" hidden></p>
+        <p class="logs-status" id="monitor-status" role="status">Loading…</p>
+        <div class="monitor-list" id="monitor-list"></div>
+        <p class="form-hint"><a href="/">← Back to lookup</a></p>
+      </section>
+    </main>
+  </body>
+</html>

@@ -24,9 +24,13 @@ small Docker container with no application dependencies.
 - **SSLscan**: one TLS handshake with a remote host; reports the negotiated protocol and cipher, certificate chain, validity dates and trust status, plus an optional full TLS test with an SSL Labs-style A+–F grade.
 - **Ping scan**: one echo request to every host in a list or CIDR block.
 - **Traceroute / Multi traceroute**: live router path to one host, or up to 10 hosts compared side by side, with optional PTR (reverse DNS) lookup for every hop.
-- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, blocklists (DNSBL), SPF (with lookup counting), DKIM, DMARC, MTA-STS, TLS-RPT, certificate-transparency names, geolocation, optional port check, Email check and SSLscan/TLS grade.
+- **Magic scan**: domain and subdomain records, cloud endpoints, RDAP, DNSSEC, blocklists (DNSBL), subdomain takeover check, SPF (with lookup counting), DKIM, DMARC, MTA-STS, TLS-RPT, certificate-transparency names, geolocation, optional port check, Email check, Web check and SSLscan/TLS grade.
 - **Propagation**: compare one record across Cloudflare, Google, Quad9, DNS4EU and the zone's authoritative nameservers.
 - **Email**: MX servers, SMTP STARTTLS on port 25, SPF, DMARC, DKIM key validation, MTA-STS, TLS-RPT and BIMI, and which email providers a domain uses.
+- **Email tools**: next to the domain check, a **header analyzer** (delivery path, SPF/DKIM/DMARC results, alignment, spam scores), a **DMARC report viewer** (reads aggregate rua reports in the browser) and a **record builder** for SPF, DMARC, MTA-STS, TLS-RPT and BIMI.
+- **Web check**: redirect chain, HTTPS and certificate, security headers with a grade, cookies, compression, HTTP/2 and HTTP/3.
+- **Bulk check**: MX, SPF, DMARC, HTTPS certificate and blocklists for up to 50 domains at once, exportable as CSV.
+- **Monitors**: scheduled checks of websites, certificates, DNS records, email security and blocklists, with email alerts when something changes or breaks.
 - **ASN**: which network (AS) announces an IP, its RPKI status, and every IPv4/IPv6 prefix that AS announces.
 - **History**: signed-in users can view, re-run and compare their recent lookups.
 - **Share links**: signed-in users can turn any result into a link that anyone can open for 30 days.
@@ -311,6 +315,51 @@ Several tools send data to external services; these are listed under
   the AS holder, and all announced IPv4 and IPv6 prefixes (seen by at least three
   RIS peers, up to 3,000 per family, with a filter). Responses are cached for 10
   minutes.
+- **Email header analyzer** (feature `email-headers`): paste a message's headers
+  (up to 256 KB). It lists the Received hops oldest first with the delay between
+  them, whether each hop used TLS, and the sending IP's reverse DNS and location;
+  the Authentication-Results (SPF, DKIM, DMARC, ARC), DKIM signatures, SPF and DKIM
+  alignment with the From domain, Reply-To mismatches, List-Unsubscribe (one-click)
+  and spam-filter verdicts (SpamAssassin, Rspamd, Microsoft 365 SCL/BCL).
+  Headers are not stored unless the result is saved or shared.
+- **DMARC reports** (feature `dmarc-reports`): select up to 50 aggregate reports
+  (`.xml`, `.xml.gz` or `.zip`). They are unpacked and parsed in the browser; only
+  the sending IP addresses go to the server for reverse DNS and provider
+  recognition. Shows message totals, DMARC/DKIM/SPF pass rates, every sending
+  source with its results and disposition, the reporters, and whether the domain
+  is ready for a stricter policy.
+- **Record builder** (feature `record-builder`): forms that produce SPF (common
+  providers with a DNS lookup estimate), DMARC, MTA-STS (TXT record and policy
+  file), TLS-RPT and BIMI records; *Load current records* fills them from a
+  domain's DNS. Admins can host the MTA-STS policy on this server: it is served
+  at `/.well-known/mta-sts.txt`, so pointing `mta-sts.<domain>` at BNGlookup (with
+  a valid certificate for that name) is enough.
+- **Web check** (feature `web`) accepts a domain or URL. A bare domain starts at
+  `http://` to show the HTTPS redirect. Redirects are followed one at a time (up
+  to 10), and every new host must resolve to an address your role may reach. It
+  reports the redirect chain, certificate trust and expiry, HTTP/2 (TLS ALPN),
+  HTTP/3 (Alt-Svc), compression, cookies (Secure, HttpOnly, SameSite) and a
+  security-header grade (A+ to F) for HSTS, Content-Security-Policy, clickjacking
+  protection, X-Content-Type-Options, Referrer-Policy, Permissions-Policy and
+  software version disclosure. Also available as a Magic scan option.
+- **Bulk check** (feature `bulk-domains`, admins by default, always needs a login):
+  up to 50 domains, five at a time, each with MX and providers, SPF, DMARC, the
+  certificate on port 443 and a blocklist check. One bulk check runs at a time;
+  *Export CSV* downloads the table.
+- **Monitors** (feature `monitors`, needs a login): each user can add up to 25
+  monitors (admins 100), checked every 1, 6, 12 or 24 hours: **Website up**
+  (status and final URL), **Certificate** (expiry within 14 days, trust,
+  replacement), **DNS records** (A, AAAA, CNAME, MX, NS, TXT, CAA), **Email
+  security** (MX, SPF, DMARC, MTA-STS mode) and **Blocklists**. The first check runs
+  when a monitor is added. Later changes and status changes are recorded in the
+  monitor's history and emailed to the account's address when email is set up.
+  *Monitor this* under a DNS, SSLscan, Email, Web check or Magic scan result opens
+  the Monitors page with the target filled in. Targets follow the same
+  private-address rules as the tools.
+- **Subdomain takeover** (every Magic scan): CNAMEs of found hosts (up to 25)
+  are checked for targets that no longer exist (NXDOMAIN) and for services such as
+  GitHub Pages, Heroku, Azure, S3, Shopify, Fastly, Netlify and Zendesk that show
+  their "unclaimed" page.
 - **History** (feature `history`) stores each signed-in user's last 100 results
   for 30 days (results over 512 KB are kept for re-running only). The History
   page can view a stored result, re-run it with the same options, and compare two
@@ -380,9 +429,10 @@ Several tools send data to external services; these are listed under
 | Feature | Default access |
 | --- | --- |
 | DNS lookup, Reverse lookup, Whois, Dig, MAC lookup, Ping, SSLscan, Traceroute | Logged-in users |
-| Magic scan, Ping scan, Multi traceroute, Port scan, Bulk port scan, Nmap | Administrators |
+| Email check and email tools, Web check, ASN, Propagation, Monitors, History | Logged-in users |
+| Magic scan, Ping scan, Multi traceroute, Port scan, Bulk port scan, Nmap, Bulk check | Administrators |
 
-- Ping scan, Multi traceroute, both port scans and Nmap need a login even if set to Public.
+- Ping scan, Multi traceroute, both port scans, Nmap and Bulk check need a login even if set to Public; Monitors always need a login.
 - Public features are limited to 15 lookups per client IP per UTC day (stored in
   SQLite); logged-in users are exempt.
 - New accounts and admin password resets require a **password change on first login**;
