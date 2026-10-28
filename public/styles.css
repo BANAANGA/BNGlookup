@@ -1245,3 +1245,4 @@ footer a:hover { color: #e4ffef; }
 .raw-whois { margin-top: 12px; }
 .raw-whois summary { cursor: pointer; color: #b9c7bd; font-size: 12px; }
 .raw-whois pre { margin-top: 8px; max-height: 420px; }
+.detail-notice a { color: #8aeab1; }

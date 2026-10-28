@@ -199,7 +199,7 @@ Several tools send data to external services; these are listed under
 | --- | --- |
 | DNS lookup | Common types or any type by name/code. `ANY` may return incomplete data. Choose **DNSSEC** for a validation check (see below). |
 | Reverse lookup | IPv4/IPv6 PTR; shows IP WHOIS. |
-| Whois | RDAP via `rdap.org`; for domains whose registry has no RDAP service (many ccTLDs such as `.nl` and `.ga`), classic WHOIS on TCP port 43: the TLD's server is found through `whois.iana.org`, one registrar referral is followed, and the raw response is shown. Subdomains fall back to their parent domain. Missing ASNs are resolved through RIPE Stat, with `ipwho.is` as fallback. Contacts may be redacted. |
+| Whois | RDAP via `rdap.org`; for domains whose registry has no RDAP service (many ccTLDs such as `.nl` and `.ga`), classic WHOIS on TCP port 43: the TLD's server is found through `whois.iana.org`, one registrar referral is followed, and the raw response is shown. Subdomains fall back to their parent domain. Some registries (for example `.ga`) publish neither RDAP nor WHOIS; the page then says so and links the registry website from IANA's record, and `WHOIS_SERVERS` can point such a TLD at a server you know of. Missing ASNs are resolved through RIPE Stat, with `ipwho.is` as fallback. Contacts may be redacted. |
 | Dig | Runs the real `dig` binary (no shell) with one query: `@server`, name, type, class, `-t -c -q -x -p -4 -6 -u`, and an allowlist of `+options` (`+short`, `+dnssec`, `+trace`, `+tcp`, `+nsid`, `+subnet=`, `+noall +answer`, …). `+time` ≤ 10 s, `+tries` ≤ 3, 30 s overall limit, 256 KB output. File, key and bind-address flags (`-f`, `-k`, `-y`, `-b`) are rejected. A private `@server` follows the role's local-network setting; without `@server` the container's resolver is used. |
 | MAC lookup | Vendor data from `maclookup.app`. |
 | Ping | ICMP: 4 echo requests with loss and RTT. HTTP/HTTPS: one GET to `/` (redirects reported, not followed). |
@@ -393,6 +393,7 @@ Environment variables:
 | `COOKIE_SECURE=true` | Set the cookie `Secure` attribute; use behind HTTPS. |
 | `HTTPS_PORT` | HTTPS listener port (default 8443). |
 | `DOH_ENDPOINT` | Extra custom DoH JSON endpoint, offered as a resolver choice. |
+| `WHOIS_SERVERS` | Per-TLD WHOIS server overrides for registries that publish none at IANA, e.g. `ga=whois.example.ga,xyz=whois.nic.xyz`. |
 | `BLOCKLIST_RESOLVER` | DNS server(s) for blocklist checks, e.g. `192.168.1.53` or `10.0.0.2:5353`, comma-separated. Default: the container's system resolver. |
 | `UPDATE_CHECK=false` | Disable the dashboard's check for new releases (otherwise the server asks the GitHub API at most every 6 hours, only while an admin views the dashboard). |
 | `APP_VERSION`, `APP_COMMIT`, `APP_BUILD_DATE` | Build information shown on the dashboard. Set automatically by the release workflow as Docker build arguments; local builds show `dev`. |
