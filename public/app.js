@@ -32,6 +32,21 @@ const scanIncludesControl = document.querySelector("#scan-includes-control");
 const scanEmailInput = document.querySelector("#scan-email-input");
 const scanSslInput = document.querySelector("#scan-ssl-input");
 const scanTlsGradeInput = document.querySelector("#scan-tls-grade-input");
+const scanWebInput = document.querySelector("#scan-web-input");
+const emailSubtabs = document.querySelector("#email-subtabs");
+const emailSubtabButtons = [...document.querySelectorAll(".email-subtab[data-mode]")];
+const headersControl = document.querySelector("#headers-control");
+const headersInput = document.querySelector("#headers-input");
+const dmarcControl = document.querySelector("#dmarc-control");
+const dmarcFilesInput = document.querySelector("#dmarc-files");
+const bulkDomainsControl = document.querySelector("#bulk-domains-control");
+const bulkDomainsInput = document.querySelector("#bulk-domains-input");
+const recordBuilderPanel = document.querySelector("#record-builder");
+const monitorsLink = document.querySelector("#monitors-link");
+const watchResultLink = document.querySelector("#watch-result");
+const emailFamilyModes = ["email", "email-headers", "dmarc-reports", "record-builder"];
+// Tools whose requests and rendering live in tools.js.
+const toolModes = new Set(["web", "bulk-domains", "email-headers", "dmarc-reports"]);
 const tlsGradeControl = document.querySelector("#tls-grade-control");
 const tlsGradeInput = document.querySelector("#tls-grade-input");
 let tlsGradeRun = 0;
@@ -58,7 +73,8 @@ const shareModeLabels = {
   forward: "DNS lookup", reverse: "Reverse lookup", details: "Whois", mac: "MAC lookup", dig: "Dig",
   propagation: "Propagation", email: "Email check", asn: "ASN", ping: "Ping", sslscan: "SSLscan", "ping-scan": "Ping scan", traceroute: "Traceroute",
   "multi-traceroute": "Multi traceroute", scan: "Magic scan", "custom-port": "Port scan", "bulk-port": "Bulk port scan",
-  nmap: "Nmap", dnssec: "DNSSEC check",
+  nmap: "Nmap", dnssec: "DNSSEC check", web: "Web check", "email-headers": "Header analysis",
+  "dmarc-reports": "DMARC reports", "bulk-domains": "Bulk domain check",
 };
 
 function historyEnabled() {
@@ -94,7 +110,9 @@ function currentHistoryParams(resultMode) {
     params.scanEmail = scanEmailInput.checked;
     params.scanSsl = scanSslInput.checked;
     params.scanTlsGrade = scanTlsGradeInput.checked;
+    params.scanWeb = scanWebInput.checked;
   }
+  if (resultMode === "bulk-domains") params.domains = bulkDomainsInput.value;
   return params;
 }
 
@@ -128,17 +146,34 @@ function rememberResult(resultMode, data, subject) {
     mode: resultMode,
     data: { result: data, extras: {} },
     title: `${shareModeLabels[resultMode] || resultMode}: ${String(subject || "").slice(0, 150)}`,
-    query: ["ping-scan", "bulk-port", "multi-traceroute"].includes(resultMode) ? "" : input.value.trim(),
+    query: ["ping-scan", "bulk-port", "multi-traceroute", "bulk-domains", "email-headers", "dmarc-reports"].includes(resultMode) ? "" : input.value.trim(),
     params: currentHistoryParams(resultMode),
   };
   shareResultsLink.hidden = true;
   shareResultsStatus.textContent = "";
   updateShareResults();
+  updateWatchLink(resultMode, data);
   void saveHistory();
+}
+
+// Offers to turn the current result into a monitor on the Monitors page.
+function updateWatchLink(resultMode, data) {
+  const kinds = {
+    forward: () => ["dns", data?.name],
+    scan: () => ["dns", data?.domain],
+    sslscan: () => ["certificate", data?.target ? `${data.target}:${data.port || 443}` : null],
+    email: () => ["email", data?.domain],
+    web: () => ["website", data?.finalUrl || data?.startUrl],
+  };
+  const [kind, target] = kinds[resultMode]?.() || [];
+  const allowed = Boolean(kind && target && authState?.user && featureAllowed("monitors"));
+  watchResultLink.hidden = !allowed;
+  if (allowed) watchResultLink.href = `/monitors.html?${new URLSearchParams({ kind, target })}`;
 }
 
 function updateShareResults() {
   shareResults.hidden = !(authState?.user && lastResult && !resultPanel.hidden && !viewingShare);
+  if (!lastResult || viewingShare) watchResultLink.hidden = true;
 }
 const nmapLiveStatus = document.querySelector("#nmap-live-status");
 const errorMessage = document.querySelector("#error-message");
@@ -251,6 +286,10 @@ function submitLabel(currentMode) {
     dig: "Run dig",
     propagation: "Check propagation",
     email: "Check email",
+    "email-headers": "Analyze headers",
+    "dmarc-reports": "Read reports",
+    web: "Check website",
+    "bulk-domains": "Check domains",
     asn: "Look up ASN",
     ping: "Ping host",
     sslscan: "Check SSL/TLS",
@@ -270,6 +309,13 @@ function setMode(nextMode) {
   const dig = mode === "dig";
   const propagation = mode === "propagation";
   const email = mode === "email";
+  const emailHeaders = mode === "email-headers";
+  const dmarcReports = mode === "dmarc-reports";
+  const recordBuilder = mode === "record-builder";
+  const webCheck = mode === "web";
+  const bulkDomains = mode === "bulk-domains";
+  const emailFamily = emailFamilyModes.includes(mode);
+  const toolInputMode = emailHeaders || dmarcReports || recordBuilder || bulkDomains;
   const asnMode = mode === "asn";
   const ping = mode === "ping";
   const sslscan = mode === "sslscan";
@@ -281,11 +327,11 @@ function setMode(nextMode) {
   const traceroute = mode === "traceroute";
   const multiTraceroute = mode === "multi-traceroute";
   const portScan = customPortScan || bulkPortScan || nmapScan;
-  const listMode = bulkPortScan || pingScan || multiTraceroute;
+  const listMode = bulkPortScan || pingScan || multiTraceroute || toolInputMode;
   const isAdmin = authState?.user?.role === "admin";
   const supportsNameserver = isAdmin && ["forward", "reverse", "scan"].includes(mode);
   tabs.forEach((tab) => {
-    const selected = tab.dataset.mode === mode;
+    const selected = tab.dataset.mode === mode || (tab.dataset.mode === "email" && emailFamily);
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", String(selected));
   });
@@ -305,6 +351,8 @@ function setMode(nextMode) {
     ? "e.g. 8.8.8.8 or 2001:4860:4860::8888"
     : mac
       ? "e.g. 00:1A:2B:3C:4D:5E"
+    : webCheck
+      ? "e.g. example.com or https://example.com/page"
     : details || ping || sslscan || traceroute || nmapScan
       ? "e.g. example.com or 8.8.8.8"
     : automatic
@@ -314,8 +362,23 @@ function setMode(nextMode) {
       : "e.g. example.com";
   input.autocomplete = reverse || mac || dig || portScan ? "off" : "url";
   input.classList.toggle("dig-input", dig);
-  typeControl.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan;
-  customType.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || recordType.value !== "custom";
+  typeControl.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || webCheck;
+  customType.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || webCheck || recordType.value !== "custom";
+  emailSubtabs.hidden = !emailFamily;
+  emailSubtabButtons.forEach((button) => {
+    const selected = button.dataset.mode === mode;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+  });
+  headersControl.hidden = !emailHeaders;
+  headersInput.required = emailHeaders;
+  dmarcControl.hidden = !dmarcReports;
+  dmarcFilesInput.required = dmarcReports;
+  bulkDomainsControl.hidden = !bulkDomains;
+  bulkDomainsInput.required = bulkDomains;
+  submitButton.hidden = recordBuilder;
+  recordBuilderPanel.hidden = !recordBuilder;
+  if (recordBuilder && typeof initRecordBuilder === "function") initRecordBuilder(recordBuilderPanel);
   nameserverControl.hidden = !supportsNameserver;
   if (!isAdmin) nameserverInput.value = "";
   pingMethodControl.hidden = !ping;
@@ -362,6 +425,16 @@ function setMode(nextMode) {
         ? "Find the registered hardware vendor and MAC address type."
       : asnMode
         ? "See which network (AS) announces an IP address, and every IPv4 and IPv6 range that network announces. Routing data comes from RIPE Stat."
+      : emailHeaders
+        ? "Paste the headers of a received message to see how it was delivered and why it passed or failed SPF, DKIM and DMARC."
+      : dmarcReports
+        ? "Read DMARC aggregate (rua) reports to see who sends mail as your domain and whether it passes, before you tighten your DMARC policy."
+      : recordBuilder
+        ? "Build correct SPF, DMARC, MTA-STS, TLS-RPT and BIMI records. Load a domain's current records to start from them."
+      : webCheck
+        ? "Follow a site's redirects and check its HTTPS setup, security headers, cookies, compression and HTTP/2 and HTTP/3 support."
+      : bulkDomains
+        ? "Check MX, SPF, DMARC, the HTTPS certificate and blocklists for a list of domains at once."
       : email
         ? "Check a domain's mail setup: MX servers, SMTP STARTTLS on port 25, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, and which email providers it uses."
       : propagation
@@ -405,6 +478,7 @@ async function initializeAccount() {
     accountNav.hidden = false;
     loginLink.hidden = Boolean(authState.user);
     historyLink.hidden = !historyEnabled();
+    monitorsLink.hidden = !(authState.user && featureAllowed("monitors"));
     logoutButton.hidden = !authState.user;
     adminTabs.hidden = authState.user?.role !== "admin";
     accountName.textContent = authState.user
@@ -414,10 +488,12 @@ async function initializeAccount() {
     tabs.filter((tab) => tab !== autoTab).forEach((tab) => {
       const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
       const access = authState.featureAccess[feature] || "user";
-      const portScanRequiresUser = ["custom-port", "bulk-port", "ping-scan", "multi-traceroute", "nmap"].includes(tab.dataset.mode);
-      const canUse = Boolean(authState.user) &&
-        (access !== "admin" || authState.user.role === "admin") ||
-        access === "public" && !portScanRequiresUser;
+      const portScanRequiresUser = ["custom-port", "bulk-port", "ping-scan", "multi-traceroute", "nmap", "bulk-domains"].includes(tab.dataset.mode);
+      const canUse = tab.dataset.mode === "email"
+        ? emailFamilyModes.some((familyMode) => featureAllowed(familyMode))
+        : Boolean(authState.user) &&
+          (access !== "admin" || authState.user.role === "admin") ||
+          access === "public" && !portScanRequiresUser;
       tab.hidden = !canUse;
       tab.setAttribute("aria-hidden", String(!canUse));
       tab.classList.remove("restricted-tab");
@@ -436,8 +512,10 @@ async function initializeAccount() {
     }
     if (initialTab) {
       const requested = new URLSearchParams(window.location.search).get("mode");
-      const requestedTab = availableTabs.find((tab) => tab.dataset.mode === requested);
-      setMode(requestedTab ? requested : "auto");
+      const requestedTab = availableTabs.find((tab) => tab.dataset.mode === requested) ||
+        (emailFamilyModes.includes(requested) && featureAllowed(requested) && availableTabs.some((tab) => tab.dataset.mode === "email"));
+      setMode(requestedTab ? (requested === "email" && !featureAllowed("email") ? firstEmailMode() : requested) : "auto");
+      emailSubtabButtons.forEach((button) => { button.hidden = !featureAllowed(button.dataset.mode); });
       const query = new URLSearchParams(window.location.search).get("q");
       if (sharedId || historyId || rerunId) {
         // A shared link shows the stored result instead of running a query.
@@ -793,7 +871,7 @@ function renderMailFixList(groups) {
   return `
     <section class="email-auth mail-fix-list">
       <h3>What to fix <span class="email-auth-status ${issues.some((issue) => issue.severity === "high") ? "danger" : "warning"}">${escapeHtml(`${issues.length} item${issues.length === 1 ? "" : "s"}`)}</span></h3>
-      <ul>${shown.map((issue) => `<li class="${escapeHtml(issue.severity)}"><span class="mail-fix-area">${escapeHtml(issue.area)}</span>${escapeHtml(issue.message)}</li>`).join("")}</ul>
+      <ul>${shown.map((issue) => `<li class="${escapeHtml(issue.severity)}">${issue.area ? `<span class="mail-fix-area">${escapeHtml(issue.area)}</span>` : ""}${escapeHtml(issue.message)}</li>`).join("")}</ul>
       ${issues.length > shown.length ? `<p class="scan-disclaimer">${escapeHtml(`${issues.length - shown.length} more below, in their sections.`)}</p>` : ""}
     </section>`;
 }
@@ -924,14 +1002,17 @@ function featureAllowed(feature) {
 function updateScanIncludes(scan = mode === "scan") {
   const email = featureAllowed("email");
   const ssl = featureAllowed("sslscan");
+  const web = featureAllowed("web");
   const grade = ssl && Boolean(authState?.user);
+  document.querySelector("#scan-web-option").hidden = !web;
+  if (!web) scanWebInput.checked = false;
   document.querySelector("#scan-email-option").hidden = !email;
   document.querySelector("#scan-ssl-option").hidden = !ssl;
   document.querySelector("#scan-tls-grade-option").hidden = !grade;
   if (!email) scanEmailInput.checked = false;
   if (!ssl) scanSslInput.checked = false;
   if (!grade) scanTlsGradeInput.checked = false;
-  scanIncludesControl.hidden = !scan || !(email || ssl);
+  scanIncludesControl.hidden = !scan || !(email || ssl || web);
 }
 
 function scanIncludeSection(kind, html) {
@@ -945,6 +1026,9 @@ async function appendScanIncludes(domain) {
   }
   if (scanSslInput.checked && featureAllowed("sslscan")) {
     jobs.push(["sslscan", "Running SSLscan on port 443…", `/api/sslscan?${new URLSearchParams({ name: domain, port: "443" })}`, sslScanResultHtml]);
+  }
+  if (scanWebInput.checked && featureAllowed("web")) {
+    jobs.push(["web", "Running the Web check…", `/api/web-check?${new URLSearchParams({ name: domain })}`, webCheckHtml]);
   }
   if (scanTlsGradeInput.checked && featureAllowed("sslscan") && authState?.user) void runTlsGrade(domain, 443);
   await Promise.all(jobs.map(async ([kind, pending, url, render]) => {
@@ -964,7 +1048,7 @@ async function appendScanIncludes(domain) {
         void saveHistory();
       }
     } catch (error) {
-      if (section.isConnected) section.innerHTML = `<p class="detail-notice">${escapeHtml(`${kind === "email" ? "Email check" : "SSLscan"}: ${error.message}`)}</p>`;
+      if (section.isConnected) section.innerHTML = `<p class="detail-notice">${escapeHtml(`${{ email: "Email check", sslscan: "SSLscan", web: "Web check" }[kind]}: ${error.message}`)}</p>`;
     }
   }));
 }
@@ -1163,6 +1247,7 @@ function renderScanResult(data) {
     </section>
     ${renderDnssecSection(data.dnssec)}
     ${renderBlocklistSection(data.blocklists)}
+    ${renderTakeoverSection(data.takeover)}
     <section class="email-auth">
       <h3>Email authentication</h3>
       <div class="email-auth-grid">
@@ -2593,9 +2678,26 @@ function updateAutoDetectHint() {
   }
 }
 
+function firstEmailMode() {
+  return emailFamilyModes.find((familyMode) => featureAllowed(familyMode)) || "email";
+}
+
+emailSubtabButtons.forEach((button) => button.addEventListener("click", () => {
+  if (!featureAllowed(button.dataset.mode)) {
+    errorMessage.textContent = "This tool is restricted by the administrator.";
+    errorMessage.hidden = false;
+    return;
+  }
+  setMode(button.dataset.mode);
+}));
+
 tabs.forEach((tab) => tab.addEventListener("click", () => {
   if (tab === autoTab) {
     setMode("auto");
+    return;
+  }
+  if (tab.dataset.mode === "email" && authState?.user) {
+    if (!emailFamilyModes.includes(mode)) setMode(firstEmailMode());
     return;
   }
   const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
@@ -2682,6 +2784,24 @@ form.addEventListener("submit", async (event) => {
   const nmapScan = requestMode === "nmap";
   const isPortScan = customPortScan || bulkPortScan;
   const postsJson = isPortScan || pingScan || multiTraceroute || nmapScan;
+  if (toolModes.has(requestMode)) {
+    submitButton.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Working</span>';
+    try {
+      const { data, subject } = await runToolMode(requestMode, lookupName);
+      rememberResult(requestMode, data, subject);
+    } catch (error) {
+      if (error.loginRequired) {
+        window.location.assign(`/login.html?next=${encodeURIComponent(`${window.location.pathname}${window.location.search}`)}`);
+        return;
+      }
+      errorMessage.textContent = error.message || "Unable to complete the request.";
+      errorMessage.hidden = false;
+    } finally {
+      submitButton.disabled = false;
+      submitButton.innerHTML = `<span>${submitLabel(mode)}</span><span aria-hidden="true">→</span>`;
+    }
+    return;
+  }
   submitButton.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${requestMode === "scan" ? "Scanning" : isPortScan || nmapScan ? "Scanning ports" : requestMode === "sslscan" ? "Checking TLS" : pingScan ? "Pinging" : requestMode === "traceroute" || multiTraceroute ? "Tracing" : "Looking up"}</span>`;
 
   const params = new URLSearchParams({
@@ -2878,6 +2998,10 @@ function renderSharedResult(shareMode, payload) {
     case "bulk-port": renderPortScanResult(data, "Bulk port scan"); break;
     case "nmap": renderNmapResult(data); break;
     case "dnssec": renderDnssecResult(data); break;
+    case "web": renderWebCheckResult(data); break;
+    case "email-headers": renderHeadersResult(data); break;
+    case "dmarc-reports": renderDmarcReportResult(data); break;
+    case "bulk-domains": renderBulkDomainsResult(data); break;
     default: throw new Error("This shared result type is not supported.");
   }
   if (extras.tlsGrade?.result) {
@@ -2887,6 +3011,7 @@ function renderSharedResult(shareMode, payload) {
   if (extras.blocklist) resultPanel.insertAdjacentHTML("beforeend", renderBlocklistSection(extras.blocklist));
   if (extras.email) resultPanel.insertAdjacentHTML("beforeend", scanIncludeSection("email", emailResultHtml(extras.email)));
   if (extras.sslscan) resultPanel.insertAdjacentHTML("beforeend", scanIncludeSection("sslscan", sslScanResultHtml(extras.sslscan)));
+  if (extras.web) resultPanel.insertAdjacentHTML("beforeend", scanIncludeSection("web", webCheckHtml(extras.web)));
 }
 
 async function loadHistoryEntry(id, rerun) {
@@ -2923,6 +3048,8 @@ async function loadHistoryEntry(id, rerun) {
       if (typeof params.scanEmail === "boolean") scanEmailInput.checked = params.scanEmail;
       if (typeof params.scanSsl === "boolean") scanSslInput.checked = params.scanSsl;
       if (typeof params.scanTlsGrade === "boolean") scanTlsGradeInput.checked = params.scanTlsGrade;
+      if (typeof params.scanWeb === "boolean") scanWebInput.checked = params.scanWeb;
+      if (typeof params.domains === "string") bulkDomainsInput.value = params.domains;
       updateScanIncludes();
       history.replaceState(null, "", `/?mode=${encodeURIComponent(formMode)}`);
       form.requestSubmit();

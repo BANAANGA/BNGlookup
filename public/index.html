@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="/styles.css">
     <script src="/branding.js" defer></script>
     <script src="/app.js" defer></script>
+    <script src="/tools.js" defer></script>
   </head>
   <body>
     <main class="page">
@@ -20,6 +21,7 @@
         <div class="topbar-actions">
           <span class="online"><span></span> DNS over HTTPS</span>
           <nav class="account-nav" id="account-nav" aria-label="Account" hidden>
+            <a id="monitors-link" href="/monitors.html" hidden>Monitors</a>
             <a id="history-link" href="/history.html" hidden>History</a>
             <a id="account-name" href="/my-account.html"></a>
             <a id="login-link" href="/login.html">Log in</a>
@@ -63,6 +65,9 @@
           <button class="mode-tab" id="sslscan-tab" type="button" role="tab" aria-selected="false" data-mode="sslscan" hidden>
             <span aria-hidden="true">▣</span> SSLscan
           </button>
+          <button class="mode-tab" id="web-tab" type="button" role="tab" aria-selected="false" data-mode="web" hidden>
+            <span aria-hidden="true">⌂</span> Web check
+          </button>
           <button class="mode-tab" id="ping-scan-tab" type="button" role="tab" aria-selected="false" data-mode="ping-scan" hidden>
             <span aria-hidden="true">◎</span> Ping scan
           </button>
@@ -74,6 +79,9 @@
           </button>
           <button class="mode-tab" id="scan-tab" type="button" role="tab" aria-selected="false" data-mode="scan" hidden>
             <span aria-hidden="true">⌕</span> Magic scan
+          </button>
+          <button class="mode-tab" id="bulk-domains-tab" type="button" role="tab" aria-selected="false" data-mode="bulk-domains" hidden>
+            <span aria-hidden="true">☰</span> Bulk check
           </button>
           <button class="mode-tab" id="custom-port-tab" type="button" role="tab" aria-selected="false" data-mode="custom-port" hidden>
             <span aria-hidden="true">⚙</span> Port scan
@@ -103,6 +111,12 @@
         </p>
         <p class="error-message" id="error-message" role="alert" hidden></p>
         <form id="lookup-form" hidden>
+          <div class="email-subtabs" id="email-subtabs" role="tablist" aria-label="Email tools" hidden>
+            <button class="email-subtab" type="button" role="tab" data-mode="email">Domain check</button>
+            <button class="email-subtab" type="button" role="tab" data-mode="email-headers">Header analyzer</button>
+            <button class="email-subtab" type="button" role="tab" data-mode="dmarc-reports">DMARC reports</button>
+            <button class="email-subtab" type="button" role="tab" data-mode="record-builder">Record builder</button>
+          </div>
           <label class="field-label" id="name-label" for="name-input">Lookup</label>
           <div class="search-row">
             <div class="input-wrap" id="primary-input-wrap">
@@ -147,6 +161,7 @@
             <label id="scan-email-option"><input id="scan-email-input" type="checkbox"> Also run the Email check (MX, SMTP STARTTLS, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI)</label>
             <label id="scan-ssl-option"><input id="scan-ssl-input" type="checkbox"> Also run SSLscan on port 443 (TLS handshake and certificate)</label>
             <label id="scan-tls-grade-option"><input id="scan-tls-grade-input" type="checkbox"> …and the full TLS test with a grade (testssl.sh, about one to three minutes)</label>
+            <label id="scan-web-option"><input id="scan-web-input" type="checkbox"> Also run the Web check (redirects, security headers, HTTP/2 and HTTP/3)</label>
             <span>These run after the DNS scan and are added to the results, the share link and your history.</span>
           </div>
           <div class="port-scan-control" id="port-scan-control" hidden>
@@ -184,6 +199,21 @@
               <label><input id="ping-monitor-sound" type="checkbox"> Sound on up/down changes</label>
             </div>
             <span id="ping-monitor-hint">One sample every 3 seconds; monitoring stops after 5 minutes. Sign in to use live monitoring.</span>
+          </div>
+          <div class="scan-extra-control wide-control" id="headers-control" hidden>
+            <label for="headers-input">Message headers</label>
+            <textarea id="headers-input" rows="12" maxlength="262144" placeholder="Paste the full headers here: in Gmail use ⋮ → Show original, in Outlook File → Properties → Internet headers, in Apple Mail View → Message → All Headers." spellcheck="false"></textarea>
+            <span>Shows the delivery path with delays, the SPF, DKIM and DMARC results, alignment and spam scores. Headers are analyzed on this server and are not stored unless you save or share the result.</span>
+          </div>
+          <div class="scan-extra-control wide-control" id="dmarc-control" hidden>
+            <label for="dmarc-files">DMARC aggregate reports</label>
+            <input id="dmarc-files" type="file" multiple accept=".xml,.gz,.zip,application/xml,text/xml,application/gzip,application/zip">
+            <span>Select up to 50 report files (.xml, .xml.gz or .zip) as received at your rua= address. They are read in your browser; only the sending IP addresses are sent to the server to look up their host names.</span>
+          </div>
+          <div class="scan-extra-control wide-control" id="bulk-domains-control" hidden>
+            <label for="bulk-domains-input">Domains</label>
+            <textarea id="bulk-domains-input" rows="6" maxlength="16000" placeholder="e.g.&#10;example.com&#10;example.org" spellcheck="false"></textarea>
+            <span>Up to 50 domains, separated by new lines, spaces or commas. Each gets MX, SPF, DMARC, the HTTPS certificate and a blocklist check; export the table as CSV.</span>
           </div>
           <div class="scan-extra-control" id="custom-ports-control" hidden>
             <label for="custom-ports-input">TCP ports</label>
@@ -223,6 +253,7 @@
           <p class="hint" id="form-hint">Choose a record type or enter a custom DNS type. ANY returns records the DNS server makes available.</p>
         </form>
 
+        <section class="record-builder" id="record-builder" hidden></section>
         <p class="nmap-live-status" id="nmap-live-status" role="status" aria-live="polite" hidden></p>
         <div class="result" id="result" aria-live="polite" hidden></div>
         <section class="ping-monitor-panel" id="ping-monitor-panel" aria-label="Live host monitor" hidden>
@@ -242,6 +273,7 @@
           <button type="button" id="share-results-button">🔗 Create a share link</button>
           <input id="share-results-link" type="text" readonly aria-label="Share link" hidden>
           <span id="share-results-status" role="status"></span>
+          <a class="watch-result" id="watch-result" href="/monitors.html" hidden>🔔 Monitor this</a>
         </div>
         <div class="mail-results" id="mail-results" hidden>
           <button type="button" id="mail-results-button">✉ Email these results to me</button>

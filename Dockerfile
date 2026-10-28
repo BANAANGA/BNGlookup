@@ -35,6 +35,7 @@ ENV APP_VERSION=$APP_VERSION APP_COMMIT=$APP_COMMIT APP_BUILD_DATE=$APP_BUILD_DA
 COPY server.js ./server.js
 COPY acme.js ./acme.js
 COPY mail.js ./mail.js
+COPY email-headers.js ./email-headers.js
 COPY public ./public
 
 RUN mkdir -p /data && chown node:node /data

@@ -17,6 +17,7 @@ const { lookup: resolveHost, Resolver: DnsResolver } = require("node:dns/promise
 const { domainToASCII } = require("node:url");
 const { createAcmeManager } = require("./acme");
 const { sendMail, validAddress } = require("./mail");
+const { analyzeEmailHeaders } = require("./email-headers");
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
@@ -82,6 +83,9 @@ const staticFiles = new Set([
   "/about.js",
   "/history.html",
   "/history.js",
+  "/monitors.html",
+  "/monitors.js",
+  "/tools.js",
   "/styles.css",
   "/app.js",
   "/account.js",
@@ -121,6 +125,12 @@ const featureAccessDefaults = {
   propagation: "user",
   email: "user",
   asn: "user",
+  web: "user",
+  "email-headers": "user",
+  "dmarc-reports": "user",
+  "record-builder": "user",
+  "bulk-domains": "admin",
+  monitors: "user",
   history: "user",
 };
 const featureNames = {
@@ -142,6 +152,12 @@ const featureNames = {
   propagation: "DNS propagation check",
   email: "Email check (MX, SMTP STARTTLS, SPF, DMARC, DKIM)",
   asn: "ASN and announced prefixes",
+  web: "Web check (redirects, security headers, HTTP/2 and HTTP/3)",
+  "email-headers": "Email header analyzer",
+  "dmarc-reports": "DMARC aggregate report viewer",
+  "record-builder": "SPF, DMARC, MTA-STS, TLS-RPT and BIMI record builder",
+  "bulk-domains": "Bulk domain check (up to 50 domains)",
+  monitors: "Monitoring and email alerts (requires login)",
   history: "Lookup history (saved per user)",
 };
 
@@ -222,6 +238,32 @@ database.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS lookup_history_user ON lookup_history(user_id, id DESC);
+  CREATE TABLE IF NOT EXISTS monitors (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    interval_hours INTEGER NOT NULL,
+    notify INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    next_run_at INTEGER NOT NULL,
+    last_run_at INTEGER,
+    last_status TEXT,
+    last_summary TEXT,
+    last_snapshot TEXT,
+    last_change_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS monitors_user ON monitors(user_id, id);
+  CREATE INDEX IF NOT EXISTS monitors_due ON monitors(enabled, next_run_at);
+  CREATE TABLE IF NOT EXISTS monitor_events (
+    id INTEGER PRIMARY KEY,
+    monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    level TEXT NOT NULL,
+    message TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS monitor_events_monitor ON monitor_events(monitor_id, id DESC);
   CREATE INDEX IF NOT EXISTS shared_results_expiry ON shared_results(expires_at);
   CREATE TABLE IF NOT EXISTS public_lookup_usage (
     client_hash TEXT NOT NULL,
@@ -1817,6 +1859,426 @@ function fetchPinnedHttps(hostname, address, requestPath, { timeoutMs = 6000, ma
   });
 }
 
+const webCheckLimits = { redirects: 10, bodyBytes: 262144, timeoutMs: 10000 };
+const webUserAgent = "Mozilla/5.0 (compatible; BNGlookup web check)";
+
+// Resolves a host to an address this user may connect to, so redirects cannot reach private networks.
+async function resolveWebAddress(hostname, allowLocal) {
+  const host = hostname.replace(/^\[|\]$/g, "");
+  if (isIP(host)) return isScannableAddress(host, allowLocal) ? host : null;
+  for (const type of ["A", "AAAA"]) {
+    const answers = await queryDohDns(host, type).then((data) => data.answers, () => []);
+    const address = answers
+      .filter((answer) => answer.type === (type === "A" ? 1 : 28) || answer.typeName === type)
+      .map((answer) => answer.data)
+      .find((value) => isScannableAddress(value, allowLocal));
+    if (address) return address;
+  }
+  return null;
+}
+
+function decodeBody(body, encoding) {
+  const options = { maxOutputLength: 1048576, finishFlush: zlib.constants.Z_SYNC_FLUSH };
+  try {
+    if (/\bbr\b/i.test(encoding)) return zlib.brotliDecompressSync(body, { maxOutputLength: 1048576, finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH }).toString("utf8");
+    if (/gzip/i.test(encoding)) return zlib.gunzipSync(body, options).toString("utf8");
+    if (/deflate/i.test(encoding)) return zlib.inflateSync(body, options).toString("utf8");
+  } catch {
+    return "";
+  }
+  return body.toString("utf8");
+}
+
+// One HTTP(S) request pinned to an already checked address. Redirects are not followed here.
+function requestPinnedUrl(target, address, { timeoutMs = webCheckLimits.timeoutMs, maxBytes = webCheckLimits.bodyBytes } = {}) {
+  return new Promise((resolve, reject) => {
+    const secure = target.protocol === "https:";
+    const hostname = target.hostname.replace(/^\[|\]$/g, "");
+    const started = performance.now();
+    const request = (secure ? https : http).request({
+      method: "GET",
+      host: hostname,
+      port: Number(target.port) || (secure ? 443 : 80),
+      path: `${target.pathname}${target.search}`,
+      headers: { "user-agent": webUserAgent, accept: "text/html,application/xhtml+xml,*/*;q=0.8", "accept-encoding": "gzip, deflate, br" },
+      lookup: (_host, options, callback) => {
+        if (options?.all) callback(null, [{ address, family: isIP(address) }]);
+        else callback(null, address, isIP(address));
+      },
+      timeout: timeoutMs,
+      agent: false,
+      ...(secure ? { servername: isIP(hostname) ? undefined : hostname, rejectUnauthorized: false } : {}),
+    }, (response) => {
+      const firstByteMs = Math.round(performance.now() - started);
+      let tlsInfo = null;
+      if (secure && response.socket?.getPeerCertificate) {
+        const certificate = response.socket.getPeerCertificate();
+        const validTo = certificate?.valid_to ? new Date(certificate.valid_to) : null;
+        tlsInfo = {
+          protocol: response.socket.getProtocol?.() || null,
+          authorized: response.socket.authorized,
+          authorizationError: response.socket.authorized ? null : String(response.socket.authorizationError || "Certificate is not trusted."),
+          validTo: validTo && !Number.isNaN(validTo.getTime()) ? validTo.toISOString() : null,
+          daysRemaining: validTo ? Math.floor((validTo.getTime() - Date.now()) / 86400000) : null,
+        };
+      }
+      const chunks = [];
+      let size = 0;
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        const raw = Buffer.concat(chunks);
+        resolve({
+          status: response.statusCode,
+          headers: response.headers,
+          body: raw,
+          bytes: size,
+          truncated: size > maxBytes,
+          firstByteMs,
+          totalMs: Math.round(performance.now() - started),
+          tls: tlsInfo,
+        });
+      };
+      response.on("data", (chunk) => {
+        size += chunk.length;
+        if (size <= maxBytes) chunks.push(chunk);
+        else response.destroy();
+      });
+      response.once("end", finish);
+      response.once("close", finish);
+      response.once("error", finish);
+    });
+    request.on("timeout", () => request.destroy(Object.assign(new Error("The request timed out."), { name: "TimeoutError" })));
+    request.on("error", reject);
+    // The socket timeout only covers idle time; this caps slow, trickling responses too.
+    const deadline = setTimeout(() => request.destroy(Object.assign(new Error("The request timed out."), { name: "TimeoutError" })), timeoutMs * 2);
+    request.on("close", () => clearTimeout(deadline));
+    request.end();
+  });
+}
+
+function describeWebError(error) {
+  if (error.name === "TimeoutError") return "The request timed out.";
+  const messages = {
+    ECONNREFUSED: "The connection was refused.",
+    ECONNRESET: "The connection was reset.",
+    EHOSTUNREACH: "The host is unreachable.",
+    ENETUNREACH: "The network is unreachable.",
+    EPROTO: "The TLS handshake failed.",
+    ERR_SSL_WRONG_VERSION_NUMBER: "The server does not speak TLS on this port.",
+  };
+  return messages[error.code] || `The request failed (${String(error.code || error.message).slice(0, 80)}).`;
+}
+
+// Follows redirects one hop at a time, re-checking every new host before connecting to it.
+async function followWebRedirects(startUrl, allowLocal, options = {}) {
+  const hops = [];
+  let current = startUrl;
+  let final = null;
+  for (let count = 0; count <= webCheckLimits.redirects; count += 1) {
+    const address = await resolveWebAddress(current.hostname, allowLocal);
+    if (!address) {
+      hops.push({ url: current.href, error: `${current.hostname} does not resolve to an address that can be checked.` });
+      break;
+    }
+    let response;
+    try {
+      response = await requestPinnedUrl(current, address, options);
+    } catch (error) {
+      hops.push({ url: current.href, address, error: describeWebError(error) });
+      break;
+    }
+    const location = response.headers.location;
+    const hop = { url: current.href, address, status: response.status, timeMs: response.totalMs, location: location || null };
+    hops.push(hop);
+    final = { url: current, response };
+    if (response.status >= 300 && response.status < 400 && location) {
+      let next;
+      try {
+        next = new URL(location, current);
+      } catch {
+        hop.error = "The redirect location is not a valid URL.";
+        break;
+      }
+      if (!["http:", "https:"].includes(next.protocol) || next.username || next.password) {
+        hop.error = "The redirect points to an unsupported URL.";
+        break;
+      }
+      if (count === webCheckLimits.redirects) {
+        hop.error = `Stopped after ${webCheckLimits.redirects} redirects.`;
+        break;
+      }
+      current = next;
+      continue;
+    }
+    break;
+  }
+  return { hops, final };
+}
+
+function checkHttp2(hostname, address, port) {
+  return new Promise((resolve) => {
+    const socket = tls.connect({
+      host: hostname,
+      port,
+      servername: isIP(hostname) ? undefined : hostname,
+      ALPNProtocols: ["h2", "http/1.1"],
+      rejectUnauthorized: false,
+      lookup: (_host, options, callback) => {
+        if (options?.all) callback(null, [{ address, family: isIP(address) }]);
+        else callback(null, address, isIP(address));
+      },
+    });
+    const finish = (value) => {
+      socket.destroy();
+      resolve(value);
+    };
+    socket.setTimeout(6000, () => finish(null));
+    socket.once("secureConnect", () => finish(socket.alpnProtocol === "h2"));
+    socket.once("error", () => finish(null));
+  });
+}
+
+function parseSetCookies(values = []) {
+  return (Array.isArray(values) ? values : [values]).slice(0, 30).map((cookie) => {
+    const [pair, ...attributes] = String(cookie).split(";").map((part) => part.trim());
+    const flags = attributes.map((attribute) => attribute.toLowerCase());
+    const sameSite = flags.find((flag) => flag.startsWith("samesite="))?.slice(9) || null;
+    return {
+      name: pair.split("=")[0].slice(0, 100),
+      secure: flags.includes("secure"),
+      httpOnly: flags.includes("httponly"),
+      sameSite,
+    };
+  });
+}
+
+function webCheckChecks(headers, secure, cookies) {
+  const checks = [];
+  const add = (id, label, state, value, message, weight = 0) => checks.push({ id, label, state, value: value ? String(value).slice(0, 600) : null, message, weight });
+  const hsts = headers["strict-transport-security"];
+  if (!secure) add("hsts", "HSTS", "fail", null, "The final page is not served over HTTPS.", 25);
+  else if (!hsts) add("hsts", "HSTS", "fail", null, "No Strict-Transport-Security header, so browsers may still try plain HTTP first.", 15);
+  else {
+    const maxAge = Number(hsts.match(/max-age\s*=\s*"?(\d+)/i)?.[1] || 0);
+    const parts = [`max-age ${maxAge}`, /includesubdomains/i.test(hsts) ? "includeSubDomains" : null, /preload/i.test(hsts) ? "preload" : null].filter(Boolean).join(" · ");
+    if (maxAge < 15552000) add("hsts", "HSTS", "warn", hsts, `max-age is ${Math.round(maxAge / 86400)} days; at least 180 days is recommended.`, 6);
+    else add("hsts", "HSTS", "pass", hsts, parts);
+  }
+  const csp = headers["content-security-policy"];
+  if (!csp) {
+    add("csp", "Content-Security-Policy", "fail", headers["content-security-policy-report-only"] || null,
+      headers["content-security-policy-report-only"] ? "Only a report-only policy is set; it does not block anything." : "No Content-Security-Policy, so injected scripts are not restricted.", 12);
+  } else {
+    const scriptPolicy = csp.match(/script-src[^;]*/i)?.[0] || csp.match(/default-src[^;]*/i)?.[0] || "";
+    const weak = [/'unsafe-inline'/i.test(scriptPolicy) && !/'nonce-|'sha(256|384|512)-|'strict-dynamic'/i.test(scriptPolicy) ? "'unsafe-inline'" : null, /'unsafe-eval'/i.test(scriptPolicy) ? "'unsafe-eval'" : null].filter(Boolean);
+    if (!scriptPolicy) add("csp", "Content-Security-Policy", "warn", csp, "The policy has no script-src or default-src, so scripts are not restricted.", 6);
+    else if (weak.length) add("csp", "Content-Security-Policy", "warn", csp, `Scripts allow ${weak.join(" and ")}, which weakens protection against injected scripts.`, 5);
+    else add("csp", "Content-Security-Policy", "pass", csp, "Scripts are restricted.");
+  }
+  const frameAncestors = csp && /frame-ancestors/i.test(csp);
+  const xfo = headers["x-frame-options"];
+  if (frameAncestors || /^(deny|sameorigin)$/i.test(String(xfo || "").trim())) add("framing", "Clickjacking protection", "pass", frameAncestors ? csp.match(/frame-ancestors[^;]*/i)[0] : xfo, "Other sites cannot frame this page.");
+  else add("framing", "Clickjacking protection", "fail", xfo || null, "No X-Frame-Options or CSP frame-ancestors, so other sites can embed this page in a frame.", 8);
+  const nosniff = headers["x-content-type-options"];
+  if (/nosniff/i.test(nosniff || "")) add("nosniff", "X-Content-Type-Options", "pass", nosniff, "Browsers will not guess content types.");
+  else add("nosniff", "X-Content-Type-Options", "fail", nosniff || null, "Missing nosniff; browsers may interpret files as a different type.", 5);
+  const referrer = headers["referrer-policy"];
+  if (!referrer) add("referrer", "Referrer-Policy", "warn", null, "No Referrer-Policy; browsers default to strict-origin-when-cross-origin.", 2);
+  else if (/unsafe-url|no-referrer-when-downgrade/i.test(referrer)) add("referrer", "Referrer-Policy", "warn", referrer, "This policy sends full URLs to other sites.", 3);
+  else add("referrer", "Referrer-Policy", "pass", referrer, "Limits what other sites learn from links.");
+  const permissions = headers["permissions-policy"];
+  add("permissions", "Permissions-Policy", permissions ? "pass" : "info", permissions || null, permissions ? "Restricts browser features such as camera and location." : "No Permissions-Policy; optional, but it can switch off browser features the site does not use.");
+  const leaks = [["server", headers.server], ["x-powered-by", headers["x-powered-by"]], ["x-aspnet-version", headers["x-aspnet-version"]]]
+    .filter(([, value]) => value && /\d/.test(value));
+  if (leaks.length) add("disclosure", "Software versions", "warn", leaks.map(([name, value]) => `${name}: ${value}`).join(" · "), "Headers reveal software versions, which helps attackers pick exploits.", 2);
+  else add("disclosure", "Software versions", "pass", headers.server || null, "No software version numbers in the headers.");
+  if (cookies.length) {
+    const insecure = cookies.filter((cookie) => secure && !cookie.secure).map((cookie) => cookie.name);
+    const scriptReadable = cookies.filter((cookie) => !cookie.httpOnly).map((cookie) => cookie.name);
+    const noSameSite = cookies.filter((cookie) => !cookie.sameSite).map((cookie) => cookie.name);
+    if (insecure.length) add("cookies", "Cookies", "fail", insecure.join(", "), `${insecure.length} cookie(s) lack the Secure flag and can leak over plain HTTP.`, 8);
+    else if (noSameSite.length || scriptReadable.length) add("cookies", "Cookies", "warn", [...new Set([...noSameSite, ...scriptReadable])].join(", "), [noSameSite.length ? `${noSameSite.length} without SameSite` : null, scriptReadable.length ? `${scriptReadable.length} readable by scripts (no HttpOnly; fine for non-session cookies)` : null].filter(Boolean).join("; ") + ".", 2);
+    else add("cookies", "Cookies", "pass", cookies.map((cookie) => cookie.name).join(", "), "All cookies are Secure, HttpOnly and SameSite.");
+  }
+  const score = Math.max(0, 100 - checks.reduce((total, check) => total + check.weight, 0));
+  const grade = score >= 95 ? "A+" : score >= 85 ? "A" : score >= 70 ? "B" : score >= 55 ? "C" : score >= 40 ? "D" : "F";
+  return { checks: checks.map(({ weight, ...check }) => check), score, grade };
+}
+
+async function runWebCheck(input, allowLocal) {
+  const raw = String(input || "").trim();
+  const explicit = /^https?:\/\//i.test(raw);
+  let start;
+  try {
+    start = new URL(explicit ? raw : `http://${raw}/`);
+  } catch {
+    throw Object.assign(new Error("Enter a domain name or an http(s) URL."), { statusCode: 400 });
+  }
+  if (start.username || start.password || !start.hostname) throw Object.assign(new Error("Enter a domain name or an http(s) URL."), { statusCode: 400 });
+  const host = start.hostname.replace(/^\[|\]$/g, "");
+  if (!isIP(host) && !normalizeDomain(host)) throw Object.assign(new Error("Enter a valid domain name or URL."), { statusCode: 400 });
+  const started = Date.now();
+  let { hops, final } = await followWebRedirects(start, allowLocal);
+  let httpUnavailable = null;
+  if (!final && !explicit) {
+    httpUnavailable = hops[0]?.error || "Plain HTTP is not reachable.";
+    const httpsStart = new URL(`https://${raw}/`);
+    ({ hops, final } = await followWebRedirects(httpsStart, allowLocal));
+  }
+  const result = { input: raw, startUrl: hops[0]?.url || start.href, hops, httpUnavailable, durationMs: 0 };
+  if (!final) {
+    result.error = hops.at(-1)?.error || "The site could not be reached.";
+    result.durationMs = Date.now() - started;
+    return result;
+  }
+  const { url: finalUrl, response } = final;
+  const secure = finalUrl.protocol === "https:";
+  const headers = response.headers;
+  const cookies = parseSetCookies(headers["set-cookie"] || []);
+  const html = decodeBody(response.body, String(headers["content-encoding"] || ""));
+  const finalAddress = hops.at(-1)?.address;
+  const http2 = secure && finalAddress ? await checkHttp2(finalUrl.hostname.replace(/^\[|\]$/g, ""), finalAddress, Number(finalUrl.port) || 443) : null;
+  const startedPlain = result.startUrl.startsWith("http:");
+  Object.assign(result, {
+    finalUrl: finalUrl.href,
+    finalStatus: response.status,
+    https: secure,
+    redirectsToHttps: startedPlain ? secure : null,
+    tls: response.tls,
+    http2,
+    http3: /\bh3(?:-\d+)?=/i.test(String(headers["alt-svc"] || "")),
+    altSvc: headers["alt-svc"] || null,
+    compression: headers["content-encoding"] || null,
+    contentType: headers["content-type"] || null,
+    server: headers.server || null,
+    title: html.match(/<title[^>]*>([^<]{0,300})/i)?.[1]?.replace(/\s+/g, " ").trim() || null,
+    firstByteMs: response.firstByteMs,
+    pageBytes: response.bytes,
+    headers: Object.entries(headers).filter(([name]) => name !== "set-cookie").slice(0, 60)
+      .map(([name, value]) => [name, String(Array.isArray(value) ? value.join(", ") : value).slice(0, 1000)]),
+    cookies,
+    ...webCheckChecks(headers, secure, cookies),
+  });
+  const issues = [];
+  if (startedPlain && !secure) issues.push({ severity: "high", message: "The site does not redirect HTTP to HTTPS." });
+  if (secure && response.tls && !response.tls.authorized) issues.push({ severity: "high", message: `The certificate is not trusted (${response.tls.authorizationError}).` });
+  if (response.tls?.daysRemaining !== null && response.tls?.daysRemaining !== undefined && response.tls.daysRemaining < 14) {
+    issues.push({ severity: response.tls.daysRemaining < 0 ? "high" : "medium", message: response.tls.daysRemaining < 0 ? "The certificate has expired." : `The certificate expires in ${response.tls.daysRemaining} days.` });
+  }
+  if (response.status >= 400) issues.push({ severity: "medium", message: `The final page returned HTTP ${response.status}.` });
+  if (hops.length > 3) issues.push({ severity: "low", message: `${hops.length - 1} redirects before the final page; each adds a round trip.` });
+  if (secure && http2 === false) issues.push({ severity: "low", message: "HTTP/2 is not supported." });
+  if (!result.compression && /text\/html|javascript|css|json/i.test(result.contentType || "") && response.bytes > 1024) issues.push({ severity: "low", message: "The response is not compressed." });
+  for (const check of result.checks) {
+    if (check.state === "fail") issues.push({ severity: ["hsts", "csp", "framing", "cookies"].includes(check.id) ? "medium" : "low", message: `${check.label}: ${check.message}` });
+  }
+  result.issues = issues;
+  result.durationMs = Date.now() - started;
+  return result;
+}
+
+async function webCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 2048, response);
+  if (rawName === null) return;
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("webCheck")) {
+    sendJson(response, 503, { error: "The server is busy with other web checks. Try again shortly." });
+    return;
+  }
+  try {
+    sendJson(response, 200, await runWebCheck(rawName, allowLocal));
+  } catch (error) {
+    if (error.statusCode) sendJson(response, error.statusCode, { error: error.message });
+    else {
+      console.error("Web check failed:", error);
+      sendJson(response, 500, { error: "Unable to complete the web check." });
+    }
+  } finally {
+    releaseHeavyJob("webCheck");
+  }
+}
+
+// Services whose custom-domain CNAMEs can be claimed by anyone once the original resource is deleted.
+const takeoverServices = [
+  { service: "GitHub Pages", cname: /\.github\.io$/, body: /There isn't a GitHub Pages site here/i },
+  { service: "Heroku", cname: /\.(herokuapp\.com|herokudns\.com)$/, body: /no-such-app\.html|No such app/i },
+  { service: "Amazon S3", cname: /(^|\.)s3[.-]([a-z0-9-]+\.)?amazonaws\.com$|\.s3-website[.-][a-z0-9-]+\.amazonaws\.com$/, body: /NoSuchBucket|The specified bucket does not exist/i },
+  { service: "Microsoft Azure", cname: /\.(azurewebsites\.net|cloudapp\.net|cloudapp\.azure\.com|trafficmanager\.net|blob\.core\.windows\.net|azureedge\.net|azure-api\.net|azurefd\.net|azurecontainer\.io|azurestaticapps\.net)$/, nxdomain: true },
+  { service: "AWS Elastic Beanstalk", cname: /\.elasticbeanstalk\.com$/, nxdomain: true },
+  { service: "Shopify", cname: /\.myshopify\.com$/, body: /Sorry, this shop is currently unavailable|Only one step left/i },
+  { service: "Fastly", cname: /\.fastly\.net$/, body: /Fastly error: unknown domain/i },
+  { service: "Ghost", cname: /\.ghost\.io$/, body: /The thing you were looking for is no longer here|Domain error/i },
+  { service: "Surge.sh", cname: /\.surge\.sh$/, body: /project not found/i },
+  { service: "Bitbucket", cname: /\.bitbucket\.io$/, body: /Repository not found/i },
+  { service: "Pantheon", cname: /\.pantheonsite\.io$/, body: /The gods are wise|404 error unknown site/i },
+  { service: "Tumblr", cname: /\.tumblr\.com$/, body: /Whatever you were looking for doesn't currently exist|There's nothing here/i },
+  { service: "WordPress.com", cname: /\.wordpress\.com$/, body: /Do you want to register .*\.wordpress\.com/i },
+  { service: "Zendesk", cname: /\.zendesk\.com$/, body: /Help Center Closed|this help center no longer exists/i },
+  { service: "Unbounce", cname: /\.unbouncepages\.com$/, body: /The requested URL was not found on this server/i },
+  { service: "Netlify", cname: /\.netlify\.(app|com)$/, body: /Not Found - Request ID/i },
+  { service: "Fly.io", cname: /\.fly\.dev$/, nxdomain: true },
+  { service: "ReadMe", cname: /\.readme\.io$/, body: /Project doesnt exist/i },
+  { service: "Help Scout", cname: /\.helpscoutdocs\.com$/, body: /No settings were found for this company/i },
+  { service: "Strikingly", cname: /\.strikinglydns\.com$/, body: /PAGE NOT FOUND/i },
+  { service: "Webflow", cname: /proxy(-ssl)?\.webflow\.com$/, body: /The page you are looking for doesn't exist or has been moved/i },
+  { service: "Vercel", cname: /\.vercel-dns\.com$|cname\.vercel-dns\.com$/, body: /DEPLOYMENT_NOT_FOUND|The deployment could not be found/i },
+];
+
+async function checkSubdomainTakeover(hosts, allowLocal) {
+  const candidates = hosts
+    .map((host) => {
+      const cname = host.records.find((record) => record.type === "CNAME")?.answers.at(-1)?.data;
+      return cname ? { host: host.name, cname: String(cname).replace(/\.$/, "").toLowerCase() } : null;
+    })
+    .filter(Boolean)
+    .slice(0, 25);
+  const findings = [];
+  for (let index = 0; index < candidates.length; index += 5) {
+    findings.push(...await Promise.all(candidates.slice(index, index + 5).map(async ({ host, cname }) => {
+      const service = takeoverServices.find((entry) => entry.cname.test(cname)) || null;
+      const finding = { host, cname, service: service?.service || null, status: "ok", evidence: null };
+      let targetStatus = null;
+      try {
+        targetStatus = (await queryDohDns(cname, "A")).status;
+      } catch {
+        targetStatus = null;
+      }
+      if (targetStatus === 3) {
+        finding.status = service ? "vulnerable" : "dangling";
+        finding.evidence = `${cname} does not exist (NXDOMAIN).`;
+        return finding;
+      }
+      if (!service?.body) return finding;
+      for (const scheme of ["https", "http"]) {
+        try {
+          const target = new URL(`${scheme}://${host}/`);
+          const address = await resolveWebAddress(host, allowLocal);
+          if (!address) break;
+          const page = await requestPinnedUrl(target, address, { timeoutMs: 6000, maxBytes: 65536 });
+          const body = decodeBody(page.body, String(page.headers["content-encoding"] || ""));
+          if (service.body.test(body)) {
+            finding.status = "vulnerable";
+            finding.evidence = `The page shows the ${service.service} "not found / unclaimed" message (HTTP ${page.status}).`;
+          }
+          break;
+        } catch {
+          // Try plain HTTP when HTTPS is not available.
+        }
+      }
+      return finding;
+    })));
+  }
+  return {
+    checked: candidates.length,
+    findings: findings.filter((finding) => finding.status !== "ok" || finding.service),
+    vulnerable: findings.filter((finding) => finding.status === "vulnerable").length,
+    dangling: findings.filter((finding) => finding.status === "dangling").length,
+  };
+}
+
 async function analyzeMtaSts(domain, mxHosts) {
   const { records } = await queryTxtRecords(`_mta-sts.${domain}`);
   const txt = records.filter((record) => /^v\s*=\s*STSv1\b/i.test(record.trim()));
@@ -2448,6 +2910,568 @@ async function emailCheck(request, url, response) {
     releaseHeavyJob("emailCheck");
   }
 }
+
+async function emailHeadersCheck(request, response) {
+  const body = await readAuthBody(request, response, 262144 + 1024);
+  if (!body) return;
+  const raw = typeof body.headers === "string" ? body.headers : "";
+  if (!raw.trim()) {
+    sendJson(response, 400, { error: "Paste the message headers." });
+    return;
+  }
+  try {
+    const result = analyzeEmailHeaders(raw.slice(0, 262144));
+    const addresses = [...new Set(result.hops.map((hop) => hop.ip).filter((address) => address && isPublicAddress(address)))].slice(0, 20);
+    const [ptrLookups, geolocations] = await Promise.all([fetchPtrLookups(addresses), fetchIpGeolocations(addresses)]);
+    sendJson(response, 200, { ...result, ptrLookups, geolocations });
+  } catch (error) {
+    if (error.statusCode) sendJson(response, error.statusCode, { error: error.message });
+    else {
+      console.error("Header analysis failed:", error);
+      sendJson(response, 500, { error: "Unable to analyze the headers." });
+    }
+  }
+}
+
+async function dmarcSourceLookup(request, response) {
+  const body = await readAuthBody(request, response, 32768);
+  if (!body) return;
+  const ips = Array.isArray(body.ips) ? [...new Set(body.ips.filter((value) => typeof value === "string" && isPublicAddress(value.trim())).map((value) => value.trim()))].slice(0, 300) : [];
+  const ptrLookups = await fetchPtrLookups(ips);
+  const sources = Object.fromEntries(ips.map((address) => {
+    const names = ptrLookups[address]?.answers?.map((name) => String(name).replace(/\.$/, "")) || [];
+    const provider = names.map((name) => identifyMailProvider(name, "mx") || identifyMailProvider(name, "spf")).find(Boolean) || null;
+    return [address, { ptr: names.slice(0, 3), provider }];
+  }));
+  sendJson(response, 200, { sources });
+}
+
+async function recordImport(url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const domain = normalizeDomain(hostFromInput(rawName));
+  if (!domain) {
+    sendJson(response, 400, { error: "Enter a valid domain name." });
+    return;
+  }
+  const txt = (name, pattern) => queryTxtRecords(name).then((data) => data.records.filter((record) => pattern.test(record.trim())), () => []);
+  const [spf, dmarc, mtaSts, tlsRpt, bimi, mx] = await Promise.all([
+    txt(domain, /^v=spf1\b/i),
+    txt(`_dmarc.${domain}`, /^v=DMARC1\b/i),
+    txt(`_mta-sts.${domain}`, /^v=STSv1\b/i),
+    txt(`_smtp._tls.${domain}`, /^v=TLSRPTv1\b/i),
+    txt(`default._bimi.${domain}`, /^v=BIMI1\b/i),
+    queryDohDns(domain, "MX").then((data) => data.answers
+      .filter((answer) => answer.type === 15 || answer.typeName === "MX")
+      .map((answer) => String(answer.data).split(/\s+/)[1]?.replace(/\.$/, "").toLowerCase())
+      .filter(Boolean), () => []),
+  ]);
+  sendJson(response, 200, { domain, spf, dmarc: dmarc[0] || null, mtaSts: mtaSts[0] || null, tlsRpt: tlsRpt[0] || null, bimi: bimi[0] || null, mx });
+}
+
+const bulkDomainLimits = { domains: 50, concurrency: 5, perDomainMs: 30000 };
+
+function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error(message), { name: "TimeoutError" })), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function checkDomainSummary(domain, allowLocal) {
+  const answers = (type, code) => queryDohDns(domain, type).then((data) => data.answers.filter((answer) => answer.type === code || answer.typeName === type).map((answer) => answer.data), () => []);
+  const [mxAnswers, addresses, spf, dmarc] = await Promise.all([
+    answers("MX", 15),
+    answers("A", 1),
+    analyzeSpf(domain).catch(() => null),
+    analyzeDmarc(domain).catch(() => null),
+  ]);
+  const mxHosts = mxAnswers.map((value) => String(value).split(/\s+/)[1]?.replace(/\.$/, "").toLowerCase()).filter((host) => host && host !== ".");
+  const address = addresses.find((value) => isScannableAddress(value, allowLocal));
+  const [handshake, blocklists] = await Promise.all([
+    address ? runTlsHandshake(domain, address, 443) : Promise.resolve(null),
+    checkBlocklists({ addresses: addresses.filter((value) => isPublicAddress(value)).slice(0, 1), domain }).catch(() => null),
+  ]);
+  const leaf = handshake?.certificateChain?.[0];
+  const validTo = leaf?.validTo ? new Date(leaf.validTo) : null;
+  const listedOn = blocklists ? [
+    ...(blocklists.domain?.lists || []).filter((list) => list.status === "listed").map((list) => list.name),
+    ...(blocklists.ips || []).flatMap((entry) => entry.lists.filter((list) => list.status === "listed").map((list) => `${list.name} (${entry.address})`)),
+  ] : null;
+  return {
+    domain,
+    address: address || addresses[0] || null,
+    mx: { count: mxHosts.length, hosts: mxHosts.slice(0, 3), providers: [...new Set(mxHosts.map((host) => identifyMailProvider(host, "mx")).filter(Boolean))] },
+    spf: spf ? { found: spf.found, all: spf.all || null, lookups: spf.lookups ?? null, issues: spf.issues?.length || 0 } : null,
+    dmarc: dmarc ? { found: dmarc.found, policy: dmarc.policy || null } : null,
+    certificate: !address ? { error: "No address" } : handshake?.handshake ? {
+      authorized: handshake.authorized,
+      validTo: validTo && !Number.isNaN(validTo.getTime()) ? validTo.toISOString() : null,
+      daysRemaining: validTo ? Math.floor((validTo.getTime() - Date.now()) / 86400000) : null,
+      issuer: leaf?.issuer || null,
+    } : { error: handshake?.error || "No TLS on port 443" },
+    blocklist: listedOn ? { listed: listedOn.length, lists: listedOn } : null,
+  };
+}
+
+async function bulkDomainCheck(request, response) {
+  const body = await readAuthBody(request, response, 16384);
+  if (!body) return;
+  const entries = String(typeof body.domains === "string" ? body.domains : "").split(/[\s,;]+/).map((value) => value.trim()).filter(Boolean);
+  const domains = [...new Set(entries.map((value) => normalizeDomain(hostFromInput(value))).filter(Boolean))];
+  const invalid = entries.filter((value) => !normalizeDomain(hostFromInput(value)));
+  if (!domains.length) {
+    sendJson(response, 400, { error: "Enter at least one domain name." });
+    return;
+  }
+  if (domains.length > bulkDomainLimits.domains) {
+    sendJson(response, 400, { error: `Enter at most ${bulkDomainLimits.domains} domains.` });
+    return;
+  }
+  if (!acquireHeavyJob("bulkDomains")) {
+    sendJson(response, 503, { error: "A bulk domain check is already running. Try again shortly." });
+    return;
+  }
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  const started = Date.now();
+  try {
+    const rows = new Array(domains.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(bulkDomainLimits.concurrency, domains.length) }, async () => {
+      while (next < domains.length) {
+        const index = next;
+        next += 1;
+        try {
+          rows[index] = await withTimeout(checkDomainSummary(domains[index], allowLocal), bulkDomainLimits.perDomainMs, "The checks took too long.");
+        } catch (error) {
+          rows[index] = { domain: domains[index], error: error.name === "TimeoutError" ? error.message : "The checks could not be completed." };
+        }
+      }
+    }));
+    sendJson(response, 200, { rows, invalid: invalid.slice(0, 20), durationMs: Date.now() - started });
+  } finally {
+    releaseHeavyJob("bulkDomains");
+  }
+}
+
+// Optional MTA-STS policy served at /.well-known/mta-sts.txt when mta-sts.<domain> points to this server.
+function validateMtaStsPolicy(text) {
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n").map((line) => line.trim()).filter(Boolean);
+  const fields = { mx: [] };
+  for (const line of lines) {
+    const match = line.match(/^([a-z_]+)\s*:\s*(.+)$/i);
+    if (!match) return { error: `Invalid line: ${line.slice(0, 80)}` };
+    const key = match[1].toLowerCase();
+    if (key === "mx") fields.mx.push(match[2].toLowerCase());
+    else fields[key] = match[2];
+  }
+  if (fields.version !== "STSv1") return { error: "The policy must contain version: STSv1." };
+  if (!["enforce", "testing", "none"].includes(fields.mode)) return { error: "mode must be enforce, testing or none." };
+  const maxAge = Number(fields.max_age);
+  if (!Number.isInteger(maxAge) || maxAge < 86400 || maxAge > 31557600) return { error: "max_age must be between 86400 (1 day) and 31557600 (1 year) seconds." };
+  if (fields.mode !== "none" && !fields.mx.length) return { error: "Add at least one mx: line." };
+  if (fields.mx.some((mx) => !/^(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(mx))) return { error: "Each mx: must be a host name, optionally starting with *." };
+  return { policy: ["version: STSv1", `mode: ${fields.mode}`, ...fields.mx.map((mx) => `mx: ${mx}`), `max_age: ${maxAge}`].join("\r\n") + "\r\n" };
+}
+
+function readMtaStsPolicy() {
+  return database.prepare("SELECT value FROM app_settings WHERE key = 'mta_sts_policy'").get()?.value || null;
+}
+
+function serveMtaStsPolicy(request, response) {
+  const policy = readMtaStsPolicy();
+  if (!policy) return false;
+  response.writeHead(200, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "public, max-age=300",
+    "x-content-type-options": "nosniff",
+  });
+  response.end(request.method === "HEAD" ? undefined : policy);
+  return true;
+}
+
+function handleAdminMtaSts(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") {
+    sendJson(response, 200, { policy: readMtaStsPolicy() });
+    return;
+  }
+  if (!["PUT", "DELETE"].includes(request.method)) {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  if (request.method === "DELETE") {
+    database.prepare("DELETE FROM app_settings WHERE key = 'mta_sts_policy'").run();
+    recordAdminLog("audit", request, "MTA-STS policy removed", null, 200, admin.username);
+    sendJson(response, 200, { policy: null });
+    return;
+  }
+  void readAuthBody(request, response, 8192).then((body) => {
+    if (!body) return;
+    const result = validateMtaStsPolicy(body.policy);
+    if (result.error) {
+      sendJson(response, 400, { error: result.error });
+      return;
+    }
+    database.prepare(`
+      INSERT INTO app_settings (key, value) VALUES ('mta_sts_policy', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(result.policy);
+    recordAdminLog("audit", request, "MTA-STS policy saved", result.policy.split("\r\n")[1], 200, admin.username);
+    sendJson(response, 200, { policy: result.policy });
+  });
+}
+
+const monitorKinds = {
+  website: "Website up",
+  certificate: "Certificate",
+  dns: "DNS records",
+  email: "Email security",
+  blocklist: "Blocklists",
+};
+const monitorIntervals = [1, 6, 12, 24];
+const monitorLimits = { perUser: { user: 25, admin: 100 }, events: 50, concurrency: 3, checkMs: 90000, manualRunGapMs: 60000 };
+const monitorDnsTypes = ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "CAA"];
+const monitorRuns = new Set();
+const monitorManualRuns = new Map();
+
+function normalizeMonitorTarget(kind, raw) {
+  const value = String(raw || "").trim().slice(0, 2048);
+  if (!value) return null;
+  if (kind === "website") {
+    try {
+      const url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+      if (url.username || url.password || !["http:", "https:"].includes(url.protocol)) return null;
+      const host = url.hostname.replace(/^\[|\]$/g, "");
+      return isIP(host) || normalizeDomain(host) ? url.href : null;
+    } catch {
+      return null;
+    }
+  }
+  if (kind === "certificate") {
+    const match = value.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").match(/^(\[[0-9a-f:.]+\]|[^:]+)(?::(\d{1,5}))?$/i);
+    if (!match) return null;
+    const host = match[1].replace(/^\[|\]$/g, "");
+    const port = Number(match[2] || 443);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    const name = isIP(host) ? host : normalizeDomain(host);
+    if (!name) return null;
+    return `${isIP(name) === 6 ? `[${name}]` : name}:${port}`;
+  }
+  const host = hostFromInput(value).replace(/^\[|\]$/g, "");
+  if (kind === "blocklist" && isIP(host)) return isIP(host) === 4 && isPublicAddress(host) ? host : null;
+  return normalizeDomain(host);
+}
+
+async function runMonitorCheck(kind, target, allowLocal) {
+  if (kind === "website") {
+    const { hops, final } = await followWebRedirects(new URL(target), allowLocal, { maxBytes: 65536 });
+    const last = hops.at(-1);
+    if (!final || last?.error) {
+      return { status: "fail", summary: `Down: ${last?.error || "no response"}`, snapshot: { up: false } };
+    }
+    const status = final.response.status;
+    const totalMs = hops.reduce((sum, hop) => sum + (hop.timeMs || 0), 0);
+    return {
+      status: status >= 500 ? "fail" : status >= 400 ? "warn" : "ok",
+      summary: `HTTP ${status} in ${totalMs} ms${hops.length > 1 ? ` via ${hops.length - 1} redirect(s) to ${final.url.href}` : ""}`,
+      snapshot: { up: status < 500, status, finalUrl: final.url.href },
+    };
+  }
+  if (kind === "certificate") {
+    const separator = target.lastIndexOf(":");
+    const host = target.slice(0, separator).replace(/^\[|\]$/g, "");
+    const port = Number(target.slice(separator + 1));
+    const address = await resolveWebAddress(host, allowLocal);
+    if (!address) return { status: "fail", summary: `${host} does not resolve to an address that can be checked.`, snapshot: { reachable: false } };
+    const result = await runTlsHandshake(host, address, port);
+    if (!result.handshake) return { status: "fail", summary: result.error || "The TLS handshake failed.", snapshot: { reachable: false } };
+    const leaf = result.certificateChain[0] || {};
+    const validTo = leaf.validTo ? new Date(leaf.validTo) : null;
+    const days = validTo ? Math.floor((validTo.getTime() - Date.now()) / 86400000) : null;
+    const issuer = leaf.issuer?.match(/O=([^,]+)/)?.[1] || leaf.issuer?.match(/CN=([^,]+)/)?.[1] || "unknown issuer";
+    const status = !result.authorized || (days !== null && days < 0) ? "fail" : days !== null && days < 14 ? "warn" : "ok";
+    const trust = result.authorized ? "" : ` · not trusted (${result.authorizationError})`;
+    return {
+      status,
+      summary: `${days === null ? "Unknown expiry" : days < 0 ? "Expired" : `Expires in ${days} days`} (${validTo ? validTo.toISOString().slice(0, 10) : "?"}) · ${issuer}${trust}`,
+      snapshot: { reachable: true, fingerprint: leaf.fingerprint256 || null, trusted: result.authorized, expiresSoon: days !== null && days < 14 },
+    };
+  }
+  if (kind === "dns") {
+    const results = await Promise.all(monitorDnsTypes.map((type) => queryDohDns(target, type).then(
+      (data) => [type, data.status, [...new Set(data.answers.filter((answer) => answer.typeName === type || answer.type === dnsTypeCodes[type]).map((answer) => String(answer.data)))].sort()],
+      () => [type, null, null],
+    )));
+    if (results.every(([, status]) => status === null)) throw new Error("The DNS provider did not answer.");
+    if (results.some(([, status]) => status === 3)) return { status: "fail", summary: "The domain does not exist (NXDOMAIN).", snapshot: { exists: false } };
+    const snapshot = Object.fromEntries(results.filter(([, , answers]) => answers).map(([type, , answers]) => [type, answers]));
+    return {
+      status: "ok",
+      summary: results.filter(([, , answers]) => answers?.length).map(([type, , answers]) => `${type} ${answers.length}`).join(" · ") || "No records",
+      snapshot,
+    };
+  }
+  if (kind === "email") {
+    const [mxAnswers, spf, dmarc, mtaSts] = await Promise.all([
+      queryDohDns(target, "MX").then((data) => data.answers.filter((answer) => answer.type === 15 || answer.typeName === "MX").map((answer) => String(answer.data).toLowerCase()).sort(), () => null),
+      analyzeSpf(target).catch(() => null),
+      analyzeDmarc(target).catch(() => null),
+      analyzeMtaSts(target, []).catch(() => null),
+    ]);
+    const problems = [];
+    if (!dmarc?.found) problems.push("no DMARC");
+    else if (dmarc.policy === "none") problems.push("DMARC p=none");
+    if (!spf?.found) problems.push("no SPF");
+    else if (spf.lookups === null || spf.lookups > 10) problems.push("SPF permerror");
+    return {
+      status: problems.some((problem) => /^no |permerror/.test(problem)) ? "fail" : problems.length ? "warn" : "ok",
+      summary: [`MX ${mxAnswers?.length ?? "?"}`, spf?.found ? `SPF ${spf.all || "?"} ${spf.lookups ?? "?"}/10` : "no SPF", dmarc?.found ? `DMARC p=${dmarc.policy || "?"}` : "no DMARC", mtaSts?.found ? `MTA-STS ${mtaSts.policy?.mode || "?"}` : null].filter(Boolean).join(" · "),
+      snapshot: { mx: mxAnswers, spf: spf?.record || null, dmarc: dmarc?.record || null, mtaSts: mtaSts?.policy?.mode || null },
+    };
+  }
+  if (kind === "blocklist") {
+    let addresses = [target];
+    let domain = null;
+    if (!isIP(target)) {
+      domain = target;
+      addresses = await queryDohDns(target, "A").then((data) => data.answers.filter((answer) => answer.type === 1 || answer.typeName === "A").map((answer) => answer.data), () => []);
+    }
+    const result = await checkBlocklists({ addresses: addresses.slice(0, 2), domain });
+    const listed = [
+      ...(result.domain?.lists || []).filter((list) => list.status === "listed").map((list) => `${list.name} (${domain})`),
+      ...result.ips.flatMap((entry) => entry.lists.filter((list) => list.status === "listed").map((list) => `${list.name} (${entry.address})`)),
+    ].sort();
+    const checked = (result.domain?.checked || 0) + result.ips.reduce((sum, entry) => sum + entry.checked, 0);
+    return {
+      status: listed.length ? "fail" : "ok",
+      summary: listed.length ? `Listed on ${listed.join(", ")}` : `Not listed (${checked} lists checked)`,
+      snapshot: { listed },
+    };
+  }
+  throw new Error("Unknown monitor type.");
+}
+
+function describeSnapshotChanges(kind, before, after) {
+  if (!before || !after) return [];
+  const changes = [];
+  for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])]) {
+    const left = before[key];
+    const right = after[key];
+    if (JSON.stringify(left) === JSON.stringify(right)) continue;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      const added = (right || []).filter((value) => !(left || []).includes(value));
+      const removed = (left || []).filter((value) => !(right || []).includes(value));
+      if (added.length) changes.push(`${key} added: ${added.join(", ")}`);
+      if (removed.length) changes.push(`${key} removed: ${removed.join(", ")}`);
+    } else if (kind === "certificate" && key === "fingerprint" && left && right) {
+      changes.push("A new certificate is being served (renewed or replaced).");
+    } else if (kind !== "certificate" || !["expiresSoon", "trusted", "reachable"].includes(key)) {
+      changes.push(`${key}: ${left ?? "none"} → ${right ?? "none"}`);
+    }
+  }
+  return changes.map((change) => change.slice(0, 500)).slice(0, 20);
+}
+
+function addMonitorEvent(monitorId, level, message) {
+  database.prepare("INSERT INTO monitor_events (monitor_id, created_at, level, message) VALUES (?, ?, ?, ?)").run(monitorId, Date.now(), level, message.slice(0, 2000));
+  database.prepare(`
+    DELETE FROM monitor_events WHERE monitor_id = ? AND id NOT IN (
+      SELECT id FROM monitor_events WHERE monitor_id = ? ORDER BY id DESC LIMIT ?
+    )
+  `).run(monitorId, monitorId, monitorLimits.events);
+}
+
+async function sendMonitorAlert(row, user, result, previousStatus, changes) {
+  const config = getMailConfig(true);
+  if (!config || !user.email) return "No alert email was sent (no email address on the account, or email is not configured).";
+  const statusWords = { ok: "OK", warn: "Warning", fail: "Problem" };
+  const subject = previousStatus && previousStatus !== result.status
+    ? `${statusWords[result.status]}: ${monitorKinds[row.kind]} for ${row.target}`
+    : `Changed: ${monitorKinds[row.kind]} for ${row.target}`;
+  const text = [
+    `Monitor: ${monitorKinds[row.kind]} — ${row.target}`,
+    previousStatus && previousStatus !== result.status ? `Status: ${statusWords[previousStatus] || previousStatus} → ${statusWords[result.status]}` : `Status: ${statusWords[result.status]}`,
+    `Result: ${result.summary}`,
+    ...(changes.length ? ["", "Changes:", ...changes.map((change) => `- ${change}`)] : []),
+    "",
+    `Checked ${new Date().toUTCString()}. Manage or pause this monitor on the Monitors page.`,
+  ].join("\n");
+  try {
+    await sendMail(config, { from: config.from, fromName: config.fromName, to: user.email, subject, text });
+    return `Alert sent to ${user.email}.`;
+  } catch (error) {
+    return `The alert email could not be sent: ${String(error.message).slice(0, 200)}`;
+  }
+}
+
+async function runMonitor(row) {
+  if (monitorRuns.has(row.id)) return null;
+  monitorRuns.add(row.id);
+  try {
+    const user = database.prepare("SELECT id, username, role, active, email FROM users WHERE id = ?").get(row.user_id);
+    const now = Date.now();
+    database.prepare("UPDATE monitors SET next_run_at = ? WHERE id = ?").run(now + row.interval_hours * 3600000, row.id);
+    if (!user?.active) return null;
+    const allowLocal = Boolean(getPortScanPolicy().localScanByRole[user.role]);
+    let result;
+    try {
+      result = await withTimeout(runMonitorCheck(row.kind, row.target, allowLocal), monitorLimits.checkMs, "The check took too long.");
+    } catch (error) {
+      result = { status: "fail", summary: `The check failed: ${String(error.message).slice(0, 200)}`, snapshot: null };
+    }
+    let previousSnapshot = null;
+    try {
+      previousSnapshot = row.last_snapshot ? JSON.parse(row.last_snapshot) : null;
+    } catch {
+      previousSnapshot = null;
+    }
+    const firstRun = !row.last_run_at;
+    const changes = firstRun ? [] : describeSnapshotChanges(row.kind, previousSnapshot, result.snapshot);
+    const statusChanged = !firstRun && row.last_status !== result.status;
+    if (firstRun) addMonitorEvent(row.id, result.status, `First check: ${result.summary}`);
+    else if (statusChanged) addMonitorEvent(row.id, result.status, `Status changed to ${result.status}: ${result.summary}`);
+    if (changes.length) addMonitorEvent(row.id, "change", changes.join("\n"));
+    database.prepare(`
+      UPDATE monitors SET last_run_at = ?, last_status = ?, last_summary = ?, last_snapshot = COALESCE(?, last_snapshot),
+        last_change_at = CASE WHEN ? THEN ? ELSE last_change_at END
+      WHERE id = ?
+    `).run(Date.now(), result.status, result.summary.slice(0, 1000), result.snapshot ? JSON.stringify(result.snapshot) : null,
+      statusChanged || changes.length ? 1 : 0, Date.now(), row.id);
+    if ((statusChanged || changes.length) && row.notify) {
+      addMonitorEvent(row.id, "alert", await sendMonitorAlert(row, user, result, row.last_status, changes));
+    }
+    return result;
+  } finally {
+    monitorRuns.delete(row.id);
+  }
+}
+
+let monitorTickRunning = false;
+async function runDueMonitors() {
+  if (monitorTickRunning) return;
+  monitorTickRunning = true;
+  try {
+    const due = database.prepare("SELECT * FROM monitors WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at LIMIT 12").all(Date.now());
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(monitorLimits.concurrency, due.length) }, async () => {
+      while (next < due.length) {
+        const row = due[next];
+        next += 1;
+        await runMonitor(row).catch((error) => console.error("Monitor failed:", error.message));
+      }
+    }));
+  } finally {
+    monitorTickRunning = false;
+  }
+}
+
+function describeMonitor(row, events = []) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    kindLabel: monitorKinds[row.kind] || row.kind,
+    target: row.target,
+    intervalHours: row.interval_hours,
+    notify: Boolean(row.notify),
+    enabled: Boolean(row.enabled),
+    createdAt: new Date(row.created_at).toISOString(),
+    nextRunAt: row.enabled ? new Date(row.next_run_at).toISOString() : null,
+    lastRunAt: row.last_run_at ? new Date(row.last_run_at).toISOString() : null,
+    lastChangeAt: row.last_change_at ? new Date(row.last_change_at).toISOString() : null,
+    status: row.last_status || "pending",
+    summary: row.last_summary || null,
+    events: events.map((event) => ({ at: new Date(event.created_at).toISOString(), level: event.level, message: event.message })),
+  };
+}
+
+async function handleMonitors(request, response, url) {
+  if (!checkFeatureAccess(request, response, "monitors", true)) return;
+  const user = currentUser(request);
+  const match = url.pathname.match(/^\/api\/monitors(?:\/(\d+))?(\/run)?$/);
+  if (!match) {
+    sendJson(response, 404, { error: "Not found." });
+    return;
+  }
+  const id = match[1] ? Number(match[1]) : null;
+  const own = id ? database.prepare("SELECT * FROM monitors WHERE id = ? AND user_id = ?").get(id, user.id) : null;
+  if (id && !own) {
+    sendJson(response, 404, { error: "Monitor not found." });
+    return;
+  }
+  const account = database.prepare("SELECT email FROM users WHERE id = ?").get(user.id);
+  const context = { mailEnabled: Boolean(getMailConfig()), email: account?.email || null, kinds: monitorKinds, intervals: monitorIntervals, limit: monitorLimits.perUser[user.role] || 25 };
+  if (!id && request.method === "GET") {
+    const rows = database.prepare("SELECT * FROM monitors WHERE user_id = ? ORDER BY id").all(user.id);
+    const eventsFor = database.prepare("SELECT * FROM monitor_events WHERE monitor_id = ? ORDER BY id DESC LIMIT 10");
+    sendJson(response, 200, { ...context, monitors: rows.map((row) => describeMonitor(row, eventsFor.all(row.id))) });
+    return;
+  }
+  if (!id && request.method === "POST") {
+    const body = await readAuthBody(request, response, 8192);
+    if (!body) return;
+    const kind = Object.hasOwn(monitorKinds, body.kind) ? body.kind : null;
+    const target = kind ? normalizeMonitorTarget(kind, body.target) : null;
+    const intervalHours = monitorIntervals.includes(Number(body.intervalHours)) ? Number(body.intervalHours) : null;
+    if (!kind) return sendJson(response, 400, { error: "Choose what to monitor." });
+    if (!target) return sendJson(response, 400, { error: kind === "website" ? "Enter a valid URL or domain." : kind === "certificate" ? "Enter a host name, optionally with :port." : kind === "blocklist" ? "Enter a domain or a public IPv4 address." : "Enter a valid domain name." });
+    if (!intervalHours) return sendJson(response, 400, { error: "Choose how often to check." });
+    const count = database.prepare("SELECT COUNT(*) AS count FROM monitors WHERE user_id = ?").get(user.id).count;
+    if (count >= context.limit) return sendJson(response, 400, { error: `You can have up to ${context.limit} monitors.` });
+    if (database.prepare("SELECT 1 FROM monitors WHERE user_id = ? AND kind = ? AND target = ?").get(user.id, kind, target)) {
+      return sendJson(response, 400, { error: "You already monitor this." });
+    }
+    const now = Date.now();
+    const created = database.prepare(`
+      INSERT INTO monitors (user_id, kind, target, interval_hours, notify, enabled, created_at, next_run_at)
+      VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(user.id, kind, target, intervalHours, body.notify === false ? 0 : 1, now, now + intervalHours * 3600000);
+    const row = database.prepare("SELECT * FROM monitors WHERE id = ?").get(Number(created.lastInsertRowid));
+    await runMonitor(row).catch(() => null);
+    const fresh = database.prepare("SELECT * FROM monitors WHERE id = ?").get(row.id);
+    sendJson(response, 201, describeMonitor(fresh, database.prepare("SELECT * FROM monitor_events WHERE monitor_id = ? ORDER BY id DESC LIMIT 10").all(row.id)));
+    return;
+  }
+  if (id && match[2] && request.method === "POST") {
+    const last = monitorManualRuns.get(id) || 0;
+    if (Date.now() - last < monitorLimits.manualRunGapMs) return sendJson(response, 429, { error: "Wait a minute before running this monitor again." });
+    monitorManualRuns.set(id, Date.now());
+    await runMonitor(own);
+    const fresh = database.prepare("SELECT * FROM monitors WHERE id = ?").get(id);
+    sendJson(response, 200, describeMonitor(fresh, database.prepare("SELECT * FROM monitor_events WHERE monitor_id = ? ORDER BY id DESC LIMIT 10").all(id)));
+    return;
+  }
+  if (id && !match[2] && request.method === "PATCH") {
+    const body = await readAuthBody(request, response, 4096);
+    if (!body) return;
+    const enabled = typeof body.enabled === "boolean" ? (body.enabled ? 1 : 0) : own.enabled;
+    const notify = typeof body.notify === "boolean" ? (body.notify ? 1 : 0) : own.notify;
+    const intervalHours = body.intervalHours === undefined ? own.interval_hours : Number(body.intervalHours);
+    if (!monitorIntervals.includes(intervalHours)) return sendJson(response, 400, { error: "Choose how often to check." });
+    const nextRunAt = enabled && (!own.enabled || intervalHours !== own.interval_hours) ? Date.now() + 60000 : own.next_run_at;
+    database.prepare("UPDATE monitors SET enabled = ?, notify = ?, interval_hours = ?, next_run_at = ? WHERE id = ?").run(enabled, notify, intervalHours, nextRunAt, id);
+    const fresh = database.prepare("SELECT * FROM monitors WHERE id = ?").get(id);
+    sendJson(response, 200, describeMonitor(fresh, database.prepare("SELECT * FROM monitor_events WHERE monitor_id = ? ORDER BY id DESC LIMIT 10").all(id)));
+    return;
+  }
+  if (id && !match[2] && request.method === "DELETE") {
+    database.prepare("DELETE FROM monitors WHERE id = ?").run(id);
+    sendJson(response, 200, { deleted: true });
+    return;
+  }
+  sendJson(response, 405, { error: "Method not allowed." });
+}
+
+setTimeout(() => {
+  void runDueMonitors();
+  setInterval(() => void runDueMonitors(), 60000).unref();
+}, 20000).unref();
 
 const ripeStatCache = new Map();
 
@@ -3766,6 +4790,10 @@ async function bulkScan(request, url, response) {
     console.error("Blocklist check failed:", error.message);
     return null;
   });
+  const takeoverPromise = checkSubdomainTakeover(hosts, rolePolicy.allowLocal).catch((error) => {
+    console.error("Subdomain takeover check failed:", error.message);
+    return null;
+  });
   const portScan = portScanOption === "common"
     ? await scanCommonTcpPorts(domain, rootAddresses, rolePolicy)
     : null;
@@ -3787,6 +4815,7 @@ async function bulkScan(request, url, response) {
     registryUrl: registrationResult.registryUrl || null,
     dnssec: await dnssecPromise,
     blocklists: await blocklistPromise,
+    takeover: await takeoverPromise,
     emailSecurity: {
       spfRecords,
       rootSpfFound: spfRecords.some((record) => record.name === domain),
@@ -5682,6 +6711,7 @@ function handleAdminAbout(request, response) {
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
   "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
+  "web", "email-headers", "dmarc-reports", "bulk-domains",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 
@@ -5801,7 +6831,7 @@ async function handleShares(request, url, response) {
 }
 
 const historyLimits = { perUser: 100, lifetimeMs: 30 * 24 * 3600_000, payloadBytes: 512 * 1024 };
-const historyParamKeys = ["type", "method", "port", "selectors", "ports", "targets", "bulkPort", "scanType", "ptr", "tlsGrade", "scanPorts", "scanEmail", "scanSsl", "scanTlsGrade"];
+const historyParamKeys = ["type", "method", "port", "selectors", "ports", "targets", "bulkPort", "scanType", "ptr", "tlsGrade", "scanPorts", "scanEmail", "scanSsl", "scanTlsGrade", "scanWeb", "domains"];
 
 function cleanHistoryParams(params) {
   const clean = {};
@@ -6102,7 +7132,7 @@ function checkFeatureAccess(request, response, feature, requireLogin = false) {
   const access = getFeatureAccess()[feature] || "admin";
   const user = currentUser(request);
   if (access === "public" && (!requireLogin || user)) {
-    const expectedMethod = ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan"]
+    const expectedMethod = ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan", "/api/email-headers", "/api/dmarc-sources", "/api/bulk-domain-check"]
       .includes(new URL(request.url, "http://localhost").pathname)
       ? "POST"
       : "GET";
@@ -6707,8 +7737,8 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4 };
-const heavyJobsActive = { traceroute: 0, pingScan: 0, nmap: 0, sslscan: 0, zmap: 0, tlsGrade: 0, dig: 0, emailCheck: 0 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1 };
+const heavyJobsActive = Object.fromEntries(Object.keys(heavyJobLimits).map((kind) => [kind, 0]));
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
 
@@ -7882,6 +8912,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/propagation": { method: "GET", action: "Propagation check", keys: ["name", "type"] },
     "/api/email-check": { method: "GET", action: "Email check", keys: ["name", "selectors"] },
     "/api/asn": { method: "GET", action: "ASN lookup", keys: ["name"] },
+    "/api/web-check": { method: "GET", action: "Web check", keys: ["name"] },
+    "/api/email-headers": { method: "POST", action: "Email header analysis" },
+    "/api/dmarc-sources": { method: "POST", action: "DMARC report sources" },
+    "/api/record-import": { method: "GET", action: "Record builder import", keys: ["name"] },
+    "/api/bulk-domain-check": { method: "POST", action: "Bulk domain check" },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
     "/api/sslscan": { method: "GET", action: "SSL/TLS check", keys: ["name", "port"] },
     "/api/tls-grade": { method: "POST", action: "TLS test and grade" },
@@ -8039,6 +9074,19 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/monitors" || url.pathname.startsWith("/api/monitors/")) {
+    void handleMonitors(request, response, url).catch((error) => {
+      console.error("Monitor request failed:", error);
+      if (!response.headersSent) sendJson(response, 500, { error: "The monitor request failed." });
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/admin/mta-sts") {
+    handleAdminMtaSts(request, response);
+    return;
+  }
+
   if (url.pathname === "/api/admin/logo") {
     handleAdminLogo(request, response);
     return;
@@ -8094,6 +9142,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/propagation": "propagation",
     "/api/email-check": "email",
     "/api/asn": "asn",
+    "/api/web-check": "web",
+    "/api/email-headers": "email-headers",
+    "/api/dmarc-sources": "dmarc-reports",
+    "/api/record-import": "record-builder",
+    "/api/bulk-domain-check": "bulk-domains",
     "/api/ping": "ping",
     "/api/sslscan": "sslscan",
     "/api/tls-grade": "sslscan",
@@ -8106,6 +9159,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     ["/api/custom-port-scan", "/api/bulk-port-scan", "/api/ping-scan", "/api/multi-traceroute", "/api/nmap-scan", "/api/nmap-status"].includes(url.pathname) ||
     url.pathname === "/api/tls-grade" ||
     url.pathname === "/api/blocklist" ||
+    url.pathname === "/api/bulk-domain-check" ||
     (url.pathname === "/api/ping" && url.searchParams.get("sample") === "1") ||
     (url.pathname === "/api/scan" && url.searchParams.get("ports") === "common");
   if (feature && !checkFeatureAccess(request, response, feature, requiresPortScanLogin)) return;
@@ -8225,6 +9279,41 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/web-check") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void webCheck(request, url, response);
+    return;
+  }
+
+  const postRoutes = {
+    "/api/email-headers": emailHeadersCheck,
+    "/api/dmarc-sources": dmarcSourceLookup,
+    "/api/bulk-domain-check": bulkDomainCheck,
+  };
+  if (postRoutes[url.pathname]) {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void postRoutes[url.pathname](request, response).catch((error) => {
+      console.error(`${url.pathname} failed:`, error);
+      if (!response.headersSent) sendJson(response, 500, { error: "The request could not be completed." });
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/record-import") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void recordImport(url, response).catch(() => sendJson(response, 500, { error: "Unable to read the current records." }));
+    return;
+  }
+
   if (url.pathname === "/api/asn") {
     if (request.method !== "GET") {
       sendJson(response, 405, { error: "Method not allowed." });
@@ -8317,6 +9406,10 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
   }
+  if ((url.pathname === "/monitors.html" || url.pathname === "/monitors") && !currentUser(request)) {
+    sendRedirect(response, `/login.html?next=${encodeURIComponent("/monitors.html")}`);
+    return;
+  }
   if ((url.pathname === "/history.html" || url.pathname === "/history") && !currentUser(request)) {
     sendRedirect(response, `/login.html?next=${encodeURIComponent("/history.html")}`);
     return;
@@ -8358,7 +9451,10 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   if (url.pathname === "/logo.svg" && (request.method === "GET" || request.method === "HEAD") && serveBimiLogo(request, response)) {
     return;
   }
-  const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname;
+  if (url.pathname === "/.well-known/mta-sts.txt" && (request.method === "GET" || request.method === "HEAD") && serveMtaStsPolicy(request, response)) {
+    return;
+  }
+  const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
   if (!staticFiles.has(requestedPath)) {
     response.writeHead(404);
     response.end();
