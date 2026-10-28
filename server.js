@@ -4084,7 +4084,10 @@ function getSiteIconUrl() {
 }
 
 function getSiteBranding() {
-  return { title: getSiteTitle(), iconUrl: getSiteIconUrl() };
+  const iconUrl = getSiteIconUrl();
+  const logo = readBimiLogo();
+  // An uploaded BIMI logo replaces the header logo; the site icon stays the favicon.
+  return { title: getSiteTitle(), iconUrl, logoUrl: logo ? `/logo.svg?v=${encodeURIComponent(logo.updatedAt || "")}` : iconUrl };
 }
 
 function validateSiteIconUrl(value) {
@@ -5327,6 +5330,119 @@ async function handleAdminVersion(request, url, response) {
     ...appBuild,
     repositoryUrl: `https://github.com/${appRepository}`,
     updateCheck: await getUpdateCheck(url.searchParams.get("refresh") === "1"),
+  });
+}
+
+const bimiLogoLimits = { maxBytes: 65536, bimiBytes: 32768 };
+
+// Checks an uploaded SVG for anything that could run code or load content when the file is
+// opened from this site (errors), and for BIMI "SVG Tiny Portable/Secure" problems (warnings).
+function validateBimiSvg(svg) {
+  const errors = [];
+  const warnings = [];
+  if (typeof svg !== "string" || !svg.trim()) return { errors: ["Choose an SVG file."], warnings };
+  const bytes = Buffer.byteLength(svg);
+  if (bytes > bimiLogoLimits.maxBytes) errors.push(`The file is ${Math.ceil(bytes / 1024)} KB; the limit is 64 KB.`);
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(svg)) errors.push("The file contains binary or control characters.");
+  const body = svg.replace(/^﻿/, "").replace(/<\?xml[^>]*\?>/i, "").replace(/<!--[\s\S]*?-->/g, "").trim();
+  if (!/^<svg[\s>]/i.test(body)) errors.push("The file must be an SVG document whose root element is <svg>.");
+  if (/<!ENTITY|<!DOCTYPE[^>]*\[/i.test(svg)) errors.push("Entity and DTD declarations are not allowed.");
+  const forbiddenElements = svg.match(/<\s*(script|foreignObject|iframe|embed|object|image|img|audio|video|canvas|animate\w*|set|a|handler|listener|discard)\b/gi);
+  if (forbiddenElements) errors.push(`Not allowed: ${[...new Set(forbiddenElements.map((tag) => `<${tag.replace(/[<\s]/g, "").toLowerCase()}>`))].join(", ")} (scripts, embedded content, links and animation).`);
+  if (/\son[a-z]+\s*=/i.test(svg)) errors.push("Event handler attributes (such as onload) are not allowed.");
+  if (/javascript\s*:|data\s*:\s*text\/html|vbscript\s*:/i.test(svg)) errors.push("Script URLs are not allowed.");
+  if (/\b(?:xlink:)?href\s*=\s*["']\s*(?!#)/i.test(svg)) errors.push("References to other files (href) are not allowed; only internal #references are.");
+  if (/@import|url\(\s*["']?\s*(?!#)/i.test(svg)) errors.push("External references in styles (@import or url()) are not allowed.");
+  if (errors.length) return { errors, warnings };
+  const root = body.match(/^<svg\b[^>]*>/i)?.[0] || "";
+  const attribute = (name) => root.match(new RegExp(`\\s${name}\\s*=\\s*["']([^"']*)["']`, "i"))?.[1];
+  if (attribute("version") !== "1.2" || attribute("baseProfile") !== "tiny-ps") {
+    warnings.push('BIMI requires SVG Tiny Portable/Secure: the root element needs version="1.2" baseProfile="tiny-ps".');
+  }
+  if (!/<title[\s>][\s\S]*?<\/title>/i.test(svg)) warnings.push("BIMI requires a <title> element (usually the company name).");
+  if (attribute("x") !== undefined || attribute("y") !== undefined) warnings.push("The root <svg> element must not have x or y attributes.");
+  const viewBox = attribute("viewBox")?.trim().split(/[\s,]+/).map(Number);
+  if (!viewBox || viewBox.length !== 4 || viewBox.some((value) => !Number.isFinite(value))) {
+    warnings.push("Add a viewBox; BIMI logos must be square.");
+  } else if (viewBox[2] !== viewBox[3]) {
+    warnings.push(`The viewBox is ${viewBox[2]} × ${viewBox[3]}; BIMI logos must be square.`);
+  }
+  if (/<style[\s>]/i.test(svg)) warnings.push("SVG Tiny PS does not allow <style> elements; use presentation attributes such as fill instead.");
+  if (bytes > bimiLogoLimits.bimiBytes) warnings.push(`The file is ${Math.ceil(bytes / 1024)} KB; BIMI recommends at most 32 KB.`);
+  return { errors, warnings };
+}
+
+function readBimiLogo() {
+  const row = database.prepare("SELECT value FROM app_settings WHERE key = 'bimi_logo'").get();
+  if (!row) return null;
+  try {
+    const saved = JSON.parse(row.value);
+    return typeof saved.svg === "string" ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function serveBimiLogo(request, response) {
+  const logo = readBimiLogo();
+  if (!logo) return false;
+  // A sandboxed CSP so the SVG can never run script, even when opened directly.
+  response.writeHead(200, {
+    "content-type": "image/svg+xml; charset=utf-8",
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    "x-content-type-options": "nosniff",
+    "cache-control": "public, max-age=300",
+    "access-control-allow-origin": "*",
+  });
+  response.end(request.method === "HEAD" ? undefined : logo.svg);
+  return true;
+}
+
+function bimiLogoStatus(request, logo = readBimiLogo()) {
+  const host = String(request.headers.host || "your-site.example").replace(/[^a-z0-9.:[\]-]/gi, "");
+  return {
+    custom: Boolean(logo),
+    updatedAt: logo?.updatedAt || null,
+    bytes: logo ? Buffer.byteLength(logo.svg) : null,
+    warnings: logo ? validateBimiSvg(logo.svg).warnings : [],
+    url: `https://${host}/logo.svg`,
+    record: `v=BIMI1; l=https://${host}/logo.svg;`,
+  };
+}
+
+function handleAdminLogo(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") {
+    sendJson(response, 200, bimiLogoStatus(request));
+    return;
+  }
+  if (request.method !== "PUT" && request.method !== "DELETE") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  if (request.method === "DELETE") {
+    database.prepare("DELETE FROM app_settings WHERE key = 'bimi_logo'").run();
+    recordAdminLog("audit", request, "BIMI logo removed", null, 200, admin.username);
+    sendJson(response, 200, bimiLogoStatus(request, null));
+    return;
+  }
+  void readAuthBody(request, response, bimiLogoLimits.maxBytes * 2 + 1024).then((body) => {
+    if (!body) return;
+    const svg = typeof body.svg === "string" ? body.svg.replace(/\r\n/g, "\n") : "";
+    const { errors, warnings } = validateBimiSvg(svg);
+    if (errors.length) {
+      sendJson(response, 400, { error: errors.join(" "), errors, warnings });
+      return;
+    }
+    const saved = { svg, updatedAt: new Date().toISOString() };
+    database.prepare(`
+      INSERT INTO app_settings (key, value) VALUES ('bimi_logo', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(JSON.stringify(saved));
+    recordAdminLog("audit", request, "BIMI logo uploaded", `${Buffer.byteLength(svg)} bytes, ${warnings.length} BIMI warning(s)`, 200, admin.username);
+    sendJson(response, 200, bimiLogoStatus(request, saved));
   });
 }
 
@@ -7761,6 +7877,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/admin/logo") {
+    handleAdminLogo(request, response);
+    return;
+  }
+
   if (url.pathname === "/api/admin/about") {
     handleAdminAbout(request, response);
     return;
@@ -8071,6 +8192,9 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       sendRedirect(response, "/");
       return;
     }
+  }
+  if (url.pathname === "/logo.svg" && (request.method === "GET" || request.method === "HEAD") && serveBimiLogo(request, response)) {
+    return;
   }
   const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname;
   if (!staticFiles.has(requestedPath)) {

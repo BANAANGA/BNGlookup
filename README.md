@@ -396,6 +396,16 @@ Several tools send data to external services; these are listed under
   bold, italic, code, links, lists, quotes, rules and code blocks); HTML is shown
   as text and only `http(s)`, `mailto:` and same-site links become links. Up to
   20,000 characters; *Reset to default* restores the built-in text.
+- **BIMI logo**: Settings → General → BIMI logo uploads an SVG that replaces the
+  header logo and is served at `https://<your-site>/logo.svg`, ready for a BIMI
+  record: `default._bimi.example.com TXT "v=BIMI1; l=https://<your-site>/logo.svg;"`.
+  Uploads containing scripts, event handlers, links, embedded content, animation,
+  entities or external references are rejected (64 KB limit), and the file is
+  served with a sandboxed `default-src 'none'` CSP. The upload is also checked
+  against BIMI's SVG Tiny Portable/Secure profile (`version="1.2"
+  baseProfile="tiny-ps"`, a `<title>`, a square `viewBox`, no `<style>`, at most
+  32 KB) and any problems are listed as warnings. Mailbox providers usually also
+  require DMARC at `p=quarantine` or `p=reject`, and some a Verified Mark Certificate.
 
 Open **Admin** (Settings & users). Settings persist in SQLite at
 `/data/bnglookup.sqlite` on the `app_data` volume.
