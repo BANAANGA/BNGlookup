@@ -839,6 +839,12 @@ async function appendBlocklistCheck(name) {
   }
 }
 
+portScanInput.addEventListener("change", () => {
+  if (portScanInput.checked && !window.confirm("Are you sure you want to scan 26 common TCP ports on this domain's IP addresses?\n\nPort scans actively connect to the target and can be logged or flagged by its owner. Only scan systems you are authorized to test.")) {
+    portScanInput.checked = false;
+  }
+});
+
 function featureAllowed(feature) {
   const access = authState?.featureAccess?.[feature] || "user";
   return access === "public" || Boolean(authState?.user) && (access !== "admin" || authState.user.role === "admin");
@@ -1102,8 +1108,8 @@ function renderScanResult(data) {
       ${renderMailSecurity(emailSecurity)}
       <p class="scan-disclaimer">SPF is checked on the domain and scanned hosts, and the domain's SPF is evaluated through its includes to count DNS lookups (limit 10). DKIM checks common selectors; your mail provider may use a custom selector that is not included. The MTA-STS policy is fetched from https://mta-sts.&lt;domain&gt;.</p>
     </section>
-    ${portScanSection}
     ${hostResults}
+    ${portScanSection}
     <p class="scan-disclaimer">Subdomain discovery checks a built-in list and up to 25 names from public Certificate Transparency logs, trying crt.sh and then CertSpotter if needed, before verifying them with DNS. It does not enumerate every subdomain. The queried domain is sent to crt.sh and, if it fails, also to CertSpotter; IP geolocation is provided by ipwho.is and may be unavailable or approximate.</p>`;
   resultPanel.hidden = false;
 }
