@@ -1923,6 +1923,7 @@ function renderEmailResult(data) {
     ...(data.smtp || []).flatMap((result) => result.issues || []),
     ...(data.spf?.issues || []), ...(data.dmarc?.issues || []), ...(data.mtaSts?.issues || []),
     ...(data.dkim?.records || []).flatMap((record) => record.issues),
+    ...(data.bimi?.issues || []),
   ];
   const serious = allIssues.filter((issue) => issue.severity === "high").length;
   const bimi = data.bimi || {};
@@ -1958,11 +1959,45 @@ function renderEmailResult(data) {
       ${table(["Selector", "Typical provider", "Key", "Validation"], dkimRows) || `<p class="empty-result">${escapeHtml(`No DKIM key was found for the ${data.dkim?.checked || 0} selectors checked. Add your provider's selector above.`)}</p>`}
     </section>
     <section class="email-auth">
-      <h3>BIMI <span class="email-auth-status ${bimi.found ? "found" : "missing"}">${bimi.found ? "Found" : "Not configured"}</span></h3>
-      ${bimi.found ? `<div class="email-auth-record"><span>${escapeHtml(bimi.record)}</span></div>${renderMailIssues(bimi.issues)}` : '<p class="empty-result">No BIMI record (default._bimi). BIMI shows your logo in supporting inboxes once DMARC is enforced.</p>'}
+      <h3>BIMI ${renderBimiStatus(bimi)}</h3>
+      ${bimi.error ? `<p class="detail-notice">${escapeHtml(bimi.error)}</p>` : bimi.found ? renderBimi(bimi) : '<p class="empty-result">No BIMI record (default._bimi). BIMI shows your logo in supporting inboxes once DMARC is enforced.</p>'}
     </section>
     <p class="scan-disclaimer">${escapeHtml(`Completed in ${data.durationMs} ms.`)}</p>`;
   resultPanel.hidden = false;
+}
+
+function renderBimiStatus(bimi) {
+  if (!bimi.found) return '<span class="email-auth-status missing">Not configured</span>';
+  const serious = (bimi.issues || []).some((issue) => issue.severity === "high");
+  const label = serious ? "Found · problems" : bimi.certificateCheck?.kind ? `Ready · ${bimi.certificateCheck.kind}` : "Found";
+  return `<span class="email-auth-status ${serious ? "danger" : "found"}">${escapeHtml(label)}</span>`;
+}
+
+function renderBimi(bimi) {
+  const logo = bimi.logoCheck;
+  const certificate = bimi.certificateCheck;
+  const yesNo = (value) => (value === null || value === undefined ? "" : value ? "Yes" : "No");
+  return `
+    <div class="email-auth-record"><span>${escapeHtml(bimi.record)}</span></div>
+    <div class="bimi-result">
+      ${logo?.preview ? `<img class="bimi-result-logo" src="${escapeHtml(logo.preview)}" alt="BIMI logo" width="96" height="96">` : ""}
+      <div class="detail-list">
+        ${renderDetail("Logo (l=)", bimi.logo || "None")}
+        ${logo ? renderDetail("Logo file", logo.error ? `Not fetched: ${logo.error}` : `${(logo.bytes / 1024).toFixed(1)} KB · ${logo.contentType || "no content type"}`) : ""}
+        ${renderDetail("DMARC enforced", yesNo(bimi.dmarcReady))}
+        ${renderDetail("Mark certificate (a=)", bimi.certificate || "None")}
+        ${certificate && !certificate.error ? `
+          ${renderDetail("Certificate type", certificate.kind ? `${certificate.kind}${certificate.markType ? ` (${certificate.markType})` : ""}` : "Unknown")}
+          ${renderDetail("Organization", certificate.subject)}
+          ${renderDetail("Trademark", certificate.trademark)}
+          ${renderDetail("Issuer", certificate.issuer)}
+          ${renderDetail("Domains", (certificate.names || []).join(", "))}
+          ${renderDetail("Expires", `${new Date(certificate.validTo).toLocaleDateString()} (${certificate.daysRemaining} days)`)}
+          ${renderDetail("Logo matches certificate", yesNo(certificate.embeddedLogoMatches))}` : ""}
+      </div>
+    </div>
+    ${(bimi.issues || []).length ? renderMailIssues(bimi.issues) : '<p class="dnssec-ok">No BIMI problems found.</p>'}
+    <p class="scan-disclaimer">Checks the default._bimi record, fetches the logo and mark certificate, validates the logo against SVG Tiny PS, compares it with the logo embedded in the certificate and checks that DMARC is enforced. The certificate chain is not checked against the BIMI root list.</p>`;
 }
 
 function renderPropagationResult(data) {
