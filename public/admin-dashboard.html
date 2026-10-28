@@ -75,6 +75,39 @@
         <article class="stats-card"><span>Failed requests (24 h)</span><strong id="a-failures">—</strong><small id="a-logins"></small></article>
         <article class="stats-card"><span>Users / sessions</span><strong id="a-users">—</strong><small id="a-logs"></small></article>
       </section>
+      <section class="dash-insights" aria-label="Insights">
+        <div class="stats-toolbar dash-insights-heading">
+          <h2>Insights</h2>
+          <label for="insights-range">Range</label>
+          <select id="insights-range">
+            <option value="7">Last 7 days</option>
+            <option value="30" selected>Last 30 days</option>
+            <option value="90">Last 90 days</option>
+          </select>
+          <span class="stats-period" id="insights-status"></span>
+        </div>
+        <section class="stats-cards" aria-label="Insight totals">
+          <article class="stats-card"><span>Domains rated</span><strong id="i-rated">—</strong><small id="i-rated-detail"></small></article>
+          <article class="stats-card"><span>Average web header score</span><strong id="i-web">—</strong><small id="i-web-detail"></small></article>
+          <article class="stats-card"><span>Average email score</span><strong id="i-email">—</strong><small id="i-email-detail"></small></article>
+          <article class="stats-card"><span>Monitors</span><strong id="i-monitors">—</strong><small id="i-monitors-detail"></small></article>
+        </section>
+        <div class="dash-rating-grid" id="dash-ratings"></div>
+        <section class="stats-grid dash-grid">
+          <article class="account-card admin-card stats-panel">
+            <h2>Monitors needing attention</h2>
+            <div id="dash-monitors"></div>
+          </article>
+          <article class="account-card admin-card stats-panel">
+            <h2>New tool usage</h2>
+            <div id="dash-usage" class="stats-top-queries"></div>
+          </article>
+        </section>
+        <article class="account-card admin-card stats-panel dash-takeover">
+          <h2>Subdomain takeover risks</h2>
+          <div id="dash-takeover"></div>
+        </article>
+      </section>
       <section class="stats-grid dash-grid">
         <article class="account-card admin-card stats-panel">
           <h2>System</h2>

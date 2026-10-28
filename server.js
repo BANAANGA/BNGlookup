@@ -264,6 +264,16 @@ database.exec(`
     message TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS monitor_events_monitor ON monitor_events(monitor_id, id DESC);
+  CREATE TABLE IF NOT EXISTS domain_ratings (
+    domain TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    grade TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    checked_at INTEGER NOT NULL,
+    PRIMARY KEY (domain, kind)
+  );
+  CREATE INDEX IF NOT EXISTS domain_ratings_kind ON domain_ratings(kind, checked_at);
   CREATE INDEX IF NOT EXISTS shared_results_expiry ON shared_results(expires_at);
   CREATE TABLE IF NOT EXISTS public_lookup_usage (
     client_hash TEXT NOT NULL,
@@ -1859,6 +1869,27 @@ function fetchPinnedHttps(hostname, address, requestPath, { timeoutMs = 6000, ma
   });
 }
 
+// Latest result per domain and check type, for the admin dashboard's best/worst lists.
+const ratingKinds = { web: "Web security headers", tls: "TLS grade", email: "Email security", takeover: "Subdomain takeover risk" };
+const ratingRetentionMs = 180 * 86400000;
+const tlsGradeScores = { "A+": 100, A: 95, "A-": 90, B: 80, C: 70, D: 60, E: 50, F: 35, T: 25, M: 25 };
+
+function gradeForScore(score) {
+  return score >= 95 ? "A+" : score >= 85 ? "A" : score >= 70 ? "B" : score >= 55 ? "C" : score >= 40 ? "D" : "F";
+}
+
+function recordDomainRating(kind, domain, grade, score, detail = "") {
+  if (!domain || !grade || !Number.isFinite(score)) return;
+  try {
+    database.prepare(`
+      INSERT INTO domain_ratings (domain, kind, grade, score, detail, checked_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(domain, kind) DO UPDATE SET grade = excluded.grade, score = excluded.score, detail = excluded.detail, checked_at = excluded.checked_at
+    `).run(String(domain).toLowerCase().slice(0, 253), kind, String(grade).slice(0, 8), Math.round(score), String(detail).slice(0, 300), Date.now());
+  } catch (error) {
+    console.error("Could not record rating:", error.message);
+  }
+}
+
 const webCheckLimits = { redirects: 10, bodyBytes: 262144, timeoutMs: 10000 };
 const webUserAgent = "Mozilla/5.0 (compatible; BNGlookup web check)";
 
@@ -2189,7 +2220,13 @@ async function webCheck(request, url, response) {
     return;
   }
   try {
-    sendJson(response, 200, await runWebCheck(rawName, allowLocal));
+    const result = await runWebCheck(rawName, allowLocal);
+    if (result.grade && result.finalUrl) {
+      const failed = result.checks.filter((check) => check.state === "fail").map((check) => check.label);
+      recordDomainRating("web", new URL(result.finalUrl).hostname.replace(/^\[|\]$/g, ""), result.grade, result.score,
+        failed.length ? `Missing: ${failed.join(", ")}` : "All key headers present");
+    }
+    sendJson(response, 200, result);
   } catch (error) {
     if (error.statusCode) sendJson(response, error.statusCode, { error: error.message });
     else {
@@ -2888,6 +2925,14 @@ async function emailCheck(request, url, response) {
       }
       if (result.tls && /^TLSv1(\.1)?$/.test(result.tls.protocol || "")) result.issues.push({ severity: "medium", message: `Only ${result.tls.protocol} was negotiated; TLS 1.2 or newer is expected.` });
     }
+    const ratedIssues = [
+      ...smtp.flatMap((result) => result.issues || []), ...(spf.issues || []), ...(dmarc.issues || []), ...(mtaSts.issues || []),
+      ...(tlsRpt.issues || []), ...dkimResults.filter(Boolean).flatMap((record) => record.issues || []), ...(bimi.issues || []),
+    ];
+    const severityCount = (level) => ratedIssues.filter((issue) => issue.severity === level).length;
+    const emailScore = Math.max(0, 100 - severityCount("high") * 15 - severityCount("medium") * 6 - severityCount("low") * 2);
+    recordDomainRating("email", domain, gradeForScore(emailScore), emailScore,
+      `${severityCount("high")} serious, ${severityCount("medium") + severityCount("low")} other${dmarc.policy ? ` · DMARC p=${dmarc.policy}` : dmarc.found ? "" : " · no DMARC"}`);
     sendJson(response, 200, {
       domain,
       inputWasEmail,
@@ -4799,6 +4844,13 @@ async function bulkScan(request, url, response) {
     : null;
   const registrationResult = await registrationPromise;
 
+  const takeover = await takeoverPromise;
+  for (const finding of takeover?.findings || []) {
+    if (finding.status !== "ok") {
+      recordDomainRating("takeover", finding.host, finding.status === "vulnerable" ? "risk" : "dangling", finding.status === "vulnerable" ? 0 : 30,
+        `${finding.cname}${finding.service ? ` (${finding.service})` : ""}`);
+    }
+  }
   sendJson(response, 200, {
     domain,
     recordTypes: scanRecordTypes,
@@ -4815,7 +4867,7 @@ async function bulkScan(request, url, response) {
     registryUrl: registrationResult.registryUrl || null,
     dnssec: await dnssecPromise,
     blocklists: await blocklistPromise,
-    takeover: await takeoverPromise,
+    takeover,
     emailSecurity: {
       spfRecords,
       rootSpfFound: spfRecords.some((record) => record.name === domain),
@@ -7033,6 +7085,68 @@ function handleAdminSystem(request, response) {
   });
 }
 
+function handleAdminInsights(request, url, response) {
+  if (!requireAdmin(request, response)) return;
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  const rawDays = url.searchParams.get("days") || "30";
+  if (!["7", "30", "90"].includes(rawDays)) {
+    sendJson(response, 400, { error: "Choose a range of 7, 30, or 90 days." });
+    return;
+  }
+  const since = Date.now() - Number(rawDays) * 86400000;
+  database.prepare("DELETE FROM domain_ratings WHERE checked_at < ?").run(Date.now() - ratingRetentionMs);
+  const describe = (row) => ({ domain: row.domain, grade: row.grade, score: row.score, detail: row.detail, checkedAt: new Date(row.checked_at).toISOString() });
+  const ratings = {};
+  for (const kind of ["web", "tls", "email"]) {
+    const summary = database.prepare("SELECT COUNT(*) AS count, AVG(score) AS average FROM domain_ratings WHERE kind = ? AND checked_at >= ?").get(kind, since);
+    ratings[kind] = {
+      label: ratingKinds[kind],
+      count: summary.count,
+      average: summary.average === null ? null : Math.round(summary.average),
+      grades: Object.fromEntries(database.prepare("SELECT grade, COUNT(*) AS count FROM domain_ratings WHERE kind = ? AND checked_at >= ? GROUP BY grade").all(kind, since).map((row) => [row.grade, row.count])),
+      best: database.prepare("SELECT * FROM domain_ratings WHERE kind = ? AND checked_at >= ? ORDER BY score DESC, checked_at DESC LIMIT 5").all(kind, since).map(describe),
+      worst: database.prepare("SELECT * FROM domain_ratings WHERE kind = ? AND checked_at >= ? ORDER BY score ASC, checked_at DESC LIMIT 5").all(kind, since).map(describe),
+    };
+  }
+  const takeoverRisks = database.prepare("SELECT * FROM domain_ratings WHERE kind = 'takeover' AND checked_at >= ? ORDER BY score ASC, checked_at DESC LIMIT 10").all(since).map(describe);
+  const cutoff = new Date(since).toISOString().replace("T", " ").slice(0, 19);
+  const usageActions = ["Web check", "Email check", "Email header analysis", "DMARC report sources", "Record builder import", "Bulk domain check", "Magic scan", "TLS test and grade"];
+  const usageRows = database.prepare(`
+    SELECT action, COUNT(*) AS count FROM admin_logs
+    WHERE category = 'query' AND created_at >= ? AND action IN (${usageActions.map(() => "?").join(", ")})
+    GROUP BY action
+  `).all(cutoff, ...usageActions);
+  const usage = usageActions.map((action) => ({ action, count: usageRows.find((row) => row.action === action)?.count || 0 }))
+    .sort((left, right) => right.count - left.count);
+  const monitorRows = database.prepare("SELECT kind, enabled, last_status AS status FROM monitors").all();
+  const countBy = (rows, key) => rows.reduce((counts, row) => ({ ...counts, [row[key] || "pending"]: (counts[row[key] || "pending"] || 0) + 1 }), {});
+  const eventCounts = Object.fromEntries(database.prepare("SELECT level, COUNT(*) AS count FROM monitor_events WHERE created_at >= ? GROUP BY level").all(since).map((row) => [row.level, row.count]));
+  const failing = database.prepare(`
+    SELECT monitors.kind, monitors.target, monitors.last_status AS status, monitors.last_summary AS summary, monitors.last_change_at AS changedAt, users.username
+    FROM monitors JOIN users ON users.id = monitors.user_id
+    WHERE monitors.enabled = 1 AND monitors.last_status IN ('fail', 'warn')
+    ORDER BY CASE monitors.last_status WHEN 'fail' THEN 0 ELSE 1 END, monitors.last_change_at DESC LIMIT 10
+  `).all().map((row) => ({ ...row, kindLabel: monitorKinds[row.kind] || row.kind, changedAt: row.changedAt ? new Date(row.changedAt).toISOString() : null }));
+  sendJson(response, 200, {
+    days: Number(rawDays),
+    ratings,
+    takeoverRisks,
+    usage,
+    monitors: {
+      total: monitorRows.length,
+      enabled: monitorRows.filter((row) => row.enabled).length,
+      byStatus: countBy(monitorRows.filter((row) => row.enabled), "status"),
+      byKind: Object.fromEntries(Object.entries(countBy(monitorRows, "kind")).map(([kind, count]) => [monitorKinds[kind] || kind, count])),
+      alerts: eventCounts.alert || 0,
+      changes: eventCounts.change || 0,
+      failing,
+    },
+  });
+}
+
 function handleAdminStats(request, url, response) {
   if (!requireAdmin(request, response)) return;
   if (request.method !== "GET") {
@@ -7696,6 +7810,11 @@ async function startTlsGrade(request, response) {
     tlsGradeJobs.set(id, job);
     runTestssl(job, target, eligible[0], port).then((outcome) => {
       Object.assign(job, outcome, { finishedAt: Date.now() });
+      const grade = outcome?.result?.grade;
+      if (grade && tlsGradeScores[grade] !== undefined) {
+        recordDomainRating("tls", port === 443 ? target : `${target}:${port}`, grade, outcome.result.scores?.final ?? tlsGradeScores[grade],
+          outcome.result.capReasons?.[0] || `Final score ${outcome.result.scores?.final ?? "?"}`);
+      }
     }).finally(() => releaseHeavyJob("tlsGrade"));
     sendJson(response, 202, { id, target, address: eligible[0], port });
   } catch (error) {
@@ -9099,6 +9218,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
 
   if (url.pathname === "/api/admin/version") {
     void handleAdminVersion(request, url, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/insights") {
+    handleAdminInsights(request, url, response);
     return;
   }
 

@@ -1446,3 +1446,29 @@ footer a:hover { color: #e4ffef; }
   .monitor-event { grid-template-columns: 1fr; gap: 2px; }
   .builder-output-row { grid-template-columns: 1fr; gap: 2px; }
 }
+
+/* Dashboard insights */
+.dash-insights { margin: 22px 0; }
+.dash-insights-heading h2 { margin: 0 auto 0 0; color: #f4f4f4; font-size: 20px; }
+.dash-rating-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 14px 0; }
+.rating-panel h3 { margin: 16px 0 8px; color: #9ce9b9; font-size: 13px; }
+.rating-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px; }
+.rating-heading span { color: #888; font-size: 12px; }
+.grade-bar { display: flex; height: 20px; margin-top: 10px; overflow: hidden; border-radius: 6px; background: #1a1a1a; }
+.grade-bar > span { display: grid; flex: 0 0 auto; place-items: center; min-width: 3px; color: #0b0b0b; font-size: 11px; font-weight: 700; }
+.grade-bar > .good { background: #3fbf77; }
+.grade-bar > .fair { background: #d9a441; }
+.grade-bar > .poor { background: #e06767; }
+.rating-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.rating-list li { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 9px; border: 1px solid #222; border-radius: 7px; background: #0d0d0d; }
+.rating-grade { display: grid; place-items: center; height: 26px; border-radius: 6px; font-family: Manrope, sans-serif; font-size: 13px; font-weight: 800; }
+.rating-grade.good { color: #a9e5c5; background: #14251b; }
+.rating-grade.fair { color: #f0cb86; background: #2a2112; }
+.rating-grade.poor { color: #ffb4b4; background: #2c1515; }
+.rating-domain { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 13px; }
+.rating-domain a, .rating-domain strong { overflow: hidden; color: #e8e8e8; text-overflow: ellipsis; white-space: nowrap; }
+.rating-domain a:hover { color: #9ce9b9; }
+.rating-domain small, .rating-meta small { overflow: hidden; color: #7c7c7c; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.rating-meta { display: flex; flex-direction: column; align-items: flex-end; color: #d6d6d6; font-size: 13px; font-weight: 700; }
+.dash-takeover { margin: 14px 0 0; }
+@media (max-width: 900px) { .dash-rating-grid { grid-template-columns: minmax(0, 1fr); } }
