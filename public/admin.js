@@ -178,7 +178,9 @@ function renderUsers(users) {
       <input class="user-email" name="email" type="email" maxlength="254" value="${escapeHtml(user.email || "")}" placeholder="Email (optional)" autocomplete="off" aria-label="Email address for ${escapeHtml(user.username)}">
       <label class="user-active"><input type="checkbox" name="active" ${user.active ? "checked" : ""}> Active</label>
       <input class="user-reset-password" name="password" type="password" minlength="12" maxlength="128" placeholder="New password (optional)" autocomplete="new-password" aria-label="Set a new password for ${escapeHtml(user.username)}">
+      <span class="user-2fa ${user.twoFactor ? "on" : ""}" title="Two-factor login">${user.twoFactor ? "2FA on" : "2FA off"}</span>
       <button type="submit">Save</button>
+      ${user.twoFactor ? `<button type="button" class="user-reset-2fa" data-reset-2fa="${user.id}" data-name="${escapeHtml(user.username)}">Reset 2FA</button>` : ""}
       <button type="button" class="user-delete" data-delete="${user.id}" data-name="${escapeHtml(user.username)}">Remove</button>
     </form>
   `).join("");
@@ -203,6 +205,18 @@ function renderUsers(users) {
 }
 
 userList.addEventListener("click", async (event) => {
+  const reset = event.target.closest("[data-reset-2fa]");
+  if (reset) {
+    if (!window.confirm(`Turn off two-factor login for "${reset.dataset.name}"? Use this when they lost their phone and recovery codes; they can set it up again afterwards.`)) return;
+    try {
+      await api(`/api/admin/users/${reset.dataset.reset2fa}`, { method: "PATCH", body: JSON.stringify({ resetTwoFactor: true }) });
+      showAdminSuccess("Two-factor login was turned off for this user.");
+      await loadUsers();
+    } catch (error) {
+      showAdminError(error.message);
+    }
+    return;
+  }
   const button = event.target.closest("[data-delete]");
   if (!button) return;
   if (!window.confirm(`Permanently remove user "${button.dataset.name}"? This cannot be undone. To keep the account, disable it instead.`)) return;

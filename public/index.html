@@ -50,7 +50,7 @@
           <button class="mode-tab" id="asn-tab" type="button" role="tab" aria-selected="false" data-mode="asn" hidden>
             <span aria-hidden="true">⌘</span> ASN
           </button>
-          <button class="mode-tab" id="email-tab" type="button" role="tab" aria-selected="false" data-mode="email" hidden>
+          <button class="mode-tab" id="email-tab" type="button" role="tab" aria-selected="false" data-mode="email" data-group="email" hidden>
             <span aria-hidden="true">✉</span> Email
           </button>
           <button class="mode-tab" id="propagation-tab" type="button" role="tab" aria-selected="false" data-mode="propagation" hidden>
@@ -67,6 +67,12 @@
           </button>
           <button class="mode-tab" id="web-tab" type="button" role="tab" aria-selected="false" data-mode="web" hidden>
             <span aria-hidden="true">⌂</span> Web check
+          </button>
+          <button class="mode-tab" id="security-tab" type="button" role="tab" aria-selected="false" data-mode="security" data-group="security" hidden>
+            <span aria-hidden="true">⛨</span> Security
+          </button>
+          <button class="mode-tab" id="ip-calc-tab" type="button" role="tab" aria-selected="false" data-mode="ip-calc" hidden>
+            <span aria-hidden="true">⊞</span> IP calculator
           </button>
           <button class="mode-tab" id="ping-scan-tab" type="button" role="tab" aria-selected="false" data-mode="ping-scan" hidden>
             <span aria-hidden="true">◎</span> Ping scan
@@ -111,12 +117,7 @@
         </p>
         <p class="error-message" id="error-message" role="alert" hidden></p>
         <form id="lookup-form" hidden>
-          <div class="email-subtabs" id="email-subtabs" role="tablist" aria-label="Email tools" hidden>
-            <button class="email-subtab" type="button" role="tab" data-mode="email">Domain check</button>
-            <button class="email-subtab" type="button" role="tab" data-mode="email-headers">Header analyzer</button>
-            <button class="email-subtab" type="button" role="tab" data-mode="dmarc-reports">DMARC reports</button>
-            <button class="email-subtab" type="button" role="tab" data-mode="record-builder">Record builder</button>
-          </div>
+          <div class="email-subtabs" id="mode-subtabs" role="tablist" aria-label="Tools in this group" hidden></div>
           <label class="field-label" id="name-label" for="name-input">Lookup</label>
           <div class="search-row">
             <div class="input-wrap" id="primary-input-wrap">
@@ -162,6 +163,7 @@
             <label id="scan-ssl-option"><input id="scan-ssl-input" type="checkbox"> Also run SSLscan on port 443 (TLS handshake and certificate)</label>
             <label id="scan-tls-grade-option"><input id="scan-tls-grade-input" type="checkbox"> …and the full TLS test with a grade (testssl.sh, about one to three minutes)</label>
             <label id="scan-web-option"><input id="scan-web-input" type="checkbox"> Also run the Web check (redirects, security headers, HTTP/2 and HTTP/3)</label>
+            <label id="scan-dns-health-option"><input id="scan-dns-health-input" type="checkbox"> Also run the DNS health check (name servers, SOA, zone transfer, open recursion)</label>
             <span>These run after the DNS scan and are added to the results, the share link and your history.</span>
           </div>
           <div class="port-scan-control" id="port-scan-control" hidden>
@@ -270,6 +272,7 @@
           <div class="ping-monitor-summary" id="ping-monitor-summary"></div>
         </section>
         <div class="share-results" id="share-results" hidden>
+          <button type="button" id="print-result">🖨 Print / save as PDF</button>
           <button type="button" id="share-results-button">🔗 Create a share link</button>
           <input id="share-results-link" type="text" readonly aria-label="Share link" hidden>
           <span id="share-results-status" role="status"></span>

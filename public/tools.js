@@ -83,6 +83,23 @@ async function runToolMode(toolMode, lookupName) {
     renderDmarcReportResult(data);
     return { data, subject: `${data.domains.join(", ") || "reports"} (${data.reports.length} reports)` };
   }
+  const getTools = {
+    "dns-health": ["/api/dns-health", renderDnsHealthResult, (data) => data.zone || data.domain],
+    reputation: ["/api/reputation", renderReputationResult, (data) => data.target],
+    lookalike: ["/api/lookalike", renderLookalikeResult, (data) => data.domain],
+    "spf-flatten": ["/api/spf-flatten", renderSpfFlattenResult, (data) => data.domain],
+  };
+  if (getTools[toolMode]) {
+    const [path, render, subject] = getTools[toolMode];
+    const data = await getJson(`${path}?${new URLSearchParams({ name: lookupName })}`);
+    render(data);
+    return { data, subject: subject(data) };
+  }
+  if (toolMode === "ip-calc") {
+    const data = calculateIp(lookupName);
+    renderIpCalcResult(data);
+    return { data, subject: data.input };
+  }
   throw new Error("Unknown tool.");
 }
 
@@ -146,6 +163,7 @@ function webCheckHtml(data) {
       <p class="scan-disclaimer">The grade starts at 100 and deducts points for missing or weak headers on the final page. It covers HTTP response headers only, not the site's code.</p>
     </section>
     ${cookieRows.length ? `<section class="email-auth"><h3>Cookies set by the page</h3>${dataTable(["Cookie", "Secure", "HttpOnly", "SameSite"], cookieRows)}</section>` : ""}
+    ${webExtrasHtml(data)}
     <section class="email-auth">
       <h3>Connection</h3>
       ${renderFacts([
@@ -811,4 +829,335 @@ function initRecordBuilder(panel) {
     });
   }
   refresh();
+}
+
+// ---------------------------------------------------------------- Web check: security.txt, robots.txt, sitemap, mixed content
+
+function webExtrasHtml(data) {
+  if (!data.securityTxt && !data.robots) return "";
+  const security = data.securityTxt || {};
+  const robots = data.robots || {};
+  const sitemap = data.sitemap || {};
+  const mixed = data.mixedContent || [];
+  const row = (label, state, value, detail = "", okLabel = "Found") => `
+    <tr><td>${escapeHtml(label)}</td><td>${pill(state, { ok: okLabel, warn: "Check", fail: "Problem", info: "Not found" }[state] || state)}</td><td>${escapeHtml(value)}${detail ? `<br><span class="trace-silent">${escapeHtml(detail)}</span>` : ""}</td></tr>`;
+  const rows = [
+    row("security.txt", security.found ? (security.issues?.length ? "warn" : "ok") : "info",
+      security.found ? `Contact: ${(security.contact || []).join(", ") || "none"}` : "No /.well-known/security.txt",
+      security.found ? [security.expires ? `Expires ${security.expires.slice(0, 10)}` : "No Expires field", security.policy ? `Policy ${security.policy}` : null, security.signed ? "PGP signed" : null].filter(Boolean).join(" · ") : "Lets security researchers know how to report problems (RFC 9116)."),
+    row("robots.txt", robots.found ? (robots.blocksAll ? "warn" : "ok") : "info",
+      robots.found ? `${robots.lines} rule line(s)${robots.blocksAll ? " · blocks all crawlers" : ""}` : "No robots.txt",
+      robots.sitemaps?.length ? `Sitemaps: ${robots.sitemaps.join(", ")}` : ""),
+    row("Sitemap", sitemap.found ? "ok" : "info", sitemap.found ? sitemap.url : "No sitemap found", sitemap.entries ? `${sitemap.entries} entries` : ""),
+  ];
+  if (data.https) rows.push(row("Mixed content", mixed.length ? "fail" : "ok", mixed.length ? `${mixed.length} resource(s) over plain HTTP` : "None found on the page", mixed.slice(0, 5).join(", "), "None"));
+  return `<section class="email-auth"><h3>Site files and content</h3>${dataTable(["Check", "Result", "Details"], rows)}</section>`;
+}
+
+// ---------------------------------------------------------------- DNS health
+
+function dnsHealthHtml(data) {
+  const stateLabel = { pass: "Pass", warn: "Warning", fail: "Problem", info: "Info" };
+  if (data.error) {
+    return `<div class="result-heading"><div><p class="eyebrow">DNS HEALTH</p><h2>${copyableResult(data.domain)}</h2></div></div><p class="detail-notice">${escapeHtml(data.error)}</p>`;
+  }
+  const failed = data.checks.filter((check) => check.state === "fail").length;
+  const warned = data.checks.filter((check) => check.state === "warn").length;
+  const checkRows = data.checks.map((check) => `
+    <tr><td>${escapeHtml(check.label)}</td><td>${pill(check.state, stateLabel[check.state])}</td><td>${escapeHtml(check.message)}${check.detail ? `<br><span class="trace-silent">${escapeHtml(check.detail)}</span>` : ""}</td></tr>`);
+  const serverRows = data.nameservers.flatMap((entry) => (entry.results.length ? entry.results : [{ address: entry.addresses[0] || "", error: entry.error }]).map((result, index) => `
+    <tr>
+      <td>${index ? "" : `${copyableResult(entry.host)}${entry.inParent === false ? '<br><span class="trace-silent">not in parent</span>' : ""}${!entry.inZone ? '<br><span class="trace-silent">not in zone</span>' : ""}`}</td>
+      <td>${escapeHtml(result.address || "")}</td>
+      <td>${result.error ? `<span class="dnssec-bad">${escapeHtml(result.error)}</span>` : pill(result.authoritative ? "ok" : "fail", result.authoritative ? "Authoritative" : `Not authoritative (${result.rcode})`)}</td>
+      <td>${escapeHtml(result.serial ?? "")}</td>
+      <td>${result.error ? "" : `${result.tcp ? "✓" : "✕"}`}</td>
+      <td>${result.error ? "" : result.openRecursion ? pill("fail", "Open") : "No"}</td>
+      <td>${result.error ? "" : result.zoneTransfer ? pill("fail", "Allowed") : "Refused"}</td>
+      <td>${result.timeMs !== undefined ? `${escapeHtml(result.timeMs)} ms` : ""}</td>
+    </tr>`));
+  return `
+    <div class="result-heading">
+      <div><p class="eyebrow">DNS HEALTH</p><h2>${copyableResult(data.zone)}</h2>${data.zone !== data.domain ? `<p class="web-title">${escapeHtml(`Zone that contains ${data.domain}`)}</p>` : ""}</div>
+      <span class="status-badge ${failed ? "warning" : "success"}">${escapeHtml(failed ? `${failed} problem(s)` : warned ? `${warned} warning(s)` : "Healthy")}</span>
+    </div>
+    ${scoreTiles([
+      ["Name servers", data.nameservers.length >= 2 ? "ok" : "bad", String(data.nameservers.length)],
+      ["Delegation", ({ pass: "ok", warn: "warn", fail: "bad" })[data.checks.find((check) => check.id === "delegation")?.state] || "none", data.parent ? `Parent ${data.parent.server}` : "Not read"],
+      ["Zone transfer", data.checks.find((check) => check.id === "axfr")?.state === "fail" ? "bad" : "ok", data.checks.find((check) => check.id === "axfr")?.state === "fail" ? "Open" : "Refused"],
+      ["Open recursion", data.checks.find((check) => check.id === "recursion")?.state === "fail" ? "bad" : "ok", data.checks.find((check) => check.id === "recursion")?.state === "fail" ? "Yes" : "No"],
+    ])}
+    ${renderMailFixList([["", data.issues]])}
+    <section class="email-auth"><h3>Checks</h3>${dataTable(["Check", "Result", "Details"], checkRows, "web-checks-table")}</section>
+    <section class="email-auth"><h3>Name servers</h3>${dataTable(["Name server", "Address", "Answer", "SOA serial", "TCP", "Recursion", "AXFR", "Time"], serverRows)}
+      <p class="scan-disclaimer">Each name server is asked directly, without recursion, for the zone's SOA and NS records over UDP and TCP. Open recursion is tested with a query for another domain; a zone transfer (AXFR) is attempted over TCP.</p>
+    </section>
+    ${data.soa ? `<section class="email-auth"><h3>SOA record</h3>${renderFacts([["Primary", data.soa.mname], ["Contact", data.soa.rname], ["Serial", data.soa.serial], ["Refresh", `${data.soa.refresh} s`], ["Retry", `${data.soa.retry} s`], ["Expire", `${data.soa.expire} s`], ["Negative TTL", `${data.soa.minimum} s`]])}</section>` : ""}
+    <p class="scan-disclaimer">${escapeHtml(`Completed in ${(data.durationMs / 1000).toFixed(1)} s.`)}</p>`;
+}
+
+function renderDnsHealthResult(data) {
+  resultPanel.innerHTML = dnsHealthHtml(data);
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- Reputation
+
+function renderReputationResult(data) {
+  const labels = { flagged: ["fail", "Flagged"], suspicious: ["warn", "Suspicious"], clean: ["ok", "Clean"], error: ["info", "Error"], off: ["info", "Not configured"] };
+  const rows = data.sources.map((source) => {
+    const [state, label] = labels[source.state] || labels.error;
+    return `<tr><td>${escapeHtml(source.source)}</td><td>${pill(state, label)}</td><td>${escapeHtml(source.detail)}${source.link && /^https:\/\//.test(source.link) ? ` · <a href="${escapeHtml(source.link)}" target="_blank" rel="noopener noreferrer">details</a>` : ""}</td></tr>`;
+  });
+  const verdict = { malicious: ["bad", "Malicious", "warning"], suspicious: ["warn", "Suspicious", "warning"], clean: ["ok", "No threats found", "success"] }[data.verdict];
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">REPUTATION</p><h2>${copyableResult(data.target)}</h2>${data.addresses.length && !data.isAddress ? `<p class="web-title">${escapeHtml(`Resolves to ${data.addresses.join(", ")}`)}</p>` : ""}</div>
+      <span class="status-badge ${verdict[2]}">${escapeHtml(verdict[1])}</span>
+    </div>
+    ${scoreTiles([
+      ["Verdict", verdict[0], verdict[1]],
+      ["Flagged by", data.flagged ? "bad" : "ok", `${data.flagged} of ${data.checked} sources`],
+      ["Domain exists", data.exists ? "ok" : "warn", data.exists ? "Yes" : "No answer"],
+    ])}
+    ${!data.exists ? '<p class="detail-notice">The domain does not resolve, so filtering resolvers cannot show whether they block it.</p>' : ""}
+    <section class="email-auth"><h3>Sources</h3>${dataTable(["Source", "Result", "Details"], rows, "web-checks-table")}
+      <p class="scan-disclaimer">Filtering resolvers (Quad9, Cloudflare for Families, DNS4EU) are compared with an unfiltered answer; a block means the service considers the domain malicious. Blocklists cover spam sources. URLhaus, VirusTotal and Google Safe Browsing are used when the administrator has configured their API keys. A clean result is not a guarantee.</p>
+    </section>`;
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- Lookalike domains
+
+function renderLookalikeResult(data) {
+  const riskLabels = { high: ["fail", "Mail server"], medium: ["warn", "Website"], low: ["info", "Registered"] };
+  const rows = data.registered.map((entry) => {
+    const [state, label] = riskLabels[entry.risk];
+    return `
+      <tr>
+        <td>${copyableResult(entry.name)}</td>
+        <td>${escapeHtml(entry.kind)}</td>
+        <td>${pill(state, label)}</td>
+        <td>${escapeHtml(entry.addresses.join(", "))}</td>
+        <td>${escapeHtml(entry.mx.join(", "))}</td>
+        <td>${escapeHtml(entry.nameservers.join(", "))}</td>
+      </tr>`;
+  });
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">LOOKALIKE DOMAINS</p><h2>${copyableResult(data.domain)}</h2><p class="web-title">${escapeHtml(`${data.checked} variants checked of ${data.base}`)}</p></div>
+      <span class="status-badge ${data.counts.high ? "warning" : "success"}">${escapeHtml(`${data.registered.length} registered`)}</span>
+    </div>
+    ${scoreTiles([
+      ["With mail servers", data.counts.high ? "bad" : "ok", String(data.counts.high)],
+      ["With websites", data.counts.medium ? "warn" : "ok", String(data.counts.medium)],
+      ["Registered only", "none", String(data.counts.low)],
+      ["Not registered", "ok", String(data.checked - data.registered.length - data.failed)],
+    ])}
+    ${data.failed ? `<p class="detail-notice">${escapeHtml(`${data.failed} variant(s) could not be checked because the DNS provider did not answer.`)}</p>` : ""}
+    <section class="email-auth"><h3>Registered lookalikes</h3>
+      ${dataTable(["Domain", "Variant", "Active", "Addresses", "Mail (MX)", "Name servers"], rows) || '<p class="empty-result">None of the variants are registered.</p>'}
+      <p class="scan-disclaimer">Variants: ${escapeHtml(data.kinds.join(", "))}. Domains with mail servers can send phishing mail that looks like yours. Some lookalikes are registered defensively by the brand owner, or are unrelated sites; check before acting. Use "Monitor this" to be told about new certificates for your own domain.</p>
+    </section>`;
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- SPF flattener
+
+function renderSpfFlattenResult(data) {
+  const records = data.records.map((record) => `
+    <div class="builder-output">
+      <div class="builder-output-row"><span>Name</span>${copyableResult(record.name)}</div>
+      <div class="builder-output-row"><span>Type</span><strong>TXT</strong></div>
+      <div class="builder-output-row"><span>Value</span>${copyableResult(record.value, "builder-value")}</div>
+    </div>`).join("");
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">SPF FLATTENER</p><h2>${copyableResult(data.domain)}</h2></div>
+      <span class="status-badge ${data.originalLookups > 10 ? "warning" : "success"}">${escapeHtml(`${data.originalLookups} → ${data.flattenedLookups} lookups`)}</span>
+    </div>
+    ${scoreTiles([
+      ["Current lookups", data.originalLookups > 10 ? "bad" : data.originalLookups >= 8 ? "warn" : "ok", `${data.originalLookups}/10`],
+      ["After flattening", "ok", `${data.flattenedLookups}/10`],
+      ["IPv4 ranges", "ok", String(data.ip4)],
+      ["IPv6 ranges", "ok", String(data.ip6)],
+    ])}
+    ${data.original ? `<section class="email-auth"><h3>Current record</h3><div class="email-auth-record"><span>${escapeHtml(data.original)}</span></div></section>` : '<p class="detail-notice">The domain has no SPF record to flatten.</p>'}
+    ${data.notes.length ? renderMailIssues(data.notes.map((message) => ({ severity: "low", message }))) : ""}
+    <section class="email-auth"><h3>Flattened record${data.records.length > 1 ? "s" : ""}</h3>${records}
+      <p class="scan-disclaimer">Flattening copies your providers' current IP ranges into your own records. When a provider changes its addresses, mail from the new ones fails SPF until you flatten again, so re-run this regularly (an Email security monitor alerts you when the published record changes) and prefer removing unused includes where possible. ${data.originalLookups <= 10 ? "Your record is within the limit, so flattening is not needed." : ""}</p>
+    </section>`;
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- IP calculator (in the browser)
+
+function ipv4ToInt(text) {
+  const parts = text.split(".");
+  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) return null;
+  return parts.reduce((value, part) => (value * 256) + Number(part), 0);
+}
+
+function intToIpv4(value) {
+  return [24, 16, 8, 0].map((shift) => Math.floor(value / 2 ** shift) % 256).join(".");
+}
+
+function parseIpv6(text) {
+  let value = text.toLowerCase().replace(/^\[|\]$/g, "");
+  if (value.includes(".")) {
+    const lastColon = value.lastIndexOf(":");
+    const v4 = ipv4ToInt(value.slice(lastColon + 1));
+    if (v4 === null) return null;
+    value = `${value.slice(0, lastColon + 1)}${Math.floor(v4 / 65536).toString(16)}:${(v4 % 65536).toString(16)}`;
+  }
+  const halves = value.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if ((halves.length === 2 && missing < 1) || (halves.length === 1 && head.length !== 8)) return null;
+  const groups = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  if (groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.reduce((total, group) => (total << 16n) + BigInt(parseInt(group, 16)), 0n);
+}
+
+function formatIpv6(value) {
+  const groups = Array.from({ length: 8 }, (_unused, index) => Number((value >> BigInt((7 - index) * 16)) & 0xffffn).toString(16));
+  let bestStart = -1;
+  let bestLength = 0;
+  for (let start = 0; start < 8; start += 1) {
+    let length = 0;
+    while (start + length < 8 && groups[start + length] === "0") length += 1;
+    if (length > bestLength && length > 1) {
+      bestStart = start;
+      bestLength = length;
+    }
+  }
+  if (bestStart < 0) return groups.join(":");
+  return `${groups.slice(0, bestStart).join(":")}::${groups.slice(bestStart + bestLength).join(":")}`;
+}
+
+function ipv4Type(value) {
+  const inRange = (base, prefix) => Math.floor(value / 2 ** (32 - prefix)) === Math.floor(ipv4ToInt(base) / 2 ** (32 - prefix));
+  return inRange("10.0.0.0", 8) || inRange("172.16.0.0", 12) || inRange("192.168.0.0", 16) ? "Private (RFC 1918)"
+    : inRange("100.64.0.0", 10) ? "Carrier-grade NAT (RFC 6598)"
+    : inRange("127.0.0.0", 8) ? "Loopback"
+    : inRange("169.254.0.0", 16) ? "Link-local"
+    : inRange("224.0.0.0", 4) ? "Multicast"
+    : inRange("192.0.2.0", 24) || inRange("198.51.100.0", 24) || inRange("203.0.113.0", 24) ? "Documentation"
+    : inRange("0.0.0.0", 8) ? "This network"
+    : inRange("240.0.0.0", 4) ? "Reserved"
+    : "Public";
+}
+
+function ipv6Type(value) {
+  const top = (bits) => value >> BigInt(128 - bits);
+  return value === 1n ? "Loopback" : value === 0n ? "Unspecified"
+    : top(7) === 0x7en ? "Unique local (ULA)"
+    : top(10) === 0x3fan ? "Link-local"
+    : top(8) === 0xffn ? "Multicast"
+    : top(32) === 0x20010db8n ? "Documentation"
+    : top(96) === 0xffffn ? "IPv4-mapped"
+    : top(3) === 1n ? "Global unicast" : "Reserved";
+}
+
+function calculateIp(rawInput, splitPrefix = null) {
+  const input = String(rawInput || "").trim().replace(/\s+/g, " ");
+  const [addressPart, maskPart] = input.includes("/") ? input.split("/") : input.split(" ");
+  if (addressPart.includes(":")) {
+    const value = parseIpv6(addressPart);
+    const prefix = maskPart === undefined ? 128 : Number(maskPart);
+    if (value === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 128) throw new Error("Enter an IPv6 address with an optional /prefix (0–128).");
+    const hostBits = BigInt(128 - prefix);
+    const network = (value >> hostBits) << hostBits;
+    const last = network + (1n << hostBits) - 1n;
+    const nibbles = Math.floor(prefix / 4);
+    const hex = network.toString(16).padStart(32, "0");
+    const split = splitPrefix === null ? Math.min(128, prefix <= 48 ? 64 : prefix + 8) : splitPrefix;
+    const subnets = [];
+    if (split > prefix && split <= 128) {
+      const count = 1n << BigInt(split - prefix);
+      for (let index = 0n; index < count && index < 256n; index += 1n) subnets.push(`${formatIpv6(network + (index << BigInt(128 - split)))}/${split}`);
+    }
+    return {
+      input, family: 6, prefix, address: formatIpv6(value),
+      network: `${formatIpv6(network)}/${prefix}`, first: formatIpv6(network), last: formatIpv6(last),
+      expanded: hex.match(/.{4}/g).join(":"), total: (1n << hostBits).toString(), type: ipv6Type(value),
+      reverseZone: `${hex.slice(0, nibbles).split("").reverse().join(".")}${nibbles ? "." : ""}ip6.arpa`,
+      split, splitCount: split > prefix ? (1n << BigInt(split - prefix)).toString() : "0", subnets,
+    };
+  }
+  const value = ipv4ToInt(addressPart);
+  if (value === null) throw new Error("Enter an IPv4 address such as 192.168.1.10/24 or 10.0.0.0 255.255.0.0, or an IPv6 prefix.");
+  let prefix = 32;
+  if (maskPart !== undefined && maskPart !== "") {
+    if (/^\d{1,2}$/.test(maskPart)) prefix = Number(maskPart);
+    else {
+      let mask = ipv4ToInt(maskPart);
+      if (mask === null) throw new Error("The netmask is not valid.");
+      if (mask !== 0 && (mask % 2 === 1) && mask < 2 ** 31) mask = 2 ** 32 - 1 - mask;
+      const binary = mask.toString(2).padStart(32, "0");
+      if (!/^1*0*$/.test(binary)) throw new Error("The netmask is not contiguous.");
+      prefix = binary.indexOf("0") === -1 ? 32 : binary.indexOf("0");
+    }
+  }
+  if (prefix < 0 || prefix > 32) throw new Error("The prefix must be between 0 and 32.");
+  const size = 2 ** (32 - prefix);
+  const network = Math.floor(value / size) * size;
+  const broadcast = network + size - 1;
+  const mask = 2 ** 32 - size;
+  const usable = prefix === 32 ? 1 : prefix === 31 ? 2 : size - 2;
+  const split = splitPrefix === null ? Math.min(32, prefix + 2) : splitPrefix;
+  const subnets = [];
+  if (split > prefix && split <= 32) {
+    const step = 2 ** (32 - split);
+    for (let start = network; start <= broadcast && subnets.length < 256; start += step) subnets.push(`${intToIpv4(start)}/${split}`);
+  }
+  const octets = Math.floor(prefix / 8);
+  return {
+    input, family: 4, prefix, address: intToIpv4(value),
+    network: `${intToIpv4(network)}/${prefix}`, netmask: intToIpv4(mask), wildcard: intToIpv4(size - 1),
+    broadcast: prefix >= 31 ? null : intToIpv4(broadcast),
+    first: intToIpv4(prefix >= 31 ? network : network + 1), last: intToIpv4(prefix >= 31 ? broadcast : broadcast - 1),
+    total: String(size), usable: String(usable), type: ipv4Type(value),
+    binaryMask: mask.toString(2).padStart(32, "0").match(/.{8}/g).join("."),
+    hex: value.toString(16).padStart(8, "0"),
+    reverseZone: `${intToIpv4(network).split(".").slice(0, octets).reverse().join(".")}${octets ? "." : ""}in-addr.arpa`,
+    split, splitCount: split > prefix ? String(2 ** (split - prefix)) : "0", subnets,
+  };
+}
+
+function renderIpCalcResult(data) {
+  const maxSplit = data.family === 4 ? 32 : 128;
+  const splitOptions = [];
+  for (let value = data.prefix + 1; value <= Math.min(maxSplit, data.prefix + (data.family === 4 ? 16 : 32)); value += 1) splitOptions.push(value);
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">IP CALCULATOR</p><h2>${copyableResult(data.network)}</h2><p class="web-title">${escapeHtml(`${data.type} · IPv${data.family}`)}</p></div>
+    </div>
+    <section class="email-auth">
+      ${renderFacts(data.family === 4 ? [
+        ["Address", data.address], ["Network", data.network], ["Netmask", data.netmask], ["Wildcard", data.wildcard],
+        ["Broadcast", data.broadcast], ["First host", data.first], ["Last host", data.last],
+        ["Addresses", Number(data.total).toLocaleString()], ["Usable hosts", Number(data.usable).toLocaleString()],
+        ["Binary netmask", data.binaryMask], ["Hex", data.hex], ["Reverse DNS zone", data.reverseZone],
+      ] : [
+        ["Address", data.address], ["Network", data.network], ["First address", data.first], ["Last address", data.last],
+        ["Addresses", BigInt(data.total) > 10n ** 15n ? `2^${128 - data.prefix}` : BigInt(data.total).toLocaleString()],
+        ["Expanded", data.expanded], ["Reverse DNS zone", data.reverseZone],
+      ])}
+    </section>
+    ${splitOptions.length ? `
+      <section class="email-auth">
+        <h3>Split into subnets</h3>
+        <label class="ip-split">Subnet size <select id="ip-split">${splitOptions.map((value) => `<option value="${value}" ${value === data.split ? "selected" : ""}>/${value}</option>`).join("")}</select>
+          <span>${escapeHtml(`${BigInt(data.splitCount).toLocaleString()} subnet(s)${BigInt(data.splitCount) > 256n ? ", first 256 shown" : ""}`)}</span></label>
+        <div class="ip-subnets">${data.subnets.map((subnet) => copyableResult(subnet)).join("")}</div>
+      </section>` : ""}`;
+  resultPanel.hidden = false;
+  resultPanel.querySelector("#ip-split")?.addEventListener("change", (event) => {
+    const next = calculateIp(data.input, Number(event.target.value));
+    renderIpCalcResult(next);
+    if (lastResult?.mode === "ip-calc") lastResult.data.result = next;
+  });
 }

@@ -33,8 +33,8 @@ const scanEmailInput = document.querySelector("#scan-email-input");
 const scanSslInput = document.querySelector("#scan-ssl-input");
 const scanTlsGradeInput = document.querySelector("#scan-tls-grade-input");
 const scanWebInput = document.querySelector("#scan-web-input");
-const emailSubtabs = document.querySelector("#email-subtabs");
-const emailSubtabButtons = [...document.querySelectorAll(".email-subtab[data-mode]")];
+const modeSubtabs = document.querySelector("#mode-subtabs");
+const scanDnsHealthInput = document.querySelector("#scan-dns-health-input");
 const headersControl = document.querySelector("#headers-control");
 const headersInput = document.querySelector("#headers-input");
 const dmarcControl = document.querySelector("#dmarc-control");
@@ -44,9 +44,30 @@ const bulkDomainsInput = document.querySelector("#bulk-domains-input");
 const recordBuilderPanel = document.querySelector("#record-builder");
 const monitorsLink = document.querySelector("#monitors-link");
 const watchResultLink = document.querySelector("#watch-result");
-const emailFamilyModes = ["email", "email-headers", "dmarc-reports", "record-builder"];
+// Tabs that group several tools, shown as sub-tabs under the main tab bar.
+const modeGroups = {
+  email: [["email", "Domain check"], ["email-headers", "Header analyzer"], ["dmarc-reports", "DMARC reports"], ["record-builder", "Record builder"], ["spf-flatten", "SPF flattener"]],
+  security: [["dns-health", "DNS health"], ["reputation", "Reputation"], ["lookalike", "Lookalike domains"]],
+};
+const modeFeatures = { details: "whois", "spf-flatten": "record-builder" };
 // Tools whose requests and rendering live in tools.js.
-const toolModes = new Set(["web", "bulk-domains", "email-headers", "dmarc-reports"]);
+const toolModes = new Set(["web", "bulk-domains", "email-headers", "dmarc-reports", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc"]);
+
+function featureForMode(toolMode) {
+  return modeFeatures[toolMode] || toolMode;
+}
+
+function groupOfMode(toolMode) {
+  return Object.keys(modeGroups).find((group) => modeGroups[group].some(([member]) => member === toolMode)) || null;
+}
+
+function groupAllowed(group) {
+  return modeGroups[group].some(([member]) => featureAllowed(featureForMode(member)));
+}
+
+function firstGroupMode(group) {
+  return (modeGroups[group].find(([member]) => featureAllowed(featureForMode(member))) || modeGroups[group][0])[0];
+}
 const tlsGradeControl = document.querySelector("#tls-grade-control");
 const tlsGradeInput = document.querySelector("#tls-grade-input");
 let tlsGradeRun = 0;
@@ -74,7 +95,8 @@ const shareModeLabels = {
   propagation: "Propagation", email: "Email check", asn: "ASN", ping: "Ping", sslscan: "SSLscan", "ping-scan": "Ping scan", traceroute: "Traceroute",
   "multi-traceroute": "Multi traceroute", scan: "Magic scan", "custom-port": "Port scan", "bulk-port": "Bulk port scan",
   nmap: "Nmap", dnssec: "DNSSEC check", web: "Web check", "email-headers": "Header analysis",
-  "dmarc-reports": "DMARC reports", "bulk-domains": "Bulk domain check",
+  "dmarc-reports": "DMARC reports", "bulk-domains": "Bulk domain check", "dns-health": "DNS health",
+  reputation: "Reputation", lookalike: "Lookalike domains", "spf-flatten": "SPF flattener", "ip-calc": "IP calculator",
 };
 
 function historyEnabled() {
@@ -111,6 +133,7 @@ function currentHistoryParams(resultMode) {
     params.scanSsl = scanSslInput.checked;
     params.scanTlsGrade = scanTlsGradeInput.checked;
     params.scanWeb = scanWebInput.checked;
+    params.scanDnsHealth = scanDnsHealthInput.checked;
   }
   if (resultMode === "bulk-domains") params.domains = bulkDomainsInput.value;
   return params;
@@ -164,6 +187,9 @@ function updateWatchLink(resultMode, data) {
     sslscan: () => ["certificate", data?.target ? `${data.target}:${data.port || 443}` : null],
     email: () => ["email", data?.domain],
     web: () => ["website", data?.finalUrl || data?.startUrl],
+    reputation: () => ["blocklist", data?.target],
+    lookalike: () => ["ct", data?.domain],
+    "dns-health": () => ["dns", data?.zone],
   };
   const [kind, target] = kinds[resultMode]?.() || [];
   const allowed = Boolean(kind && target && authState?.user && featureAllowed("monitors"));
@@ -172,7 +198,8 @@ function updateWatchLink(resultMode, data) {
 }
 
 function updateShareResults() {
-  shareResults.hidden = !(authState?.user && lastResult && !resultPanel.hidden && !viewingShare);
+  shareResults.hidden = resultPanel.hidden || !lastResult && !viewingShare;
+  shareResultsButton.hidden = !(authState?.user && lastResult && !viewingShare);
   if (!lastResult || viewingShare) watchResultLink.hidden = true;
 }
 const nmapLiveStatus = document.querySelector("#nmap-live-status");
@@ -290,6 +317,11 @@ function submitLabel(currentMode) {
     "dmarc-reports": "Read reports",
     web: "Check website",
     "bulk-domains": "Check domains",
+    "dns-health": "Check DNS health",
+    reputation: "Check reputation",
+    lookalike: "Find lookalikes",
+    "spf-flatten": "Flatten SPF",
+    "ip-calc": "Calculate",
     asn: "Look up ASN",
     ping: "Ping host",
     sslscan: "Check SSL/TLS",
@@ -314,8 +346,9 @@ function setMode(nextMode) {
   const recordBuilder = mode === "record-builder";
   const webCheck = mode === "web";
   const bulkDomains = mode === "bulk-domains";
-  const emailFamily = emailFamilyModes.includes(mode);
+  const group = groupOfMode(mode);
   const toolInputMode = emailHeaders || dmarcReports || recordBuilder || bulkDomains;
+  const plainInputMode = ["web", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc"].includes(mode);
   const asnMode = mode === "asn";
   const ping = mode === "ping";
   const sslscan = mode === "sslscan";
@@ -331,7 +364,7 @@ function setMode(nextMode) {
   const isAdmin = authState?.user?.role === "admin";
   const supportsNameserver = isAdmin && ["forward", "reverse", "scan"].includes(mode);
   tabs.forEach((tab) => {
-    const selected = tab.dataset.mode === mode || (tab.dataset.mode === "email" && emailFamily);
+    const selected = tab.dataset.mode === mode || Boolean(group && tab.dataset.group === group);
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", String(selected));
   });
@@ -340,7 +373,11 @@ function setMode(nextMode) {
   input.required = !listMode;
   nameLabel.textContent = automatic
     ? "Search"
-    : reverse ? "IP address" : mac ? "MAC address" : dig ? "dig command" : propagation ? "DNS name" : email ? "Domain or email address" : asnMode ? "IP address, domain or AS number" : "Domain name or IP address";
+    : reverse ? "IP address" : mac ? "MAC address" : dig ? "dig command" : propagation ? "DNS name" : email ? "Domain or email address" : asnMode ? "IP address, domain or AS number"
+    : ["dns-health", "lookalike", "spf-flatten"].includes(mode) ? "Domain name"
+    : mode === "reputation" ? "Domain, URL or IP address"
+    : mode === "ip-calc" ? "IP address or prefix"
+    : webCheck ? "Domain or URL" : "Domain name or IP address";
   input.placeholder = dig
     ? "e.g. @1.1.1.1 example.com MX +dnssec"
     : email
@@ -353,6 +390,12 @@ function setMode(nextMode) {
       ? "e.g. 00:1A:2B:3C:4D:5E"
     : webCheck
       ? "e.g. example.com or https://example.com/page"
+    : mode === "reputation"
+      ? "e.g. example.com, a URL or 203.0.113.7"
+    : mode === "ip-calc"
+      ? "e.g. 192.168.10.0/22, 10.1.2.3 255.255.255.0 or 2001:db8::/48"
+    : ["dns-health", "lookalike", "spf-flatten"].includes(mode)
+      ? "e.g. example.com"
     : details || ping || sslscan || traceroute || nmapScan
       ? "e.g. example.com or 8.8.8.8"
     : automatic
@@ -362,14 +405,14 @@ function setMode(nextMode) {
       : "e.g. example.com";
   input.autocomplete = reverse || mac || dig || portScan ? "off" : "url";
   input.classList.toggle("dig-input", dig);
-  typeControl.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || webCheck;
-  customType.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || webCheck || recordType.value !== "custom";
-  emailSubtabs.hidden = !emailFamily;
-  emailSubtabButtons.forEach((button) => {
-    const selected = button.dataset.mode === mode;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-selected", String(selected));
-  });
+  typeControl.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || plainInputMode;
+  customType.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || plainInputMode || recordType.value !== "custom";
+  modeSubtabs.hidden = !group;
+  modeSubtabs.setAttribute("aria-label", group === "security" ? "Security tools" : "Email tools");
+  modeSubtabs.innerHTML = group
+    ? modeGroups[group].filter(([member]) => featureAllowed(featureForMode(member))).map(([member, label]) => `
+      <button class="email-subtab${member === mode ? " active" : ""}" type="button" role="tab" aria-selected="${member === mode}" data-mode="${member}">${escapeHtml(label)}</button>`).join("")
+    : "";
   headersControl.hidden = !emailHeaders;
   headersInput.required = emailHeaders;
   dmarcControl.hidden = !dmarcReports;
@@ -431,6 +474,16 @@ function setMode(nextMode) {
         ? "Read DMARC aggregate (rua) reports to see who sends mail as your domain and whether it passes, before you tighten your DMARC policy."
       : recordBuilder
         ? "Build correct SPF, DMARC, MTA-STS, TLS-RPT and BIMI records. Load a domain's current records to start from them."
+      : mode === "dns-health"
+        ? "Query each of the domain's name servers directly: delegation from the parent zone, glue, matching SOA serials, TCP support, open zone transfers (AXFR) and open recursion."
+      : mode === "reputation"
+        ? "Check whether security services consider a domain or IP address malicious: filtering DNS resolvers, spam blocklists, and URLhaus, VirusTotal or Google Safe Browsing when configured."
+      : mode === "lookalike"
+        ? "Generate typo, homoglyph, hyphen, TLD and added-word variants of a domain and show which are registered, with web or mail servers that could be used for phishing."
+      : mode === "spf-flatten"
+        ? "Replace include, a and mx mechanisms with the IP ranges they resolve to, to get under SPF's limit of 10 DNS lookups. Flattened records must be refreshed when your providers change their addresses."
+      : mode === "ip-calc"
+        ? "Work out the network, broadcast, host range and size of an IPv4 or IPv6 prefix, convert a netmask or wildcard, and split a network into smaller subnets. Calculated in your browser."
       : webCheck
         ? "Follow a site's redirects and check its HTTPS setup, security headers, cookies, compression and HTTP/2 and HTTP/3 support."
       : bulkDomains
@@ -489,8 +542,8 @@ async function initializeAccount() {
       const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
       const access = authState.featureAccess[feature] || "user";
       const portScanRequiresUser = ["custom-port", "bulk-port", "ping-scan", "multi-traceroute", "nmap", "bulk-domains"].includes(tab.dataset.mode);
-      const canUse = tab.dataset.mode === "email"
-        ? emailFamilyModes.some((familyMode) => featureAllowed(familyMode))
+      const canUse = tab.dataset.group
+        ? groupAllowed(tab.dataset.group)
         : Boolean(authState.user) &&
           (access !== "admin" || authState.user.role === "admin") ||
           access === "public" && !portScanRequiresUser;
@@ -512,10 +565,12 @@ async function initializeAccount() {
     }
     if (initialTab) {
       const requested = new URLSearchParams(window.location.search).get("mode");
-      const requestedTab = availableTabs.find((tab) => tab.dataset.mode === requested) ||
-        (emailFamilyModes.includes(requested) && featureAllowed(requested) && availableTabs.some((tab) => tab.dataset.mode === "email"));
-      setMode(requestedTab ? (requested === "email" && !featureAllowed("email") ? firstEmailMode() : requested) : "auto");
-      emailSubtabButtons.forEach((button) => { button.hidden = !featureAllowed(button.dataset.mode); });
+      const requestedGroup = modeGroups[requested] ? requested : groupOfMode(requested);
+      const groupTab = requestedGroup && availableTabs.find((tab) => tab.dataset.group === requestedGroup);
+      const directTab = availableTabs.find((tab) => tab.dataset.mode === requested && !tab.dataset.group);
+      setMode(groupTab
+        ? (featureAllowed(featureForMode(requested)) && groupOfMode(requested) ? requested : firstGroupMode(requestedGroup))
+        : directTab ? requested : "auto");
       const query = new URLSearchParams(window.location.search).get("q");
       if (sharedId || historyId || rerunId) {
         // A shared link shows the stored result instead of running a query.
@@ -1003,16 +1058,19 @@ function updateScanIncludes(scan = mode === "scan") {
   const email = featureAllowed("email");
   const ssl = featureAllowed("sslscan");
   const web = featureAllowed("web");
+  const dnsHealth = featureAllowed("dns-health");
   const grade = ssl && Boolean(authState?.user);
   document.querySelector("#scan-web-option").hidden = !web;
   if (!web) scanWebInput.checked = false;
+  document.querySelector("#scan-dns-health-option").hidden = !dnsHealth;
+  if (!dnsHealth) scanDnsHealthInput.checked = false;
   document.querySelector("#scan-email-option").hidden = !email;
   document.querySelector("#scan-ssl-option").hidden = !ssl;
   document.querySelector("#scan-tls-grade-option").hidden = !grade;
   if (!email) scanEmailInput.checked = false;
   if (!ssl) scanSslInput.checked = false;
   if (!grade) scanTlsGradeInput.checked = false;
-  scanIncludesControl.hidden = !scan || !(email || ssl || web);
+  scanIncludesControl.hidden = !scan || !(email || ssl || web || dnsHealth);
 }
 
 function scanIncludeSection(kind, html) {
@@ -1026,6 +1084,9 @@ async function appendScanIncludes(domain) {
   }
   if (scanSslInput.checked && featureAllowed("sslscan")) {
     jobs.push(["sslscan", "Running SSLscan on port 443…", `/api/sslscan?${new URLSearchParams({ name: domain, port: "443" })}`, sslScanResultHtml]);
+  }
+  if (scanDnsHealthInput.checked && featureAllowed("dns-health")) {
+    jobs.push(["dnsHealth", "Running the DNS health check…", `/api/dns-health?${new URLSearchParams({ name: domain })}`, dnsHealthHtml]);
   }
   if (scanWebInput.checked && featureAllowed("web")) {
     jobs.push(["web", "Running the Web check…", `/api/web-check?${new URLSearchParams({ name: domain })}`, webCheckHtml]);
@@ -1048,7 +1109,7 @@ async function appendScanIncludes(domain) {
         void saveHistory();
       }
     } catch (error) {
-      if (section.isConnected) section.innerHTML = `<p class="detail-notice">${escapeHtml(`${{ email: "Email check", sslscan: "SSLscan", web: "Web check" }[kind]}: ${error.message}`)}</p>`;
+      if (section.isConnected) section.innerHTML = `<p class="detail-notice">${escapeHtml(`${{ email: "Email check", sslscan: "SSLscan", web: "Web check", dnsHealth: "DNS health check" }[kind]}: ${error.message}`)}</p>`;
     }
   }));
 }
@@ -2678,26 +2739,24 @@ function updateAutoDetectHint() {
   }
 }
 
-function firstEmailMode() {
-  return emailFamilyModes.find((familyMode) => featureAllowed(familyMode)) || "email";
-}
-
-emailSubtabButtons.forEach((button) => button.addEventListener("click", () => {
-  if (!featureAllowed(button.dataset.mode)) {
+modeSubtabs.addEventListener("click", (event) => {
+  const button = event.target.closest(".email-subtab[data-mode]");
+  if (!button) return;
+  if (!featureAllowed(featureForMode(button.dataset.mode))) {
     errorMessage.textContent = "This tool is restricted by the administrator.";
     errorMessage.hidden = false;
     return;
   }
   setMode(button.dataset.mode);
-}));
+});
 
 tabs.forEach((tab) => tab.addEventListener("click", () => {
   if (tab === autoTab) {
     setMode("auto");
     return;
   }
-  if (tab.dataset.mode === "email" && authState?.user) {
-    if (!emailFamilyModes.includes(mode)) setMode(firstEmailMode());
+  if (tab.dataset.group && groupAllowed(tab.dataset.group)) {
+    if (groupOfMode(mode) !== tab.dataset.group) setMode(firstGroupMode(tab.dataset.group));
     return;
   }
   const feature = tab.dataset.mode === "details" ? "whois" : tab.dataset.mode;
@@ -3002,6 +3061,11 @@ function renderSharedResult(shareMode, payload) {
     case "email-headers": renderHeadersResult(data); break;
     case "dmarc-reports": renderDmarcReportResult(data); break;
     case "bulk-domains": renderBulkDomainsResult(data); break;
+    case "dns-health": renderDnsHealthResult(data); break;
+    case "reputation": renderReputationResult(data); break;
+    case "lookalike": renderLookalikeResult(data); break;
+    case "spf-flatten": renderSpfFlattenResult(data); break;
+    case "ip-calc": renderIpCalcResult(data); break;
     default: throw new Error("This shared result type is not supported.");
   }
   if (extras.tlsGrade?.result) {
@@ -3012,6 +3076,8 @@ function renderSharedResult(shareMode, payload) {
   if (extras.email) resultPanel.insertAdjacentHTML("beforeend", scanIncludeSection("email", emailResultHtml(extras.email)));
   if (extras.sslscan) resultPanel.insertAdjacentHTML("beforeend", scanIncludeSection("sslscan", sslScanResultHtml(extras.sslscan)));
   if (extras.web) resultPanel.insertAdjacentHTML("beforeend", scanIncludeSection("web", webCheckHtml(extras.web)));
+  if (extras.dnsHealth) resultPanel.insertAdjacentHTML("beforeend", scanIncludeSection("dnsHealth", dnsHealthHtml(extras.dnsHealth)));
+  updateShareResults();
 }
 
 async function loadHistoryEntry(id, rerun) {
@@ -3049,6 +3115,7 @@ async function loadHistoryEntry(id, rerun) {
       if (typeof params.scanSsl === "boolean") scanSslInput.checked = params.scanSsl;
       if (typeof params.scanTlsGrade === "boolean") scanTlsGradeInput.checked = params.scanTlsGrade;
       if (typeof params.scanWeb === "boolean") scanWebInput.checked = params.scanWeb;
+      if (typeof params.scanDnsHealth === "boolean") scanDnsHealthInput.checked = params.scanDnsHealth;
       if (typeof params.domains === "string") bulkDomainsInput.value = params.domains;
       updateScanIncludes();
       history.replaceState(null, "", `/?mode=${encodeURIComponent(formMode)}`);
@@ -3149,4 +3216,9 @@ mailResultsButton.addEventListener("click", async () => {
   } finally {
     mailResultsButton.disabled = false;
   }
+});
+
+document.querySelector("#print-result").addEventListener("click", () => {
+  resultPanel.querySelectorAll("details").forEach((details) => { details.open = true; });
+  window.print();
 });

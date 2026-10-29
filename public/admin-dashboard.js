@@ -260,9 +260,9 @@ function gradeBar(grades) {
 
 function renderInsights(data) {
   const ratings = data.ratings;
-  const rated = ratings.web.count + ratings.tls.count + ratings.email.count;
+  const rated = ratings.web.count + ratings.tls.count + ratings.email.count + (ratings.dns?.count || 0);
   setText("#i-rated", rated.toLocaleString());
-  setText("#i-rated-detail", `${ratings.web.count} web · ${ratings.tls.count} TLS · ${ratings.email.count} email`);
+  setText("#i-rated-detail", `${ratings.web.count} web · ${ratings.tls.count} TLS · ${ratings.email.count} email · ${ratings.dns?.count || 0} DNS`);
   setText("#i-web", ratings.web.average === null ? "—" : `${ratings.web.average}/100`);
   setText("#i-web-detail", ratings.web.count ? `${ratings.web.grades["A+"] || 0} domains graded A+` : "No web checks yet");
   setText("#i-email", ratings.email.average === null ? "—" : `${ratings.email.average}/100`);
@@ -271,7 +271,7 @@ function renderInsights(data) {
   setText("#i-monitors", `${data.monitors.enabled.toLocaleString()} active`);
   setText("#i-monitors-detail", `${statuses.fail || 0} failing · ${statuses.warn || 0} warning · ${data.monitors.alerts} alert(s) sent`);
 
-  document.querySelector("#dash-ratings").innerHTML = ["web", "tls", "email"].map((kind) => {
+  document.querySelector("#dash-ratings").innerHTML = ["web", "tls", "email", "dns"].filter((kind) => ratings[kind]).map((kind) => {
     const rating = ratings[kind];
     return `
       <article class="account-card admin-card stats-panel rating-panel">
