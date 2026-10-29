@@ -35,7 +35,7 @@ tools. Use it to get to know a domain, audit your own, or prepare a migration.
 | [Blocklists](blocklists.md) | The domain and its addresses on spam lists |
 | [Subdomain takeover](subdomain-takeover.md) | CNAMEs to deleted or unclaimed services |
 | Email authentication | SPF (with lookup count), common DKIM selectors, DMARC, MTA-STS, TLS-RPT |
-| [Website preview](website-previews.md) | Screenshot of the homepage |
+| [Website preview](website-previews.md) | Live view of the homepage |
 
 ## Optional additions
 

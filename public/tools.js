@@ -33,33 +33,26 @@ function percentBar(value, state = "") {
   return `<span class="pct-bar ${state}"><span data-pct="${escapeHtml(value)}"></span></span>`;
 }
 
-// Screenshot of a site, taken on the server by headless Chromium (scripts disabled by default).
+// Live view of a site, fetched and cleaned by the server and shown in a sandboxed frame.
 function previewsEnabled() {
   return Boolean(authState?.user && authState.previewAvailable && featureAllowed("preview"));
 }
 
 function sitePreviewHtml(url, { caption = "", size = "large" } = {}) {
   if (!previewsEnabled() || !url) return "";
+  const source = `/api/preview?${new URLSearchParams({ url })}`;
   return `
     <figure class="site-preview ${size} loading">
-      <a href="${escapeHtml(`/api/preview?${new URLSearchParams({ url })}`)}" target="_blank" rel="noopener" title="Open the full-size screenshot">
-        <img class="site-preview-img" src="${escapeHtml(`/api/preview?${new URLSearchParams({ url })}`)}" alt="${escapeHtml(`Screenshot of ${url}`)}" loading="lazy" decoding="async">
-      </a>
-      <figcaption>${escapeHtml(caption || url)}</figcaption>
+      <div class="site-preview-frame">
+        <iframe class="site-preview-iframe" src="${escapeHtml(source)}" sandbox="" referrerpolicy="no-referrer" loading="lazy" title="${escapeHtml(`Preview of ${url}`)}" tabindex="${size === "small" ? "-1" : "0"}"></iframe>
+      </div>
+      <figcaption>${escapeHtml(caption || url)} · <a href="${escapeHtml(source)}" target="_blank" rel="noopener">open larger</a></figcaption>
     </figure>`;
 }
 
-// Image load and error events do not bubble, so listen in the capture phase.
+// Frame load events do not bubble, so listen in the capture phase.
 document.addEventListener("load", (event) => {
-  if (event.target.classList?.contains("site-preview-img")) event.target.closest(".site-preview")?.classList.remove("loading");
-}, true);
-document.addEventListener("error", (event) => {
-  if (!event.target.classList?.contains("site-preview-img")) return;
-  const figure = event.target.closest(".site-preview");
-  if (!figure) return;
-  figure.classList.remove("loading");
-  figure.classList.add("failed");
-  event.target.closest("a").replaceWith(Object.assign(document.createElement("div"), { className: "site-preview-error", textContent: "Preview unavailable (the site did not load or blocks automated browsers)." }));
+  if (event.target.classList?.contains("site-preview-iframe")) event.target.closest(".site-preview")?.classList.remove("loading");
 }, true);
 
 function pill(state, label) {
@@ -179,7 +172,7 @@ function webCheckHtml(data) {
     </tr>`);
   return `
     ${heading}
-    ${data.finalStatus < 500 ? sitePreviewHtml(data.finalUrl, { caption: `Preview of ${data.finalUrl} (rendered on the server${authState?.previewScripts ? "" : ", scripts disabled"})` }) : ""}
+    ${data.finalStatus < 500 ? sitePreviewHtml(data.finalUrl, { caption: `Live view of ${data.finalUrl} through this server (scripts and links disabled)` }) : ""}
     ${scoreTiles(tiles)}
     ${renderMailFixList([["", data.issues]])}
     <section class="email-auth">
@@ -951,7 +944,7 @@ function renderReputationResult(data) {
       ["Domain exists", data.exists ? "ok" : "warn", data.exists ? "Yes" : "No answer"],
     ])}
     ${!data.exists ? '<p class="detail-notice">The domain does not resolve, so filtering resolvers cannot show whether they block it.</p>' : ""}
-    ${data.exists && data.addresses.length ? sitePreviewHtml(`http://${data.isAddress ? data.target : data.target}/`, { caption: "What the site shows, rendered safely on the server with scripts disabled. No need to open it yourself." }) : ""}
+    ${data.exists && data.addresses.length ? sitePreviewHtml(`http://${data.isAddress ? data.target : data.target}/`, { caption: "What the site shows, loaded through this server with scripts and links disabled, so you do not have to open it yourself" }) : ""}
     <section class="email-auth"><h3>Sources</h3>${dataTable(["Source", "Result", "Details"], rows, "web-checks-table")}
       <p class="scan-disclaimer">Filtering resolvers (Quad9, Cloudflare for Families, DNS4EU, CleanBrowsing) are compared with an unfiltered answer; a block means the service considers the domain malicious. Spam blocklists cover mail abuse. The threat lists (Spamhaus DROP for hijacked networks, abuse.ch Feodo Tracker for botnet command-and-control servers, abuse.ch URLhaus for malware hosts and OpenPhish for phishing sites) are downloaded by the server every few hours and checked locally. VirusTotal, Google Safe Browsing and the URLhaus API are used when the administrator has configured their keys. A clean result is not a guarantee.</p>
     </section>`;
@@ -989,7 +982,7 @@ function renderLookalikeResult(data) {
     ${previewsEnabled() && data.registered.some((entry) => entry.addresses.length) ? `
       <section class="email-auth"><h3>Previews of lookalike websites</h3>
         <div class="site-preview-grid">${data.registered.filter((entry) => entry.addresses.length).slice(0, 12).map((entry) => sitePreviewHtml(`http://${entry.name}/`, { caption: `${entry.name} · ${entry.kind}`, size: "small" })).join("")}</div>
-        <p class="scan-disclaimer">Screenshots are taken on the server with scripts disabled, so you can look at possible phishing copies without visiting them. Click one to enlarge it. Up to 12 are shown.</p>
+        <p class="scan-disclaimer">Each site is loaded through this server with scripts and links disabled, so you can look at possible phishing copies without visiting them. Up to 12 are shown.</p>
       </section>` : ""}
     <section class="email-auth"><h3>Registered lookalikes</h3>
       ${dataTable(["Domain", "Variant", "Active", "Addresses", "Mail (MX)", "Name servers"], rows) || '<p class="empty-result">None of the variants are registered.</p>'}

@@ -1291,7 +1291,7 @@ function renderScanResult(data) {
       <div><p class="eyebrow">MAGIC SCAN</p><h2>${copyableResult(data.domain)}</h2></div>
       <span class="status-badge success">${copyableResult(`${data.hostsWithRecords} hosts found`)}</span>
     </div>
-    ${data.hosts.some((host) => host.name === data.domain && host.records.some((record) => ["A", "AAAA"].includes(record.type))) ? sitePreviewHtml(`http://${data.domain}/`, { caption: `Preview of ${data.domain} (rendered on the server${authState?.previewScripts ? "" : ", scripts disabled"})`, size: "medium" }) : ""}
+    ${data.hosts.some((host) => host.name === data.domain && host.records.some((record) => ["A", "AAAA"].includes(record.type))) ? sitePreviewHtml(`http://${data.domain}/`, { caption: `Live view of ${data.domain} through this server (scripts and links disabled)`, size: "medium" }) : ""}
     <div class="scan-summary">
       ${copyableResult(`${data.subdomainsChecked} subdomains checked`)}
       ${copyableResult(`${data.certificateTransparencySubdomains} additional names from ${data.certificateTransparencySource || "certificate logs"}`)}

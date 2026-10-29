@@ -13,7 +13,7 @@ with no npm dependencies, a SQLite database and a browser interface.
 - **Email**: MX and SMTP/STARTTLS, SPF, DKIM, DMARC, MTA-STS, TLS-RPT and BIMI;
   a header analyzer, a DMARC report viewer, a record builder and an SPF flattener.
 - **Web and TLS**: redirect chain, security headers, HTTP/2 and HTTP/3, a full TLS
-  test graded A+ to F, and website screenshots.
+  test graded A+ to F, and safe live previews of websites.
 - **Security**: DNS health, reputation and blocklists, lookalike domains and
   subdomain takeover detection.
 - **Network**: ping, traceroute, port scans, Nmap, MAC lookup and an IP calculator.
@@ -178,7 +178,7 @@ Combine them with `-f`, for example
 ### Without Docker
 
 Requires Node.js 22 or newer. Some tools need system packages: `dig`
-(bind-tools), `tracepath`, `nmap`, `testssl.sh` and Chromium; the tools whose
+(bind-tools), `tracepath`, `nmap` and `testssl.sh`; the tools whose
 binary is missing report an error.
 
 ```sh
@@ -234,9 +234,7 @@ Set these in `.env` next to the compose file, or in front of the command.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SCREENSHOTS` | `true` | Set to `false` to turn website previews off. |
-| `SCREENSHOT_JAVASCRIPT` | `false` | Run page scripts when rendering previews. Renders more sites, but runs their code on your server. |
-| `CHROMIUM_PATH` | auto | Path to a different Chromium binary. |
+| `PREVIEWS` | `true` | Set to `false` to turn website previews off. |
 
 **zmap engine** (with `compose.zmap.yaml`)
 
@@ -475,23 +473,25 @@ A+ for HSTS, T for untrusted, M for name mismatch, F for critical issues).
 
 #### Website previews
 
-A screenshot of the site appears in Web check (the final page), Magic scan (the
+A live view of the site appears in Web check (the final page), Magic scan (the
 homepage), Reputation (the site) and Lookalike domains (thumbnails of up to 12
-registered lookalikes). Click a preview to open it at full size.
+registered lookalikes). *Open larger* shows it in a new tab.
 
-Previews are rendered by headless Chromium inside the container (1280 × 800,
-JPEG) and cached in the data volume for one hour. Because they are often taken
-of suspicious sites, the browser is locked down:
+The server fetches the page and shows a cleaned copy in a sandboxed frame, so
+you can look at suspicious sites without visiting them:
 
-- **Scripts are disabled** by default (`SCREENSHOT_JAVASCRIPT=true` enables them).
-- **All browser traffic goes through a filtering proxy** inside the app that only
-  connects to public addresses on ports 80 and 443, so a page cannot reach your
-  network. QUIC and non-proxied WebRTC are disabled.
-- Two browsers run at a time and others wait in a short queue; each user can
-  create 150 previews per hour. Previews require a login.
+- The page is fetched like in Web check: public addresses only, every redirect checked.
+- Scripts, event handlers, frames, embedded objects, forms and automatic
+  redirects are removed, and links are shown but do not navigate.
+- Images, stylesheets and fonts are loaded through an asset proxy that only serves
+  addresses the server signed itself (valid for two hours), so the visitor's
+  browser never contacts the site.
+- The page is served with a sandboxing Content-Security-Policy and shown in a
+  sandboxed frame without scripts, so it cannot reach this site or the visitor's session.
 
-Chromium adds about 300 MB to the image and runs without its own sandbox (the
-container's restrictions still apply). Set `SCREENSHOTS=false` to turn previews off.
+Sites that build their content with JavaScript may look empty or unstyled.
+Previews require a login; each user can open 200 per hour. Set
+`PREVIEWS=false` to turn them off.
 
 ### Security
 
@@ -850,13 +850,13 @@ curl -H "Authorization: Bearer $TOKEN" "https://lookup.example.com/api/monitors"
 - All input is validated on the server (size, duplicates, control characters,
   strict UTF-8). SQL is parameterized, output is HTML-escaped, and a strict
   Content-Security-Policy and security headers are sent.
-- External programs (dig, nmap, zmap, tracepath, ping, testssl.sh, Chromium) are
+- External programs (dig, nmap, zmap, tracepath, ping, testssl.sh) are
   started without a shell and with fixed argument lists.
 - Tools that connect to a user-chosen target resolve it once, refuse private,
   reserved and loopback addresses (including IPv4-mapped, NAT64, 6to4 and
   IPv4-compatible IPv6 forms) unless the role allows local targets, and pin the
   connection to the checked address to prevent DNS rebinding. Website previews
-  additionally route all browser traffic through a filtering proxy.
+  are cleaned of active content and shown in a sandbox with an opaque origin.
 - Only an explicit list of static files is served. Expensive jobs are capped
   server-wide, and connections, header sizes and request timeouts are bounded.
 
@@ -875,7 +875,7 @@ curl -H "Authorization: Bearer $TOKEN" "https://lookup.example.com/api/monitors"
 
 - The Compose files run the container as a non-root user with a read-only root
   filesystem (only `/data` and `/tmp` are writable), all Linux capabilities
-  dropped, `no-new-privileges`, PID and memory limits (1 GB) and a health check
+  dropped, `no-new-privileges`, PID and memory limits and a health check
   (`/healthz`). The app shuts down gracefully on `SIGTERM`.
 - `compose.zmap.yaml` relaxes this (adds `NET_RAW` and `NET_ADMIN`, removes
   `no-new-privileges`); use it only when you need zmap.
@@ -905,7 +905,7 @@ BNGlookup sends data to third parties only to perform the requested check:
 | Threat lists | Downloaded from Spamhaus, abuse.ch and OpenPhish; queried names are not sent |
 | AS numbers and prefixes | RIPE Stat |
 | MAC addresses | `maclookup.app` |
-| Target sites and mail servers | Contacted directly by Web check, SSLscan, the TLS test, website previews, the Email check (port 25) and BIMI/MTA-STS fetches |
+| Target sites and mail servers | Contacted by the server for Web check, SSLscan, the TLS test, website previews (the page and its images, styles and fonts), the Email check (port 25) and BIMI/MTA-STS fetches |
 | Update check | The GitHub API, at most every 6 hours while an administrator views the dashboard (`UPDATE_CHECK=false` turns it off) |
 | Cloudflare IP ranges | Downloaded from Cloudflare when automatic trust is enabled |
 

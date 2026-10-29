@@ -37,7 +37,7 @@ the main [README](../README.md).
 | --- | --- |
 | [Web check](web-check.md) | Grades a site's HTTPS, redirects and security headers. |
 | [SSLscan and TLS grade](sslscan.md) | Tests a server's TLS and grades it like SSL Labs. |
-| [Website previews](website-previews.md) | Screenshots of sites, taken safely on the server. |
+| [Website previews](website-previews.md) | Safe live views of sites, loaded through the server. |
 
 ## Security
 

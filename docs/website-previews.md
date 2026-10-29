@@ -1,6 +1,6 @@
 # Website previews
 
-Shows a screenshot of a site inside the results, taken safely on the server, so you can see a suspicious site without opening it.
+Shows a live, cleaned copy of a site inside the results, loaded through BNGlookup, so you can see a suspicious site without opening it.
 
 | | |
 | --- | --- |
@@ -11,29 +11,34 @@ Shows a screenshot of a site inside the results, taken safely on the server, so 
 
 ## What it does
 
-A picture of the site's first screen appears in the results: the final page in
-Web check, the homepage in Magic scan, the site in Reputation, and thumbnails of
-registered lookalikes. Click a preview to see it at full size.
+The site appears in a frame in the results: the final page in Web check, the
+homepage in Magic scan, the site in Reputation, and thumbnails of registered
+lookalikes. Click *open larger* to see it in its own tab.
 
 ## How it works
 
-1. A headless Chromium browser in the container opens the page at 1280 × 800.
-2. The screenshot is saved as a JPEG and cached for one hour.
-
-Because previews are often taken of suspicious sites, the browser is locked down:
+1. The server fetches the page, following redirects only to public addresses.
+2. Everything that could run code or leave the preview is removed: scripts, event
+   handlers, frames, embedded objects, forms and automatic redirects. Links are
+   kept as text but do not navigate.
+3. The addresses of images, stylesheets and fonts are rewritten to a small asset
+   proxy on the server. It only accepts addresses the server signed itself, and
+   only for two hours.
+4. The cleaned page is shown in a sandboxed frame, with a security policy that
+   gives it no origin and no scripts.
 
 | Protection | Effect |
 | --- | --- |
-| Scripts disabled | Malicious JavaScript does not run. Sites that need scripts may look bare. |
-| Filtering proxy | All browser traffic goes through a proxy in the app that only connects to public addresses on ports 80 and 443, so a page cannot reach your network. |
-| QUIC and WebRTC off | These could otherwise bypass the proxy. |
-| Limits | Two browsers at a time, a short queue, 150 previews per user per hour. |
+| Server-side fetch | Your browser never contacts the site, so the site does not see your IP address. |
+| Active content removed | No scripts, forms or redirects can run. |
+| Signed asset proxy | The proxy cannot be used to fetch arbitrary files. |
+| Sandbox | Even if something slipped through, it could not reach BNGlookup or your session. |
 
 ## Good to know
 
-- An administrator can enable scripts with `SCREENSHOT_JAVASCRIPT=true` (renders
-  more sites, but runs their code on the server) or turn previews off with `SCREENSHOTS=false`.
-- A site that blocks automated browsers shows *Preview unavailable*.
+- Sites that build their content with JavaScript may look empty or unstyled.
+- Each user can open 200 previews per hour. An administrator can turn previews
+  off with `PREVIEWS=false`.
 
 ---
 
