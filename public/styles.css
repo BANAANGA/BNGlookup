@@ -1512,3 +1512,25 @@ footer a:hover { color: #e4ffef; }
   #result a { text-decoration: underline; }
   #result .dns-results-table-wrap { overflow: visible !important; }
 }
+
+/* Website previews */
+.site-preview { margin: 14px 0; }
+.site-preview a { display: block; overflow: hidden; border: 1px solid #2a2a2a; border-radius: 9px; background: #fff; aspect-ratio: 16 / 10; }
+.site-preview img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.site-preview.large { max-width: 640px; }
+.site-preview.medium { max-width: 460px; }
+.site-preview.small { margin: 0; }
+.site-preview figcaption { margin-top: 6px; color: #8a8a8a; font-size: 12px; overflow-wrap: anywhere; }
+.site-preview.loading a { position: relative; background: #111; }
+.site-preview.loading a::after {
+  position: absolute; inset: 0; display: grid; place-items: center; color: #888; font-size: 13px;
+  background: linear-gradient(100deg, #111 20%, #1a1a1a 40%, #111 60%) 0 0 / 200% 100%; animation: preview-shimmer 1.4s linear infinite;
+  content: "Rendering preview…";
+}
+.site-preview.loading img { opacity: 0; }
+@keyframes preview-shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .site-preview.loading a::after { animation: none; } }
+.site-preview-error { display: grid; place-items: center; padding: 14px; aspect-ratio: 16 / 10; border: 1px dashed #333; border-radius: 9px; color: #888; font-size: 12px; text-align: center; }
+.site-preview.large .site-preview-error, .site-preview.medium .site-preview-error { aspect-ratio: auto; min-height: 70px; }
+.site-preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; }
+@media print { .site-preview a { border-color: #bbb !important; } }

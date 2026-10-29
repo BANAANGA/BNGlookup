@@ -137,6 +137,7 @@ const featureAccessDefaults = {
   lookalike: "user",
   "ip-calc": "user",
   "api-tokens": "user",
+  preview: "user",
   history: "user",
 };
 const featureNames = {
@@ -169,6 +170,7 @@ const featureNames = {
   lookalike: "Lookalike domain finder",
   "ip-calc": "IP / CIDR calculator",
   "api-tokens": "API tokens for scripts (requires login)",
+  preview: "Website previews (screenshots, requires login)",
   history: "Lookup history (saved per user)",
 };
 
@@ -4362,6 +4364,339 @@ async function spfFlattenCheck(url, response) {
   sendJson(response, 200, await flattenSpf(domain));
 }
 
+// ---------------------------------------------------------------- Website previews (headless Chromium)
+
+const previewConfig = {
+  enabled: process.env.SCREENSHOTS !== "false",
+  javascript: process.env.SCREENSHOT_JAVASCRIPT === "true",
+  binary: process.env.CHROMIUM_PATH || ["/usr/bin/chromium-browser", "/usr/bin/chromium"].find((candidate) => fs.existsSync(candidate)) || null,
+  width: 1280,
+  height: 800,
+  timeoutMs: 25000,
+  concurrency: 2,
+  queueLimit: 30,
+  queueWaitMs: 60000,
+  cacheMs: 3600000,
+  cacheFiles: 400,
+  perUserHour: 150,
+};
+const previewDir = path.join(dataDir, "previews");
+const previewQueue = [];
+const previewUsage = new Map();
+const previewPending = new Map();
+let previewsRunning = 0;
+let previewProxyStart = null;
+
+function previewsAvailable() {
+  return previewConfig.enabled && Boolean(previewConfig.binary);
+}
+
+// Every request the preview browser makes goes through this proxy, which only connects to
+// public addresses on ports 80 and 443, so a page cannot reach the server's own network.
+function startPreviewProxy() {
+  previewProxyStart ||= new Promise((resolve, reject) => {
+    const proxy = http.createServer(async (request, response) => {
+      let target;
+      try {
+        target = new URL(request.url);
+      } catch {
+        response.writeHead(400).end();
+        return;
+      }
+      if (target.protocol !== "http:" || (target.port && target.port !== "80") || target.username || target.password) {
+        response.writeHead(403).end();
+        return;
+      }
+      const address = await resolveWebAddress(target.hostname, false).catch(() => null);
+      if (!address) {
+        response.writeHead(403).end();
+        return;
+      }
+      const headers = { ...request.headers };
+      delete headers["proxy-connection"];
+      delete headers["proxy-authorization"];
+      const upstream = http.request({
+        host: target.hostname.replace(/^\[|\]$/g, ""),
+        port: 80,
+        method: request.method,
+        path: `${target.pathname}${target.search}`,
+        headers,
+        lookup: (_host, options, callback) => {
+          if (options?.all) callback(null, [{ address, family: isIP(address) }]);
+          else callback(null, address, isIP(address));
+        },
+        timeout: 15000,
+      }, (reply) => {
+        response.writeHead(reply.statusCode || 502, reply.headers);
+        reply.pipe(response);
+      });
+      upstream.on("timeout", () => upstream.destroy());
+      upstream.on("error", () => response.destroy());
+      request.pipe(upstream);
+    });
+    proxy.on("connect", async (request, socket, head) => {
+      socket.on("error", () => {});
+      const match = String(request.url).match(/^(\[[0-9a-f:.]+\]|[^:]+):(\d+)$/i);
+      if (!match || match[2] !== "443") {
+        socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+        return;
+      }
+      const address = await resolveWebAddress(match[1], false).catch(() => null);
+      if (!address) {
+        socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+        return;
+      }
+      const upstream = net.connect({ host: address, port: 443, family: isIP(address) }, () => {
+        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        if (head?.length) upstream.write(head);
+        upstream.pipe(socket);
+        socket.pipe(upstream);
+      });
+      upstream.setTimeout(30000, () => upstream.destroy());
+      upstream.on("error", () => socket.destroy());
+      socket.on("close", () => upstream.destroy());
+    });
+    proxy.on("clientError", (_error, socket) => socket.destroy());
+    proxy.once("error", (error) => {
+      previewProxyStart = null;
+      reject(error);
+    });
+    proxy.listen(0, "127.0.0.1", () => {
+      proxy.unref();
+      resolve(proxy.address().port);
+    });
+  });
+  return previewProxyStart;
+}
+
+// Drives Chromium over the DevTools protocol (like Puppeteer, without the dependency).
+async function captureScreenshot(url) {
+  const port = await startPreviewProxy();
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bng-preview-"));
+  const args = [
+    "--headless=new", "--no-sandbox", "--no-zygote", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+    "--disable-extensions", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-default-apps",
+    "--disable-client-side-phishing-detection", "--disable-breakpad", "--mute-audio", "--hide-scrollbars",
+    "--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication,DnsOverHttps,InterestFeedContentSuggestions",
+    `--proxy-server=http://127.0.0.1:${port}`, "--proxy-bypass-list=<-loopback>", "--ignore-certificate-errors",
+    `--user-data-dir=${path.join(directory, "profile")}`, `--window-size=${previewConfig.width},${previewConfig.height}`,
+    "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", "about:blank",
+  ];
+  // Its own process group, so the renderer and helper processes are killed with it.
+  const child = spawn(previewConfig.binary, args, { stdio: ["ignore", "ignore", "pipe"], detached: true, env: { HOME: directory, PATH: process.env.PATH } });
+  const killBrowser = () => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  };
+  let socket = null;
+  const deadline = setTimeout(killBrowser, previewConfig.timeoutMs);
+  try {
+    const endpoint = await new Promise((resolve, reject) => {
+      let output = "";
+      const timer = setTimeout(() => reject(new Error("The browser did not start.")), 15000);
+      child.stderr.on("data", (chunk) => {
+        output = (output + chunk.toString()).slice(-4000);
+        const match = output.match(/DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/[\w-]+)/);
+        if (match) {
+          clearTimeout(timer);
+          resolve(match[1]);
+        }
+      });
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once("exit", () => {
+        clearTimeout(timer);
+        reject(new Error("The browser exited before it was ready."));
+      });
+    });
+    socket = new WebSocket(endpoint);
+    await new Promise((resolve, reject) => {
+      socket.addEventListener("open", resolve, { once: true });
+      socket.addEventListener("error", () => reject(new Error("Could not connect to the browser.")), { once: true });
+    });
+    let nextId = 0;
+    const pending = new Map();
+    const listeners = new Set();
+    socket.addEventListener("message", (event) => {
+      const message = JSON.parse(String(event.data));
+      if (message.id && pending.has(message.id)) {
+        const { resolve, reject } = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) reject(new Error(message.error.message));
+        else resolve(message.result);
+      } else if (message.method) {
+        listeners.forEach((listener) => listener(message));
+      }
+    });
+    const send = (method, params = {}, sessionId = undefined) => new Promise((resolve, reject) => {
+      nextId += 1;
+      pending.set(nextId, { resolve, reject });
+      socket.send(JSON.stringify({ id: nextId, method, params, ...(sessionId ? { sessionId } : {}) }));
+    });
+    const { targetId } = await send("Target.createTarget", { url: "about:blank" });
+    const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
+    await send("Page.enable", {}, sessionId);
+    await send("Emulation.setDeviceMetricsOverride", { width: previewConfig.width, height: previewConfig.height, deviceScaleFactor: 1, mobile: false }, sessionId);
+    if (!previewConfig.javascript) await send("Emulation.setScriptExecutionDisabled", { value: true }, sessionId);
+    const loaded = new Promise((resolve) => {
+      const timer = setTimeout(resolve, 12000);
+      listeners.add((message) => {
+        if (message.sessionId === sessionId && message.method === "Page.loadEventFired") {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    });
+    const navigation = await send("Page.navigate", { url }, sessionId);
+    if (navigation.errorText) {
+      throw Object.assign(new Error(`The site could not be loaded (${navigation.errorText.replace(/^net::/, "")}).`), { statusCode: 502 });
+    }
+    await loaded;
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const shot = await send("Page.captureScreenshot", { format: "jpeg", quality: 72, captureBeyondViewport: false }, sessionId);
+    return Buffer.from(shot.data, "base64");
+  } catch (error) {
+    if (child.exitCode !== null || child.signalCode === "SIGKILL") {
+      throw Object.assign(new Error(error.statusCode ? error.message : "The page took too long to render."), { statusCode: error.statusCode || 504 });
+    }
+    throw error;
+  } finally {
+    clearTimeout(deadline);
+    try {
+      socket?.close();
+    } catch {
+      // Already closed.
+    }
+    killBrowser();
+    await new Promise((resolve) => (child.exitCode !== null || child.signalCode ? resolve() : child.once("exit", resolve)));
+    const removeProfile = () => fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    await removeProfile().catch(() => setTimeout(() => removeProfile().catch(() => {}), 5000).unref());
+  }
+}
+
+// Runs at most `concurrency` browsers; later requests wait in a short queue.
+function withPreviewSlot(task) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      previewsRunning += 1;
+      task().then(resolve, reject).finally(() => {
+        previewsRunning -= 1;
+        const next = previewQueue.shift();
+        if (next) next.start();
+      });
+    };
+    if (previewsRunning < previewConfig.concurrency) {
+      run();
+      return;
+    }
+    if (previewQueue.length >= previewConfig.queueLimit) {
+      reject(Object.assign(new Error("Too many previews are waiting. Try again shortly."), { statusCode: 503 }));
+      return;
+    }
+    const entry = { start: () => { clearTimeout(entry.timer); run(); } };
+    entry.timer = setTimeout(() => {
+      const index = previewQueue.indexOf(entry);
+      if (index >= 0) previewQueue.splice(index, 1);
+      reject(Object.assign(new Error("The preview queue is full. Try again shortly."), { statusCode: 503 }));
+    }, previewConfig.queueWaitMs);
+    previewQueue.push(entry);
+  });
+}
+
+function prunePreviewCache() {
+  try {
+    const files = fs.readdirSync(previewDir).map((name) => {
+      const file = path.join(previewDir, name);
+      return { file, time: fs.statSync(file).mtimeMs };
+    }).sort((left, right) => right.time - left.time);
+    files.forEach((entry, index) => {
+      if (index >= previewConfig.cacheFiles || Date.now() - entry.time > previewConfig.cacheMs) fs.rmSync(entry.file, { force: true });
+    });
+  } catch {
+    // The cache directory may not exist yet.
+  }
+}
+
+async function handlePreview(request, url, response) {
+  if (!previewsAvailable()) {
+    sendJson(response, 501, { error: "Website previews are not available on this server." });
+    return;
+  }
+  const raw = queryInput(url, "url", 2048, response);
+  if (raw === null) return;
+  let target;
+  try {
+    target = new URL(/^https?:\/\//i.test(raw.trim()) ? raw.trim() : `http://${raw.trim()}/`);
+  } catch {
+    sendJson(response, 400, { error: "Enter a valid web address." });
+    return;
+  }
+  const host = target.hostname.replace(/^\[|\]$/g, "");
+  if (!["http:", "https:"].includes(target.protocol) || target.username || target.password || (target.port && !["80", "443"].includes(target.port)) ||
+    !(isIP(host) ? isPublicAddress(host) : normalizeDomain(host))) {
+    sendJson(response, 400, { error: "Previews are available for public websites on ports 80 and 443 only." });
+    return;
+  }
+  target.hash = "";
+  const key = crypto.createHash("sha256").update(`${target.href}|${previewConfig.javascript}`).digest("hex");
+  const cacheFile = path.join(previewDir, `${key}.jpg`);
+  const send = (image, cached) => {
+    response.writeHead(200, {
+      "content-type": "image/jpeg",
+      "content-length": image.length,
+      "cache-control": "private, max-age=3600",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'",
+      "x-preview-cache": cached ? "hit" : "miss",
+    });
+    response.end(image);
+  };
+  try {
+    const stat = fs.statSync(cacheFile);
+    if (Date.now() - stat.mtimeMs < previewConfig.cacheMs) {
+      send(fs.readFileSync(cacheFile), true);
+      return;
+    }
+  } catch {
+    // Not cached yet.
+  }
+  const user = currentUser(request);
+  const now = Date.now();
+  const usage = (previewUsage.get(user.id) || []).filter((time) => now - time < 3600000);
+  if (usage.length >= previewConfig.perUserHour) {
+    sendJson(response, 429, { error: `You can create up to ${previewConfig.perUserHour} previews per hour.` });
+    return;
+  }
+  usage.push(now);
+  previewUsage.set(user.id, usage);
+  if (!await resolveWebAddress(host, false).catch(() => null)) {
+    sendJson(response, 400, { error: "The site does not resolve to a public address." });
+    return;
+  }
+  try {
+    // Identical requests that arrive together share one browser run.
+    let pending = previewPending.get(key);
+    if (!pending) {
+      pending = withPreviewSlot(() => captureScreenshot(target.href)).finally(() => previewPending.delete(key));
+      previewPending.set(key, pending);
+    }
+    const image = await pending;
+    fs.mkdirSync(previewDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(cacheFile, image, { mode: 0o600 });
+    prunePreviewCache();
+    send(image, false);
+  } catch (error) {
+    if (!error.statusCode) console.error("Preview failed:", error.message);
+    if (!response.headersSent) sendJson(response, error.statusCode || 502, { error: error.statusCode ? error.message : "The page could not be rendered." });
+  }
+}
+
 const ripeStatCache = new Map();
 
 async function ripeStat(dataCall, params) {
@@ -6379,6 +6714,8 @@ function handleAuthStatus(request, response) {
     mailEnabled: Boolean(getMailConfig()),
     featureAccess: getFeatureAccess(),
     features: featureNames,
+    previewAvailable: previewsAvailable(),
+    previewScripts: previewConfig.javascript,
   });
 }
 
@@ -10670,6 +11007,19 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     void getRoutes[url.pathname](request, url, response).catch((error) => {
       console.error(`${url.pathname} failed:`, error);
       if (!response.headersSent) sendJson(response, 500, { error: "The request could not be completed." });
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/preview") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    if (!checkFeatureAccess(request, response, "preview", true)) return;
+    void handlePreview(request, url, response).catch((error) => {
+      console.error("Preview failed:", error);
+      if (!response.headersSent) sendJson(response, 500, { error: "The preview could not be created." });
     });
     return;
   }

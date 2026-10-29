@@ -1,6 +1,6 @@
 # Deploys the prebuilt image from GitHub Container Registry (no build, no clone needed).
 # Use: docker compose -f compose.registry.yaml up -d
-# Pin a release with: BNGLOOKUP_TAG=1.2.69 docker compose -f compose.registry.yaml up -d
+# Pin a release with: BNGLOOKUP_TAG=2.4.0 docker compose -f compose.registry.yaml up -d
 # For the ACME client also publish 80/443: add -f compose.acme.yaml
 services:
   dnslookup:
@@ -17,6 +17,13 @@ services:
       BLOCKLIST_RESOLVER: "${BLOCKLIST_RESOLVER:-}"
       WHOIS_SERVERS: "${WHOIS_SERVERS:-}"
       SETUP_TOKEN: "${SETUP_TOKEN:-}"
+      UPDATE_CHECK: "${UPDATE_CHECK:-true}"
+      SMTP_TEST_HELO: "${SMTP_TEST_HELO:-}"
+      URLHAUS_AUTH_KEY: "${URLHAUS_AUTH_KEY:-}"
+      VIRUSTOTAL_API_KEY: "${VIRUSTOTAL_API_KEY:-}"
+      GOOGLE_SAFE_BROWSING_KEY: "${GOOGLE_SAFE_BROWSING_KEY:-}"
+      SCREENSHOTS: "${SCREENSHOTS:-true}"
+      SCREENSHOT_JAVASCRIPT: "${SCREENSHOT_JAVASCRIPT:-false}"
     volumes:
       - app_data:/data
     restart: unless-stopped
@@ -28,7 +35,8 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
-    mem_limit: 512m
+    # 1 GB leaves room for the headless browser used by website previews.
+    mem_limit: 1g
     init: true
 
 volumes:
