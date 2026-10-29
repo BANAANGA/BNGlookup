@@ -222,3 +222,109 @@ document.querySelector("#dash-version-check").addEventListener("click", () => lo
 refresh();
 schedule();
 loadVersion();
+
+// Insights: ratings recorded by Web check, TLS grade and Email check, monitors and new-tool usage.
+const insightsRange = document.querySelector("#insights-range");
+const insightsStatus = document.querySelector("#insights-status");
+const insightsRefreshMs = 60000;
+const gradeOrder = ["A+", "A", "A-", "B", "C", "D", "E", "F", "T", "M"];
+
+function gradeClass(grade) {
+  if (/^A/.test(grade)) return "good";
+  if (/^[BC]$/.test(grade)) return "fair";
+  return "poor";
+}
+
+function relativeDate(iso) {
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+}
+
+function ratingRows(entries, empty) {
+  if (!entries.length) return `<p class="stats-empty">${escapeHtml(empty)}</p>`;
+  return `<ol class="rating-list">${entries.map((entry) => `
+    <li>
+      <span class="rating-grade ${gradeClass(entry.grade)}">${escapeHtml(entry.grade)}</span>
+      <span class="rating-domain"><a href="/?q=${encodeURIComponent(entry.domain.replace(/:\d+$/, ""))}">${escapeHtml(entry.domain)}</a><small>${escapeHtml(entry.detail)}</small></span>
+      <span class="rating-meta">${escapeHtml(entry.score)}<small>${escapeHtml(relativeDate(entry.checkedAt))}</small></span>
+    </li>`).join("")}</ol>`;
+}
+
+function gradeBar(grades) {
+  const entries = Object.entries(grades).sort(([left], [right]) => gradeOrder.indexOf(left) - gradeOrder.indexOf(right));
+  const total = entries.reduce((sum, [, count]) => sum + count, 0);
+  if (!total) return "";
+  return `<div class="grade-bar" role="img" aria-label="${escapeHtml(entries.map(([grade, count]) => `${grade}: ${count}`).join(", "))}">${entries.map(([grade, count]) => `
+    <span class="${gradeClass(grade)}" data-share="${(count / total) * 100}" title="${escapeHtml(`${grade}: ${count}`)}">${count / total >= 0.08 ? escapeHtml(grade) : ""}</span>`).join("")}</div>`;
+}
+
+function renderInsights(data) {
+  const ratings = data.ratings;
+  const rated = ratings.web.count + ratings.tls.count + ratings.email.count;
+  setText("#i-rated", rated.toLocaleString());
+  setText("#i-rated-detail", `${ratings.web.count} web · ${ratings.tls.count} TLS · ${ratings.email.count} email`);
+  setText("#i-web", ratings.web.average === null ? "—" : `${ratings.web.average}/100`);
+  setText("#i-web-detail", ratings.web.count ? `${ratings.web.grades["A+"] || 0} domains graded A+` : "No web checks yet");
+  setText("#i-email", ratings.email.average === null ? "—" : `${ratings.email.average}/100`);
+  setText("#i-email-detail", ratings.email.count ? `${(ratings.email.grades.D || 0) + (ratings.email.grades.F || 0)} domains graded D or F` : "No email checks yet");
+  const statuses = data.monitors.byStatus;
+  setText("#i-monitors", `${data.monitors.enabled.toLocaleString()} active`);
+  setText("#i-monitors-detail", `${statuses.fail || 0} failing · ${statuses.warn || 0} warning · ${data.monitors.alerts} alert(s) sent`);
+
+  document.querySelector("#dash-ratings").innerHTML = ["web", "tls", "email"].map((kind) => {
+    const rating = ratings[kind];
+    return `
+      <article class="account-card admin-card stats-panel rating-panel">
+        <div class="rating-heading"><h2>${escapeHtml(rating.label)}</h2><span>${escapeHtml(rating.count ? `${rating.count} domain(s) · avg ${rating.average}` : "No checks yet")}</span></div>
+        ${gradeBar(rating.grades)}
+        <h3>Best rated</h3>
+        ${ratingRows(rating.best, "Run a check to see ratings here.")}
+        <h3>Worst rated</h3>
+        ${ratingRows(rating.worst.filter((entry) => !rating.best.some((best) => best.domain === entry.domain)), rating.count ? "Rate more than five domains to see a separate worst list." : "—")}
+      </article>`;
+  }).join("");
+  document.querySelectorAll(".grade-bar [data-share]").forEach((segment) => { segment.style.flexBasis = `${segment.dataset.share}%`; });
+
+  document.querySelector("#dash-monitors").innerHTML = `
+    <p class="form-hint">${escapeHtml(`${data.monitors.total} monitor(s), ${data.monitors.enabled} active · ${data.monitors.changes} change(s) and ${data.monitors.alerts} alert(s) in this period · ${Object.entries(data.monitors.byKind).map(([kind, count]) => `${kind} ${count}`).join(", ") || "none yet"}`)}</p>
+    ${data.monitors.failing.length ? `<ol class="rating-list">${data.monitors.failing.map((monitor) => `
+      <li>
+        <span class="rating-grade ${monitor.status === "fail" ? "poor" : "fair"}">${monitor.status === "fail" ? "✕" : "!"}</span>
+        <span class="rating-domain"><strong>${escapeHtml(monitor.target)}</strong><small>${escapeHtml(`${monitor.kindLabel} · ${monitor.summary || ""}`)}</small></span>
+        <span class="rating-meta">${escapeHtml(monitor.username)}<small>${escapeHtml(monitor.changedAt ? relativeDate(monitor.changedAt) : "")}</small></span>
+      </li>`).join("")}</ol>` : '<p class="stats-empty">All active monitors are OK.</p>'}`;
+
+  const max = Math.max(1, ...data.usage.map((entry) => entry.count));
+  document.querySelector("#dash-usage").innerHTML = data.usage.map((entry) => `
+    <div class="stats-top-row">
+      <div class="stats-top-label"><span>${escapeHtml(entry.action)}</span><strong>${entry.count.toLocaleString()}</strong></div>
+      <svg class="stats-top-track" viewBox="0 0 100 5" preserveAspectRatio="none" aria-hidden="true"><rect width="100" height="5" rx="2.5" fill="#202020"/><rect width="${(entry.count / max) * 100}" height="5" rx="2.5" fill="#65d993"/></svg>
+    </div>`).join("");
+
+  document.querySelector("#dash-takeover").innerHTML = data.takeoverRisks.length
+    ? `<ol class="rating-list">${data.takeoverRisks.map((risk) => `
+      <li>
+        <span class="rating-grade ${risk.grade === "risk" ? "poor" : "fair"}">${risk.grade === "risk" ? "✕" : "!"}</span>
+        <span class="rating-domain"><strong>${escapeHtml(risk.domain)}</strong><small>${escapeHtml(`CNAME ${risk.detail}`)}</small></span>
+        <span class="rating-meta">${escapeHtml(risk.grade === "risk" ? "Takeover possible" : "Dangling")}<small>${escapeHtml(relativeDate(risk.checkedAt))}</small></span>
+      </li>`).join("")}</ol>`
+    : '<p class="stats-empty">No takeover risks found by Magic scans in this period.</p>';
+  insightsStatus.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+
+async function loadInsights() {
+  try {
+    const response = await fetch(`/api/admin/insights?days=${insightsRange.value}`, { credentials: "same-origin" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Insights could not be loaded.");
+    renderInsights(data);
+  } catch (error) {
+    insightsStatus.textContent = error.message;
+  }
+}
+
+insightsRange.addEventListener("change", loadInsights);
+loadInsights();
+setInterval(() => {
+  if (!document.hidden) void loadInsights();
+}, insightsRefreshMs);

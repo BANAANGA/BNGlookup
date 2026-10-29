@@ -42,7 +42,7 @@ small Docker container with no application dependencies.
 
 - First-run setup, user roles, per-feature access (public / users / admins), daily public quota.
 - Remove (permanently delete) or disable users; optional email addresses and **email results to yourself** through a configurable SMTP server.
-- Live **Dashboard** (CPU, memory, storage, load, activity, top tools, latest queries; refreshes every 3 s).
+- Live **Dashboard** (CPU, memory, storage, load, activity, top tools, latest queries; refreshes every 3 s) with **Insights**: best and worst rated domains (web headers, TLS, email), monitors needing attention, new-tool usage and takeover risks.
 - Stats, Logs and Admin tabs; searchable, sortable, click-to-copy result tables.
 - Selectable DNS-over-HTTPS resolver, per-query nameserver, trusted proxies, port-scan limits.
 - Custom site title and icon.
@@ -461,7 +461,15 @@ Several tools send data to external services; these are listed under
   results. Mail only goes to the user's own address, max 10 per hour per user. The SMTP password
   is stored in the data volume and never displayed.
 - **Dashboard** shows live CPU, memory (container cgroup limit when set), data-volume
-  storage, system load, 24 h activity and the latest queries. Admin only.
+  storage, system load, 24 h activity and the latest queries. Admin only. Its
+  **Insights** section (7, 30 or 90 days, refreshed every minute) lists the best
+  and worst rated domains for web security headers, TLS grade and email security,
+  with each grade distribution and average; monitors that are failing or
+  warning, with alert and change counts; usage of the newer tools; and subdomain
+  takeover risks found by Magic scans. Each Web check, TLS test and Email check
+  stores the latest rating per domain in the `domain_ratings` table (kept 180
+  days). Email security is scored from the check's findings: 100 minus 15 per
+  serious, 6 per medium and 2 per minor issue.
 - **Logs** show login attempts, admin actions and lookup/scan requests (latest 200
   per tab; up to 20,000 records kept). **Stats** summarize 7, 30 or 90 days of
   query logs (visitors, failures, daily charts, query types, top names). Treat
