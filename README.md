@@ -33,6 +33,7 @@ small Docker container with no application dependencies.
 - **Security**: a **DNS health** check (delegation, glue, SOA serials, lame servers, open zone transfers and open recursion), a **reputation** check (filtering resolvers, blocklists, optional URLhaus, VirusTotal and Google Safe Browsing) and a **lookalike domain** finder for typo and homoglyph domains.
 - **IP calculator**: IPv4 and IPv6 network, range, mask and subnet splitting, calculated in the browser.
 - **SPF flattener** (Email tab): replaces includes with IP ranges to get under the 10-lookup limit.
+- **Website previews**: screenshots of the site in Web check, Magic scan, Reputation and Lookalike results, rendered on the server.
 - **Print / save as PDF** for any result.
 - **Two-factor login** (authenticator app with recovery codes) and **API tokens** for scripts.
 - **Monitors**: scheduled checks of websites, certificates, DNS records, email security and blocklists, with email alerts when something changes or breaks.
@@ -422,6 +423,20 @@ Several tools send data to external services; these are listed under
   9116), `robots.txt` (sitemaps, blocking all crawlers), the sitemap, and mixed
   content (scripts, images, frames or stylesheets loaded over `http://` on an
   HTTPS page).
+- **Website previews** (feature `preview`, needs a login): Web check shows the
+  final page, Magic scan the domain's homepage, Reputation the site, and Lookalike
+  domains thumbnails of up to 12 registered lookalikes with a web server. The
+  screenshots (1280 × 800, JPEG) are taken by headless Chromium in the container
+  and cached in the data volume for one hour. To make looking at suspicious
+  sites safe, the browser runs with **JavaScript disabled** (set
+  `SCREENSHOT_JAVASCRIPT=true` to allow scripts, which renders more sites but runs
+  their code on your server), QUIC and non-proxied WebRTC are off, and **all of its
+  traffic goes through a filtering proxy inside the app** that only connects to
+  public addresses on ports 80 and 443, so a page cannot load anything from your
+  network. Two browsers run at a time, others wait in a short queue; each user can
+  create 150 previews per hour. Set `SCREENSHOTS=false` to turn previews off, or
+  `CHROMIUM_PATH` to use another Chromium binary. Chromium adds about 300 MB to
+  the image; it runs without its own sandbox (the container's restrictions apply).
 - **Print / save as PDF**: the button under every result prints just the result in
   dark-on-white, with collapsed sections opened; choose *Save as PDF* in the
   browser's print dialog.
@@ -587,6 +602,7 @@ Environment variables:
 | `DOH_ENDPOINT` | Extra custom DoH JSON endpoint, offered as a resolver choice. |
 | `SETUP_TOKEN` | Optional secret required during first-run setup, so a fresh instance reachable from the internet cannot be claimed by someone else. Set it before first start; it is no longer used once an administrator exists. |
 | `WHOIS_SERVERS` | Per-TLD WHOIS server overrides for registries that publish none at IANA, e.g. `ga=whois.example.ga,xyz=whois.nic.xyz`. |
+| `SCREENSHOTS=false`, `SCREENSHOT_JAVASCRIPT=true`, `CHROMIUM_PATH` | Turn website previews off, allow JavaScript in previews (off by default for safety), or point to a different Chromium binary. |
 | `URLHAUS_AUTH_KEY`, `VIRUSTOTAL_API_KEY`, `GOOGLE_SAFE_BROWSING_KEY` | Optional keys for the reputation check (abuse.ch URLhaus, VirusTotal, Google Safe Browsing). Without them the check uses filtering DNS resolvers and blocklists only. |
 | `BLOCKLIST_RESOLVER` | DNS server(s) for blocklist checks, e.g. `192.168.1.53` or `10.0.0.2:5353`, comma-separated. Default: the container's system resolver. |
 | `UPDATE_CHECK=false` | Disable the dashboard's check for new releases (otherwise the server asks the GitHub API at most every 6 hours, only while an admin views the dashboard). |

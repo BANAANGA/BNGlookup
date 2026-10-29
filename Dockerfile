@@ -17,8 +17,10 @@ WORKDIR /app
 COPY --from=testssl /opt/testssl /opt/testssl
 RUN ln -s /opt/testssl/testssl.sh /usr/local/bin/testssl.sh
 
+# chromium and fonts render website previews (set SCREENSHOTS=false to turn them off).
 RUN apk add --no-cache iputils-tracepath coreutils nmap nmap-scripts zmap \
     bash procps drill libidn socat openssl xxd bind-tools \
+    chromium nss freetype harfbuzz ttf-freefont font-liberation font-noto-emoji \
  && apk add --no-cache --virtual .setcap libcap-utils \
  && setcap cap_net_raw,cap_net_admin=eip "$(command -v zmap)" \
  && apk del .setcap \
