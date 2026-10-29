@@ -2504,7 +2504,7 @@ function renderDomainInfo(data) {
     ${dnsNameservers?.status && dnsNameservers.status !== "NOERROR" ? `<p class="detail-notice">Nameserver query status: ${escapeHtml(dnsNameservers.status)}</p>` : ""}
     ${dnsNameservers?.addressesIncomplete ? '<p class="detail-notice">Some nameserver IP address lookups could not be completed.</p>' : ""}
     ${(registration?.nameservers?.length || dnsNameservers?.records?.length) ? `<section class="record-section">
-      <h3>Nameservers <span>${nameservers.length}</span></h3>
+      <h3>Nameservers <span>${nameserverNames.size}</span></h3>
       <div class="nameserver-list">${nameservers}</div>
     </section>` : ""}
     ${!registration && !dnsNameservers ? '<p class="empty-result">No domain details could be retrieved.</p>' : ""}`;

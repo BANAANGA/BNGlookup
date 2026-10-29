@@ -22,6 +22,8 @@ with no npm dependencies, a SQLite database and a browser interface.
 
 ## Contents
 
+Each tool is explained in more detail, with a screenshot, in the **[wiki](docs/README.md)**.
+
 1. [Screenshots](#screenshots)
 2. [Quick start](#quick-start)
 3. [Installation](#installation)
@@ -250,6 +252,9 @@ Set these in `.env` next to the compose file, or in front of the command.
 | `APP_VERSION`, `APP_COMMIT`, `APP_BUILD_DATE` | `dev` | Build information on the dashboard; set by the release workflow. |
 
 ## Tools
+
+See the **[wiki](docs/README.md)** for a page per tool with a screenshot and a
+step-by-step explanation.
 
 Each tool is a *feature* whose access an administrator can set to Public,
 Logged-in users or Administrators (see [Accounts and access](#accounts-and-access)).
