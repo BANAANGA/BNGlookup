@@ -922,7 +922,7 @@ function renderReputationResult(data) {
     ])}
     ${!data.exists ? '<p class="detail-notice">The domain does not resolve, so filtering resolvers cannot show whether they block it.</p>' : ""}
     <section class="email-auth"><h3>Sources</h3>${dataTable(["Source", "Result", "Details"], rows, "web-checks-table")}
-      <p class="scan-disclaimer">Filtering resolvers (Quad9, Cloudflare for Families, DNS4EU) are compared with an unfiltered answer; a block means the service considers the domain malicious. Blocklists cover spam sources. URLhaus, VirusTotal and Google Safe Browsing are used when the administrator has configured their API keys. A clean result is not a guarantee.</p>
+      <p class="scan-disclaimer">Filtering resolvers (Quad9, Cloudflare for Families, DNS4EU, CleanBrowsing) are compared with an unfiltered answer; a block means the service considers the domain malicious. Spam blocklists cover mail abuse. The threat lists (Spamhaus DROP for hijacked networks, abuse.ch Feodo Tracker for botnet command-and-control servers, abuse.ch URLhaus for malware hosts and OpenPhish for phishing sites) are downloaded by the server every few hours and checked locally. VirusTotal, Google Safe Browsing and the URLhaus API are used when the administrator has configured their keys. A clean result is not a guarantee.</p>
     </section>`;
   resultPanel.hidden = false;
 }

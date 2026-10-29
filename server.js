@@ -3816,7 +3816,136 @@ const protectiveResolvers = [
   { id: "quad9", label: "Quad9 (threat blocking)", endpoint: "https://dns.quad9.net/dns-query", format: "wire" },
   { id: "cloudflare-security", label: "Cloudflare for Families (malware)", endpoint: "https://security.cloudflare-dns.com/dns-query", format: "wire" },
   { id: "dns4eu", label: "DNS4EU protective", endpoint: "https://protective.joindns4.eu/dns-query", format: "wire" },
+  { id: "cleanbrowsing", label: "CleanBrowsing Security", endpoint: "https://doh.cleanbrowsing.org/doh/security-filter/", format: "wire" },
 ];
+
+// Free, keyless threat lists, downloaded on first use and cached for six hours.
+const threatFeeds = [
+  {
+    id: "spamhaus-drop", label: "Spamhaus DROP (hijacked networks)", kind: "cidr",
+    urls: ["https://www.spamhaus.org/drop/drop_v4.json", "https://www.spamhaus.org/drop/drop_v6.json"],
+    parse: (text) => text.split(/\r?\n/).flatMap((line) => {
+      try {
+        const entry = JSON.parse(line);
+        return entry.cidr ? [[entry.cidr, entry.sblid ? `Spamhaus ${entry.sblid}` : "listed network"]] : [];
+      } catch {
+        return [];
+      }
+    }),
+  },
+  {
+    id: "feodo", label: "abuse.ch Feodo Tracker (botnet C2)", kind: "ip",
+    urls: ["https://feodotracker.abuse.ch/downloads/ipblocklist.json"],
+    parse: (text) => {
+      const entries = JSON.parse(text);
+      return Array.isArray(entries) ? entries.filter((entry) => entry.ip_address).map((entry) => [entry.ip_address, `${entry.malware || "botnet"} C2${entry.port ? ` on port ${entry.port}` : ""}${entry.status ? ` (${entry.status})` : ""}`]) : [];
+    },
+  },
+  {
+    id: "urlhaus-hosts", label: "abuse.ch URLhaus (malware hosts)", kind: "host",
+    urls: ["https://urlhaus.abuse.ch/downloads/hostfile/"],
+    parse: (text) => text.split(/\r?\n/).filter((line) => line && !line.startsWith("#"))
+      .map((line) => line.trim().split(/\s+/).pop().toLowerCase()).filter(Boolean).map((host) => [host, "hosts malware downloads"]),
+  },
+  {
+    id: "openphish", label: "OpenPhish (phishing)", kind: "host",
+    urls: ["https://openphish.com/feed.txt"],
+    parse: (text) => text.split(/\r?\n/).flatMap((line) => {
+      try {
+        return [[new URL(line.trim()).hostname.toLowerCase(), "active phishing page"]];
+      } catch {
+        return [];
+      }
+    }),
+  },
+];
+const threatFeedLimits = { maxAgeMs: 6 * 3600000, retryMs: 15 * 60000, bytes: 32 * 1024 * 1024, timeoutMs: 20000 };
+const threatFeedCache = new Map();
+
+async function downloadThreatFeed(feed) {
+  const entries = [];
+  for (const url of feed.urls) {
+    const response = await fetch(url, { headers: { "user-agent": `BNGlookup/${appBuild.version} (+https://github.com/${appRepository})` }, signal: AbortSignal.timeout(threatFeedLimits.timeoutMs) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const length = Number(response.headers.get("content-length") || 0);
+    if (length > threatFeedLimits.bytes) throw new Error("The list is too large.");
+    const text = await response.text();
+    if (text.length > threatFeedLimits.bytes) throw new Error("The list is too large.");
+    entries.push(...feed.parse(text));
+  }
+  if (!entries.length) throw new Error("The list was empty.");
+  const data = { count: entries.length, details: new Map(), networks: [] };
+  if (feed.kind === "cidr") {
+    data.list = new net.BlockList();
+    for (const [cidr, detail] of entries) {
+      const [address, prefix] = cidr.split("/");
+      const family = isIP(address);
+      if (!family || !/^\d+$/.test(prefix || "")) continue;
+      data.list.addSubnet(address, Number(prefix), family === 4 ? "ipv4" : "ipv6");
+      data.networks.push([address, Number(prefix), family, `${cidr} · ${detail}`]);
+    }
+  } else {
+    for (const [key, detail] of entries) if (!data.details.has(key)) data.details.set(key, detail);
+  }
+  return data;
+}
+
+async function loadThreatFeed(feed) {
+  const cached = threatFeedCache.get(feed.id);
+  const now = Date.now();
+  if (cached?.loading) return cached.loading;
+  if (cached?.data && now - cached.loadedAt < threatFeedLimits.maxAgeMs) return cached;
+  if (cached?.failedAt && now - cached.failedAt < threatFeedLimits.retryMs) return cached;
+  const loading = downloadThreatFeed(feed).then(
+    (data) => {
+      const entry = { data, loadedAt: Date.now() };
+      threatFeedCache.set(feed.id, entry);
+      return entry;
+    },
+    (error) => {
+      // Keep using an older copy when a refresh fails.
+      const entry = { ...(cached || {}), loading: null, failedAt: Date.now(), error: String(error.message).slice(0, 80) };
+      threatFeedCache.set(feed.id, entry);
+      return entry;
+    },
+  );
+  threatFeedCache.set(feed.id, { ...(cached || {}), loading });
+  return loading;
+}
+
+async function threatFeedVerdicts(domain, addresses) {
+  const hosts = [];
+  if (domain) {
+    const labels = domain.split(".");
+    for (let index = 0; index < labels.length - 1; index += 1) hosts.push(labels.slice(index).join("."));
+  }
+  return Promise.all(threatFeeds.map(async (feed) => {
+    const entry = await loadThreatFeed(feed);
+    if (!entry?.data) return { source: feed.label, state: "error", detail: `The list could not be downloaded${entry?.error ? ` (${entry.error})` : ""}.` };
+    const matches = [];
+    if (feed.kind === "host") {
+      for (const host of [...hosts, ...addresses]) if (entry.data.details.has(host)) matches.push(`${host} ${entry.data.details.get(host)}`);
+    } else if (feed.kind === "ip") {
+      for (const address of addresses) if (entry.data.details.has(address)) matches.push(`${address}: ${entry.data.details.get(address)}`);
+    } else {
+      for (const address of addresses) {
+        const family = isIP(address);
+        if (!family || !entry.data.list.check(address, family === 4 ? "ipv4" : "ipv6")) continue;
+        const network = entry.data.networks.find(([base, prefix, networkFamily]) => {
+          if (networkFamily !== family) return false;
+          const single = new net.BlockList();
+          single.addSubnet(base, prefix, family === 4 ? "ipv4" : "ipv6");
+          return single.check(address, family === 4 ? "ipv4" : "ipv6");
+        });
+        matches.push(`${address} in ${network ? network[3] : "a listed network"}`);
+      }
+    }
+    const age = Math.round((Date.now() - entry.loadedAt) / 60000);
+    return matches.length
+      ? { source: feed.label, state: "flagged", detail: matches.slice(0, 3).join("; ") }
+      : { source: feed.label, state: "clean", detail: `Not listed (${entry.data.count.toLocaleString()} ${entry.data.count === 1 ? "entry" : "entries"}, updated ${age < 1 ? "just now" : age < 120 ? `${age} min ago` : `${Math.round(age / 60)} h ago`})` };
+  }));
+}
 const sinkholeAddresses = new Set(["0.0.0.0", "127.0.0.1", "::", "::1"]);
 const reputationKeys = {
   urlhaus: process.env.URLHAUS_AUTH_KEY || "",
@@ -3872,8 +4001,6 @@ async function optionalReputationSources(host, isAddress) {
     } catch (error) {
       results.push({ source: "URLhaus (abuse.ch)", state: "error", detail: `Lookup failed (${String(error.message).slice(0, 60)})` });
     }
-  } else {
-    results.push({ source: "URLhaus (abuse.ch)", state: "off", detail: "Not configured (URLHAUS_AUTH_KEY)" });
   }
   if (reputationKeys.virustotal) {
     try {
@@ -3930,10 +4057,11 @@ async function runReputation(input) {
   const target = domain || host;
   const started = Date.now();
   const addresses = isAddress ? [host] : (await dohAnswers(target, "A")).values.filter((address) => isIP(address) === 4).slice(0, 2);
-  const [protective, blocklists, optional] = await Promise.all([
+  const [protective, blocklists, optional, feeds] = await Promise.all([
     domain ? protectiveDnsVerdicts(domain) : Promise.resolve(null),
     checkBlocklists({ addresses: addresses.filter((address) => isPublicAddress(address)), domain }).catch(() => null),
     optionalReputationSources(target, isAddress),
+    threatFeedVerdicts(domain, addresses.filter((address) => isPublicAddress(address))),
   ]);
   const blocklistSources = [];
   if (blocklists?.domain) {
@@ -3944,7 +4072,7 @@ async function runReputation(input) {
     blocklistSources.push({ source: `IP blocklists for ${entry.address} (${entry.checked})`, state: entry.listed ? "flagged" : "clean",
       detail: entry.listed ? `Listed on ${entry.lists.filter((list) => list.status === "listed").map((list) => list.name).join(", ")}` : "Not listed" });
   }
-  const sources = [...(protective?.verdicts || []), ...blocklistSources, ...optional];
+  const sources = [...(protective?.verdicts || []), ...blocklistSources, ...feeds, ...optional];
   const flagged = sources.filter((source) => source.state === "flagged");
   const suspicious = sources.filter((source) => source.state === "suspicious");
   return {

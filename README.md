@@ -388,11 +388,18 @@ Several tools send data to external services; these are listed under
   unusual SOA timers. Results are rated for the dashboard.
 - **Reputation** (feature `reputation`, Security tab) accepts a domain, URL or
   public IP. Without any keys it compares the domain's address on Quad9,
-  Cloudflare for Families and DNS4EU protective DNS with an unfiltered answer (a
-  block means the service considers it malicious) and checks the spam
-  blocklists. With `URLHAUS_AUTH_KEY`, `VIRUSTOTAL_API_KEY` or
-  `GOOGLE_SAFE_BROWSING_KEY` set, those services are asked too. The target is sent
-  to the services that are used.
+  Cloudflare for Families, DNS4EU protective DNS and CleanBrowsing Security with
+  an unfiltered answer (a block means the service considers it malicious), checks
+  the spam blocklists, and looks the domain (and its parent domains) and its
+  addresses up in free threat lists: **Spamhaus DROP** (hijacked and criminal
+  networks), **abuse.ch Feodo Tracker** (botnet command-and-control servers),
+  **abuse.ch URLhaus** (hosts serving malware) and **OpenPhish** (phishing sites).
+  The lists are downloaded by the server on first use and refreshed every six
+  hours (an older copy is kept if a refresh fails); the queried name is not sent
+  to them. With `URLHAUS_AUTH_KEY`, `VIRUSTOTAL_API_KEY` or
+  `GOOGLE_SAFE_BROWSING_KEY` set, those services are asked too. Palo Alto URL
+  categories (such as grayware) need a Palo Alto firewall or subscription and are
+  not included.
 - **Lookalike domains** (feature `lookalike`, Security tab): generates up to 260
   variants of the registrable domain (homoglyphs such as `0`/`o` and `rn`/`m`,
   missing, swapped, doubled and nearby-key letters, hyphens, added words such as
