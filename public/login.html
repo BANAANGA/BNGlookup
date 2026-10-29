@@ -30,6 +30,13 @@
           <p class="error-message" id="auth-error" role="alert" hidden></p>
           <button class="submit-button" type="submit"><span>Log in</span><span aria-hidden="true">→</span></button>
         </form>
+        <form id="twofactor-form" class="account-form" hidden>
+          <p class="account-description">Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
+          <label for="twofactor-code">Code</label>
+          <input id="twofactor-code" name="code" type="text" maxlength="16" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" required>
+          <p class="error-message" id="twofactor-error" role="alert" hidden></p>
+          <button class="submit-button" type="submit"><span>Verify</span><span aria-hidden="true">→</span></button>
+        </form>
       </section>
     </main>
   </body>

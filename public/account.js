@@ -43,6 +43,10 @@ async function submitAccountForm(form, endpoint, includePasswordConfirmation = f
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Unable to sign in.");
+      if (result.twoFactorRequired) {
+        startTwoFactor(result.challenge);
+        return;
+      }
       if (result.mustChangePassword) {
         window.location.assign("/change-password.html");
         return;
@@ -71,5 +75,51 @@ if (setupForm) {
     })
     .catch(() => {});
 }
+// Second sign-in step for accounts with two-factor login.
+function startTwoFactor(challenge) {
+  const twoFactorForm = document.querySelector("#twofactor-form");
+  const codeInput = document.querySelector("#twofactor-code");
+  const twoFactorError = document.querySelector("#twofactor-error");
+  loginForm.hidden = true;
+  twoFactorForm.hidden = false;
+  codeInput.value = "";
+  codeInput.focus();
+  twoFactorForm.onsubmit = async (event) => {
+    event.preventDefault();
+    twoFactorError.hidden = true;
+    const button = twoFactorForm.querySelector("button[type=submit]");
+    button.disabled = true;
+    try {
+      const response = await fetch("/api/auth/login/2fa", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ challenge, code: codeInput.value.trim() }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        if (result.restart) {
+          twoFactorForm.hidden = true;
+          loginForm.hidden = false;
+          loginForm.elements.password.value = "";
+          showAuthError(result.error);
+          return;
+        }
+        throw new Error(result.error || "That code is not valid.");
+      }
+      if (result.recoveryCodeUsed) {
+        window.alert(`You signed in with a recovery code. ${result.recoveryCodesLeft} recovery code(s) left; create new ones on My account if you are running low.`);
+      }
+      window.location.assign(result.mustChangePassword ? "/change-password.html" : safeNextPath());
+    } catch (error) {
+      twoFactorError.textContent = error.message;
+      twoFactorError.hidden = false;
+      codeInput.select();
+    } finally {
+      button.disabled = false;
+    }
+  };
+}
+
 if (loginForm) submitAccountForm(loginForm, "/api/auth/login");
 if (changeForm) submitAccountForm(changeForm, "/api/auth/change-password", true);

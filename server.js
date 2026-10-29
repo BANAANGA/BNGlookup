@@ -17,7 +17,7 @@ const { lookup: resolveHost, Resolver: DnsResolver } = require("node:dns/promise
 const { domainToASCII } = require("node:url");
 const { createAcmeManager } = require("./acme");
 const { sendMail, validAddress } = require("./mail");
-const { analyzeEmailHeaders } = require("./email-headers");
+const { analyzeEmailHeaders, organizationalDomain } = require("./email-headers");
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
@@ -86,6 +86,7 @@ const staticFiles = new Set([
   "/monitors.html",
   "/monitors.js",
   "/tools.js",
+  "/qr.js",
   "/styles.css",
   "/app.js",
   "/account.js",
@@ -131,6 +132,11 @@ const featureAccessDefaults = {
   "record-builder": "user",
   "bulk-domains": "admin",
   monitors: "user",
+  "dns-health": "user",
+  reputation: "user",
+  lookalike: "user",
+  "ip-calc": "user",
+  "api-tokens": "user",
   history: "user",
 };
 const featureNames = {
@@ -158,6 +164,11 @@ const featureNames = {
   "record-builder": "SPF, DMARC, MTA-STS, TLS-RPT and BIMI record builder",
   "bulk-domains": "Bulk domain check (up to 50 domains)",
   monitors: "Monitoring and email alerts (requires login)",
+  "dns-health": "DNS health check (delegation, SOA, zone transfer, open recursion)",
+  reputation: "Reputation check (protective DNS, blocklists, optional threat feeds)",
+  lookalike: "Lookalike domain finder",
+  "ip-calc": "IP / CIDR calculator",
+  "api-tokens": "API tokens for scripts (requires login)",
   history: "Lookup history (saved per user)",
 };
 
@@ -313,6 +324,24 @@ if (!database.prepare("PRAGMA table_info(users)").all()
   .some((column) => column.name === "email")) {
   database.exec("ALTER TABLE users ADD COLUMN email TEXT");
 }
+for (const [column, definition] of [["totp_secret", "TEXT"], ["totp_enabled", "INTEGER NOT NULL DEFAULT 0"], ["totp_last_step", "INTEGER NOT NULL DEFAULT 0"], ["totp_recovery", "TEXT"]]) {
+  if (!database.prepare("PRAGMA table_info(users)").all().some((entry) => entry.name === column)) {
+    database.exec(`ALTER TABLE users ADD COLUMN ${column} ${definition}`);
+  }
+}
+database.exec(`
+  CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    prefix TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    expires_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS api_tokens_user ON api_tokens(user_id);
+`);
 database.prepare("UPDATE admin_logs SET action = 'Port scan' WHERE action = 'Port scan'").run();
 database.prepare(`
   INSERT OR IGNORE INTO app_settings (key, value) VALUES ('trusted_proxies', ?)
@@ -1231,7 +1260,7 @@ function dnsQuestionType(type) {
   throw new Error("This record type is not supported for direct nameserver queries.");
 }
 
-function encodeDnsQuery(name, typeCode, { dnssec = false, checkingDisabled = false } = {}) {
+function encodeDnsQuery(name, typeCode, { dnssec = false, checkingDisabled = false, recursion = true } = {}) {
   const labels = name.replace(/\.$/, "").split(".");
   const encodedName = Buffer.concat([
     ...labels.map((label) => {
@@ -1246,7 +1275,7 @@ function encodeDnsQuery(name, typeCode, { dnssec = false, checkingDisabled = fal
   const header = Buffer.alloc(12);
   header.writeUInt16BE(Math.floor(Math.random() * 65536), 0);
   // RD, plus AD to request the validation result and CD to skip validation when asked.
-  header.writeUInt16BE(0x0100 | (dnssec ? 0x0020 : 0) | (checkingDisabled ? 0x0010 : 0), 2);
+  header.writeUInt16BE((recursion ? 0x0100 : 0) | (dnssec ? 0x0020 : 0) | (checkingDisabled ? 0x0010 : 0), 2);
   header.writeUInt16BE(1, 4);
   const questionTail = Buffer.alloc(4);
   questionTail.writeUInt16BE(typeCode, 0);
@@ -1416,6 +1445,8 @@ function parseDnsPacket(packet) {
   }
   return {
     status: flags & 0x000f,
+    authoritative: Boolean(flags & 0x0400),
+    recursionAvailable: Boolean(flags & 0x0080),
     truncated: Boolean(flags & 0x0200),
     authenticated: Boolean(flags & 0x0020),
     answers: sections[0],
@@ -1511,6 +1542,198 @@ async function directDnsLookup(name, type, nameserver) {
     authority: result.authority,
     additional: result.additional,
   };
+}
+
+
+// ---------------------------------------------------------------- DNS health check
+
+// One query sent straight to a nameserver address (not through the DoH resolver).
+async function queryNameserverAt(address, name, type, { recursion = false, tcp = false } = {}) {
+  const typeCode = typeof type === "number" ? type : dnsTypeCodes[type];
+  const query = encodeDnsQuery(name, typeCode, { recursion });
+  const nameserver = { address, family: isIP(address), port: 53 };
+  const started = performance.now();
+  let packet = tcp ? await sendDnsTcp(nameserver, query) : await sendDnsUdp(nameserver, query);
+  if (packet.length < 12 || packet.readUInt16BE(0) !== query.readUInt16BE(0)) throw new Error("Invalid response.");
+  if (!tcp && packet.readUInt16BE(2) & 0x0200) packet = await sendDnsTcp(nameserver, query);
+  return { ...parseDnsPacket(packet), timeMs: Math.round(performance.now() - started) };
+}
+
+async function dohAnswers(name, type) {
+  const code = dnsTypeCodes[type];
+  return queryDohDns(name, type).then(
+    (data) => ({ status: data.status, values: data.answers.filter((answer) => answer.type === code || answer.typeName === type).map((answer) => String(answer.data).replace(/\.$/, "").toLowerCase()) }),
+    () => ({ status: null, values: [] }),
+  );
+}
+
+function parseSoa(data) {
+  const [mname, rname, serial, refresh, retry, expire, minimum] = String(data || "").split(/\s+/);
+  return mname ? { mname: mname.replace(/\.$/, ""), rname: rname?.replace(/\.$/, ""), serial: Number(serial), refresh: Number(refresh), retry: Number(retry), expire: Number(expire), minimum: Number(minimum) } : null;
+}
+
+async function findZoneApex(name) {
+  let candidate = name;
+  for (let step = 0; step < 5 && candidate.includes("."); step += 1) {
+    const soa = await dohAnswers(candidate, "SOA");
+    if (soa.values.length) return { zone: candidate, soa: parseSoa(soa.values[0]) };
+    if (soa.status === 3 && step === 0) return { zone: null, soa: null, nxdomain: true };
+    candidate = candidate.slice(candidate.indexOf(".") + 1);
+  }
+  return { zone: null, soa: null };
+}
+
+// Asks a server of the parent zone which nameservers (and glue) it delegates the zone to.
+async function parentDelegation(zone) {
+  const parent = zone.slice(zone.indexOf(".") + 1);
+  const parentNs = (await dohAnswers(parent || ".", "NS")).values.slice(0, 3);
+  for (const host of parentNs) {
+    const address = (await dohAnswers(host, "A")).values.find((value) => isPublicAddress(value));
+    if (!address) continue;
+    try {
+      const reply = await queryNameserverAt(address, zone, "NS");
+      const records = [...reply.answers, ...reply.authority].filter((record) => record.typeName === "NS" && record.name.replace(/\.$/, "").toLowerCase() === zone);
+      if (!records.length) continue;
+      const glue = {};
+      for (const record of reply.additional.filter((entry) => ["A", "AAAA"].includes(entry.typeName))) {
+        const host = record.name.replace(/\.$/, "").toLowerCase();
+        (glue[host] ||= []).push(String(record.data));
+      }
+      return { server: host, nameservers: [...new Set(records.map((record) => String(record.data).replace(/\.$/, "").toLowerCase()))].sort(), glue };
+    } catch {
+      // Try the next parent server.
+    }
+  }
+  return null;
+}
+
+const dnsHealthLimits = { nameservers: 8 };
+
+async function runDnsHealth(input) {
+  const domain = normalizeDomain(hostFromInput(input));
+  if (!domain) throw Object.assign(new Error("Enter a valid domain name."), { statusCode: 400 });
+  const started = Date.now();
+  const apex = await findZoneApex(domain);
+  if (!apex.zone) {
+    return { domain, error: apex.nxdomain ? "The domain does not exist (NXDOMAIN)." : "No DNS zone (SOA record) was found for this name.", checks: [], nameservers: [] };
+  }
+  const zone = apex.zone;
+  const [childNs, delegation] = await Promise.all([dohAnswers(zone, "NS"), parentDelegation(zone).catch(() => null)]);
+  const hosts = [...new Set([...(delegation?.nameservers || []), ...childNs.values])].slice(0, dnsHealthLimits.nameservers);
+  const recursionProbe = "www.wikipedia.org";
+  const nameservers = await Promise.all(hosts.map(async (host) => {
+    const [v4, v6] = await Promise.all([dohAnswers(host, "A"), dohAnswers(host, "AAAA")]);
+    const addresses = [...v4.values, ...v6.values];
+    const entry = { host, addresses, ipv6: v6.values.length > 0, inParent: delegation ? delegation.nameservers.includes(host) : null, inZone: childNs.values.includes(host), results: [] };
+    const targets = addresses.filter((address) => isPublicAddress(address)).sort((left, right) => isIP(left) - isIP(right)).slice(0, 2);
+    if (!addresses.length) entry.error = "The name server's host name does not resolve.";
+    else if (!targets.length) entry.error = "The name server only has private or reserved addresses.";
+    for (const address of targets) {
+      const result = { address };
+      try {
+        const soa = await queryNameserverAt(address, zone, "SOA");
+        result.timeMs = soa.timeMs;
+        result.rcode = dnsStatusNames[soa.status] || String(soa.status);
+        result.authoritative = soa.authoritative && soa.status === 0;
+        result.serial = parseSoa(soa.answers.find((record) => record.typeName === "SOA")?.data)?.serial ?? null;
+        const ns = await queryNameserverAt(address, zone, "NS").catch(() => null);
+        result.nameservers = ns ? [...new Set(ns.answers.filter((record) => record.typeName === "NS").map((record) => String(record.data).replace(/\.$/, "").toLowerCase()))].sort() : null;
+        result.tcp = await queryNameserverAt(address, zone, "SOA", { tcp: true }).then((reply) => reply.status === 0, () => false);
+        const probe = await queryNameserverAt(address, recursionProbe, "A", { recursion: true }).catch(() => null);
+        result.openRecursion = Boolean(probe && probe.recursionAvailable && probe.status === 0 && probe.answers.length);
+        const axfr = await queryNameserverAt(address, zone, 252, { tcp: true }).catch(() => null);
+        result.zoneTransfer = Boolean(axfr && axfr.status === 0 && axfr.answers.some((record) => record.typeName === "SOA") && axfr.answers.length > 1);
+      } catch (error) {
+        result.error = error.message?.includes("timeout") || error.message?.includes("respond") ? "No answer (timed out)." : `No answer (${String(error.code || error.message).slice(0, 60)}).`;
+      }
+      entry.results.push(result);
+    }
+    return entry;
+  }));
+
+  const checks = [];
+  const add = (id, label, state, message, detail = null) => checks.push({ id, label, state, message, detail });
+  const responding = nameservers.flatMap((entry) => entry.results).filter((result) => !result.error);
+  const serials = [...new Set(responding.filter((result) => result.authoritative).map((result) => result.serial).filter((serial) => serial !== null))];
+  add("ns-count", "Number of name servers", hosts.length >= 2 ? "pass" : "fail",
+    hosts.length >= 2 ? `${hosts.length} name servers.` : "Fewer than two name servers; one outage takes the domain offline.", hosts.join(", "));
+  if (delegation) {
+    const missingInZone = delegation.nameservers.filter((host) => !childNs.values.includes(host));
+    const missingInParent = childNs.values.filter((host) => !delegation.nameservers.includes(host));
+    add("delegation", "Parent and zone agree", missingInZone.length || missingInParent.length ? "warn" : "pass",
+      missingInZone.length || missingInParent.length
+        ? [missingInZone.length ? `Delegated by the parent but not listed in the zone: ${missingInZone.join(", ")}.` : null, missingInParent.length ? `Listed in the zone but not delegated by the parent: ${missingInParent.join(", ")}.` : null].filter(Boolean).join(" ")
+        : "The parent zone and the zone itself list the same name servers.", `Parent server: ${delegation.server}`);
+    const inBailiwick = delegation.nameservers.filter((host) => host === zone || host.endsWith(`.${zone}`));
+    const missingGlue = inBailiwick.filter((host) => !delegation.glue[host]?.length);
+    if (inBailiwick.length) add("glue", "Glue records", missingGlue.length ? "fail" : "pass", missingGlue.length ? `No glue for ${missingGlue.join(", ")}; resolvers cannot reach these servers.` : "Glue is present for name servers inside the zone.");
+  } else {
+    add("delegation", "Parent and zone agree", "info", "The parent zone's delegation could not be read.");
+  }
+  const lame = nameservers.filter((entry) => entry.error || (entry.results.length && entry.results.every((result) => result.error || !result.authoritative)));
+  add("lame", "All name servers answer authoritatively", lame.length ? "fail" : "pass",
+    lame.length ? `Not answering authoritatively: ${lame.map((entry) => entry.host).join(", ")} (lame delegation).` : "Every name server answers for the zone.");
+  add("serial", "SOA serials match", serials.length > 1 ? "warn" : serials.length ? "pass" : "info",
+    serials.length > 1 ? `Name servers report different serials (${serials.join(", ")}); a secondary may not be updating.` : serials.length ? `All servers report serial ${serials[0]}.` : "No serial could be read.");
+  const openRecursion = responding.filter((result) => result.openRecursion).map((result) => result.address);
+  add("recursion", "No open recursion", openRecursion.length ? "fail" : "pass",
+    openRecursion.length ? `Answers recursive queries for anyone: ${openRecursion.join(", ")}. Open resolvers are abused for DDoS amplification.` : "Name servers do not resolve other domains for strangers.");
+  const transfers = responding.filter((result) => result.zoneTransfer).map((result) => result.address);
+  add("axfr", "Zone transfer (AXFR) refused", transfers.length ? "fail" : "pass",
+    transfers.length ? `Anyone can download the whole zone from ${transfers.join(", ")}.` : "Zone transfers are refused to the public.");
+  const noTcp = responding.filter((result) => result.tcp === false).map((result) => result.address);
+  add("tcp", "DNS over TCP", noTcp.length ? "warn" : "pass", noTcp.length ? `No answer over TCP from ${noTcp.join(", ")}; large answers (DNSSEC, many records) will fail.` : "All servers answer over TCP.");
+  const prefixes = new Set(nameservers.flatMap((entry) => entry.addresses.filter((address) => isIP(address) === 4).map((address) => address.split(".").slice(0, 3).join("."))));
+  if (hosts.length >= 2) add("diversity", "Network diversity", prefixes.size >= 2 ? "pass" : "warn", prefixes.size >= 2 ? `Name servers are in ${prefixes.size} different /24 networks.` : "All IPv4 name server addresses are in one /24 network; one network problem can take them all down.");
+  add("ipv6", "IPv6 name servers", nameservers.some((entry) => entry.ipv6) ? "pass" : "info", nameservers.some((entry) => entry.ipv6) ? "At least one name server has an IPv6 address." : "No name server has an IPv6 address.");
+  const soa = apex.soa;
+  if (soa) {
+    const soaNotes = [];
+    if (soa.refresh < 1200 || soa.refresh > 86400) soaNotes.push(`refresh ${soa.refresh}s (1200–86400 recommended)`);
+    if (soa.retry >= soa.refresh) soaNotes.push(`retry ${soa.retry}s should be lower than refresh`);
+    if (soa.expire < 604800 || soa.expire > 2419200) soaNotes.push(`expire ${soa.expire}s (1–4 weeks recommended)`);
+    if (soa.minimum > 86400) soaNotes.push(`negative-cache TTL ${soa.minimum}s is long (≤ 1 day recommended)`);
+    add("soa", "SOA timers", soaNotes.length ? "warn" : "pass", soaNotes.length ? `Unusual values: ${soaNotes.join("; ")}.` : "SOA timers are within the usual ranges.",
+      `primary ${soa.mname} · contact ${soa.rname} · serial ${soa.serial}`);
+  }
+  const severity = { fail: "high", warn: "medium" };
+  return {
+    domain,
+    zone,
+    soa,
+    parent: delegation,
+    nameservers,
+    checks,
+    issues: checks.filter((check) => severity[check.state]).map((check) => ({ severity: severity[check.state], message: `${check.label}: ${check.message}` })),
+    durationMs: Date.now() - started,
+  };
+}
+
+async function dnsHealthCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  if (!acquireHeavyJob("dnsHealth")) {
+    sendJson(response, 503, { error: "The server is busy with other DNS health checks. Try again shortly." });
+    return;
+  }
+  try {
+    const result = await runDnsHealth(rawName);
+    if (result.zone) {
+      const failed = result.checks.filter((check) => check.state === "fail").length;
+      const warned = result.checks.filter((check) => check.state === "warn").length;
+      const score = Math.max(0, 100 - failed * 20 - warned * 7);
+      recordDomainRating("dns", result.zone, gradeForScore(score), score, failed + warned ? result.checks.filter((check) => ["fail", "warn"].includes(check.state)).map((check) => check.label).join(", ") : "No problems found");
+    }
+    sendJson(response, 200, result);
+  } catch (error) {
+    if (error.statusCode) sendJson(response, error.statusCode, { error: error.message });
+    else {
+      console.error("DNS health check failed:", error);
+      sendJson(response, 500, { error: "Unable to complete the DNS health check." });
+    }
+  } finally {
+    releaseHeavyJob("dnsHealth");
+  }
 }
 
 function queryDohOverHttp2(url, timeoutMs) {
@@ -1870,7 +2093,7 @@ function fetchPinnedHttps(hostname, address, requestPath, { timeoutMs = 6000, ma
 }
 
 // Latest result per domain and check type, for the admin dashboard's best/worst lists.
-const ratingKinds = { web: "Web security headers", tls: "TLS grade", email: "Email security", takeover: "Subdomain takeover risk" };
+const ratingKinds = { web: "Web security headers", tls: "TLS grade", email: "Email security", dns: "DNS health", takeover: "Subdomain takeover risk" };
 const ratingRetentionMs = 180 * 86400000;
 const tlsGradeScores = { "A+": 100, A: 95, "A-": 90, B: 80, C: 70, D: 60, E: 50, F: 35, T: 25, M: 25 };
 
@@ -2138,6 +2361,54 @@ function webCheckChecks(headers, secure, cookies) {
   return { checks: checks.map(({ weight, ...check }) => check), score, grade };
 }
 
+// security.txt, robots.txt, the sitemap and mixed content on the final page.
+async function webCheckExtras(finalUrl, address, html, secure) {
+  const origin = `${finalUrl.protocol}//${finalUrl.host}`;
+  const fetchText = async (path) => {
+    try {
+      const page = await requestPinnedUrl(new URL(path, origin), address, { timeoutMs: 6000, maxBytes: 65536 });
+      return { status: page.status, type: String(page.headers["content-type"] || ""), text: decodeBody(page.body, String(page.headers["content-encoding"] || "")) };
+    } catch {
+      return null;
+    }
+  };
+  const [securityPage, robotsPage] = address ? await Promise.all([fetchText("/.well-known/security.txt"), fetchText("/robots.txt")]) : [null, null];
+  const securityTxt = { found: false, issues: [] };
+  if (securityPage?.status === 200 && /^text\/plain/i.test(securityPage.type) && /^\s*(contact|expires)\s*:/im.test(securityPage.text)) {
+    const field = (name) => [...securityPage.text.matchAll(new RegExp(`^\\s*${name}\\s*:\\s*(.+)$`, "gim"))].map((match) => match[1].trim());
+    const expires = field("expires")[0] || null;
+    Object.assign(securityTxt, { found: true, contact: field("contact").slice(0, 5), expires, policy: field("policy")[0] || null, signed: /BEGIN PGP SIGNED MESSAGE/.test(securityPage.text) });
+    if (!securityTxt.contact.length) securityTxt.issues.push({ severity: "low", message: "security.txt has no Contact field." });
+    if (!expires) securityTxt.issues.push({ severity: "low", message: "security.txt has no Expires field (required by RFC 9116)." });
+    else if (Date.parse(expires) < Date.now()) securityTxt.issues.push({ severity: "low", message: `security.txt expired on ${expires.slice(0, 10)}.` });
+  } else if (secure) {
+    securityTxt.issues.push({ severity: "low", message: "No /.well-known/security.txt, so security researchers have no published contact." });
+  }
+  const robots = { found: false };
+  if (robotsPage?.status === 200 && !/<html/i.test(robotsPage.text.slice(0, 500))) {
+    const sitemaps = [...robotsPage.text.matchAll(/^\s*sitemap\s*:\s*(\S+)/gim)].map((match) => match[1]).slice(0, 5);
+    const blocksAll = /user-agent\s*:\s*\*\s*[\r\n]+(?:\s*(?:allow|disallow)\s*:.*[\r\n]+)*?\s*disallow\s*:\s*\/\s*$/im.test(robotsPage.text);
+    Object.assign(robots, { found: true, sitemaps, blocksAll, lines: robotsPage.text.split(/\r?\n/).filter((line) => line.trim() && !line.trim().startsWith("#")).length });
+  }
+  let sitemap = { found: false, url: null };
+  const sitemapUrl = robots.sitemaps?.[0] || `${origin}/sitemap.xml`;
+  try {
+    const target = new URL(sitemapUrl);
+    if (target.host === finalUrl.host && address) {
+      const page = await fetchText(target.pathname + target.search);
+      if (page?.status === 200 && /<(urlset|sitemapindex)\b/i.test(page.text)) sitemap = { found: true, url: target.href, entries: (page.text.match(/<loc>/gi) || []).length };
+    } else {
+      sitemap = { found: true, url: target.href, entries: null };
+    }
+  } catch {
+    sitemap = { found: false, url: null };
+  }
+  const mixedContent = secure
+    ? [...new Set([...html.matchAll(/<(?:script|img|iframe|audio|video|source|embed)\b[^>]*\bsrc\s*=\s*["']?(http:\/\/[^"'\s>]+)|<link\b[^>]*\brel\s*=\s*["']?stylesheet[^>]*\bhref\s*=\s*["']?(http:\/\/[^"'\s>]+)/gi)].map((match) => match[1] || match[2]))].slice(0, 15)
+    : [];
+  return { securityTxt, robots, sitemap, mixedContent };
+}
+
 async function runWebCheck(input, allowLocal) {
   const raw = String(input || "").trim();
   const explicit = /^https?:\/\//i.test(raw);
@@ -2192,8 +2463,11 @@ async function runWebCheck(input, allowLocal) {
     cookies,
     ...webCheckChecks(headers, secure, cookies),
   });
+  Object.assign(result, await webCheckExtras(finalUrl, finalAddress, html, secure));
   const issues = [];
   if (startedPlain && !secure) issues.push({ severity: "high", message: "The site does not redirect HTTP to HTTPS." });
+  if (result.mixedContent?.length) issues.push({ severity: "medium", message: `${result.mixedContent.length} resource(s) load over plain HTTP on this HTTPS page (mixed content).` });
+  for (const issue of result.securityTxt?.issues || []) issues.push(issue);
   if (secure && response.tls && !response.tls.authorized) issues.push({ severity: "high", message: `The certificate is not trusted (${response.tls.authorizationError}).` });
   if (response.tls?.daysRemaining !== null && response.tls?.daysRemaining !== undefined && response.tls.daysRemaining < 14) {
     issues.push({ severity: response.tls.daysRemaining < 0 ? "high" : "medium", message: response.tls.daysRemaining < 0 ? "The certificate has expired." : `The certificate expires in ${response.tls.daysRemaining} days.` });
@@ -3179,6 +3453,7 @@ const monitorKinds = {
   dns: "DNS records",
   email: "Email security",
   blocklist: "Blocklists",
+  ct: "New certificates (CT logs)",
 };
 const monitorIntervals = [1, 6, 12, 24];
 const monitorLimits = { perUser: { user: 25, admin: 100 }, events: 50, concurrency: 3, checkMs: 90000, manualRunGapMs: 60000 };
@@ -3281,6 +3556,15 @@ async function runMonitorCheck(kind, target, allowLocal) {
       snapshot: { mx: mxAnswers, spf: spf?.record || null, dmarc: dmarc?.record || null, mtaSts: mtaSts?.policy?.mode || null },
     };
   }
+  if (kind === "ct") {
+    const { source, certificates } = await fetchCertificateIssuances(target);
+    const recent = certificates.sort().reverse().slice(0, 400);
+    return {
+      status: "ok",
+      summary: `${certificates.length} unexpired certificate(s) in CT logs (${source})${recent[0] ? `; newest ${recent[0].split("|")[0]} by ${recent[0].split("|")[2] || "unknown issuer"}` : ""}`,
+      snapshot: { certificates: recent },
+    };
+  }
   if (kind === "blocklist") {
     let addresses = [target];
     let domain = null;
@@ -3305,6 +3589,14 @@ async function runMonitorCheck(kind, target, allowLocal) {
 
 function describeSnapshotChanges(kind, before, after) {
   if (!before || !after) return [];
+  if (kind === "ct") {
+    // Only newly logged certificates matter; expired ones simply drop out of the list.
+    const known = new Set(before.certificates || []);
+    return (after.certificates || []).filter((entry) => !known.has(entry)).slice(0, 20).map((entry) => {
+      const [date, names, issuer] = entry.split("|");
+      return `New certificate ${date} by ${issuer || "unknown issuer"} for ${names.split(",").slice(0, 6).join(", ")}${names.split(",").length > 6 ? " …" : ""}`;
+    });
+  }
   const changes = [];
   for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])]) {
     const left = before[key];
@@ -3517,6 +3809,430 @@ setTimeout(() => {
   void runDueMonitors();
   setInterval(() => void runDueMonitors(), 60000).unref();
 }, 20000).unref();
+
+// ---------------------------------------------------------------- Reputation check
+
+const protectiveResolvers = [
+  { id: "quad9", label: "Quad9 (threat blocking)", endpoint: "https://dns.quad9.net/dns-query", format: "wire" },
+  { id: "cloudflare-security", label: "Cloudflare for Families (malware)", endpoint: "https://security.cloudflare-dns.com/dns-query", format: "wire" },
+  { id: "dns4eu", label: "DNS4EU protective", endpoint: "https://protective.joindns4.eu/dns-query", format: "wire" },
+];
+const sinkholeAddresses = new Set(["0.0.0.0", "127.0.0.1", "::", "::1"]);
+const reputationKeys = {
+  urlhaus: process.env.URLHAUS_AUTH_KEY || "",
+  virustotal: process.env.VIRUSTOTAL_API_KEY || "",
+  safeBrowsing: process.env.GOOGLE_SAFE_BROWSING_KEY || "",
+};
+
+async function fetchJsonWithLimit(url, options = {}, timeoutMs = 10000) {
+  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+  const text = (await response.text()).slice(0, 2 * 1024 * 1024);
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = null;
+  }
+  return { status: response.status, data };
+}
+
+async function protectiveDnsVerdicts(domain) {
+  const baseline = await queryDohDns(domain, "A", { resolver: { ...dnsResolvers.google, format: "wire" } }).then(
+    (data) => ({ status: data.status, addresses: data.answers.filter((answer) => answer.type === 1).map((answer) => answer.data) }),
+    () => null,
+  );
+  const verdicts = await Promise.all(protectiveResolvers.map(async (resolver) => {
+    if (baseline && !baseline.addresses.length) return { source: resolver.label, state: "off", detail: "Not applicable: the domain has no address" };
+    try {
+      const data = await queryDohDns(domain, "A", { resolver });
+      const addresses = data.answers.filter((answer) => answer.type === 1).map((answer) => answer.data);
+      const blocked = Boolean(baseline?.addresses.length) && (data.status === 3 || data.status === 5 || (addresses.length > 0 && addresses.every((address) => sinkholeAddresses.has(address))));
+      return { source: resolver.label, state: blocked ? "flagged" : "clean", detail: blocked ? (data.status === 3 ? "Blocked (answers NXDOMAIN)" : data.status === 5 ? "Blocked (REFUSED)" : `Blocked (answers ${addresses.join(", ")})`) : "Resolves normally" };
+    } catch {
+      return { source: resolver.label, state: "error", detail: "No answer" };
+    }
+  }));
+  return { baseline, verdicts };
+}
+
+async function optionalReputationSources(host, isAddress) {
+  const results = [];
+  if (reputationKeys.urlhaus) {
+    try {
+      const { status, data } = await fetchJsonWithLimit("https://urlhaus-api.abuse.ch/v1/host/", {
+        method: "POST",
+        headers: { "auth-key": reputationKeys.urlhaus, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ host }).toString(),
+      });
+      if (status !== 200 || !data) throw new Error(`HTTP ${status}`);
+      const count = Number(data.url_count || 0);
+      results.push({ source: "URLhaus (abuse.ch)", state: data.query_status === "ok" && count ? "flagged" : "clean",
+        detail: data.query_status === "ok" && count ? `${count} malware URL(s) recorded${data.urls?.[0]?.threat ? `, e.g. ${data.urls[0].threat}` : ""}` : "No malware URLs recorded",
+        link: `https://urlhaus.abuse.ch/host/${encodeURIComponent(host)}/` });
+    } catch (error) {
+      results.push({ source: "URLhaus (abuse.ch)", state: "error", detail: `Lookup failed (${String(error.message).slice(0, 60)})` });
+    }
+  } else {
+    results.push({ source: "URLhaus (abuse.ch)", state: "off", detail: "Not configured (URLHAUS_AUTH_KEY)" });
+  }
+  if (reputationKeys.virustotal) {
+    try {
+      const path = isAddress ? `ip_addresses/${encodeURIComponent(host)}` : `domains/${encodeURIComponent(host)}`;
+      const { status, data } = await fetchJsonWithLimit(`https://www.virustotal.com/api/v3/${path}`, { headers: { "x-apikey": reputationKeys.virustotal } });
+      if (status === 404) results.push({ source: "VirusTotal", state: "clean", detail: "Not known to VirusTotal" });
+      else if (status !== 200 || !data?.data) throw new Error(`HTTP ${status}`);
+      else {
+        const stats = data.data.attributes?.last_analysis_stats || {};
+        const bad = Number(stats.malicious || 0) + Number(stats.suspicious || 0);
+        results.push({ source: "VirusTotal", state: stats.malicious ? "flagged" : stats.suspicious ? "suspicious" : "clean",
+          detail: `${stats.malicious || 0} malicious, ${stats.suspicious || 0} suspicious of ${bad + Number(stats.harmless || 0) + Number(stats.undetected || 0)} engines`,
+          link: `https://www.virustotal.com/gui/${isAddress ? "ip-address" : "domain"}/${encodeURIComponent(host)}` });
+      }
+    } catch (error) {
+      results.push({ source: "VirusTotal", state: "error", detail: `Lookup failed (${String(error.message).slice(0, 60)})` });
+    }
+  } else {
+    results.push({ source: "VirusTotal", state: "off", detail: "Not configured (VIRUSTOTAL_API_KEY)" });
+  }
+  if (reputationKeys.safeBrowsing && !isAddress) {
+    try {
+      const { status, data } = await fetchJsonWithLimit(`https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${encodeURIComponent(reputationKeys.safeBrowsing)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          client: { clientId: "bnglookup", clientVersion: appBuild.version },
+          threatInfo: {
+            threatTypes: ["MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"],
+            platformTypes: ["ANY_PLATFORM"],
+            threatEntryTypes: ["URL"],
+            threatEntries: [{ url: `http://${host}/` }, { url: `https://${host}/` }],
+          },
+        }),
+      });
+      if (status !== 200) throw new Error(`HTTP ${status}`);
+      const matches = data?.matches || [];
+      results.push({ source: "Google Safe Browsing", state: matches.length ? "flagged" : "clean",
+        detail: matches.length ? `Listed as ${[...new Set(matches.map((match) => match.threatType.toLowerCase().replace(/_/g, " ")))].join(", ")}` : "Not listed" });
+    } catch (error) {
+      results.push({ source: "Google Safe Browsing", state: "error", detail: `Lookup failed (${String(error.message).slice(0, 60)})` });
+    }
+  } else if (!isAddress) {
+    results.push({ source: "Google Safe Browsing", state: "off", detail: "Not configured (GOOGLE_SAFE_BROWSING_KEY)" });
+  }
+  return results;
+}
+
+async function runReputation(input) {
+  const host = hostFromInput(String(input || "").trim()).replace(/^\[|\]$/g, "");
+  const isAddress = Boolean(isIP(host));
+  const domain = isAddress ? null : normalizeDomain(host);
+  if (isAddress ? !isPublicAddress(host) : !domain) throw Object.assign(new Error("Enter a domain, URL or public IP address."), { statusCode: 400 });
+  const target = domain || host;
+  const started = Date.now();
+  const addresses = isAddress ? [host] : (await dohAnswers(target, "A")).values.filter((address) => isIP(address) === 4).slice(0, 2);
+  const [protective, blocklists, optional] = await Promise.all([
+    domain ? protectiveDnsVerdicts(domain) : Promise.resolve(null),
+    checkBlocklists({ addresses: addresses.filter((address) => isPublicAddress(address)), domain }).catch(() => null),
+    optionalReputationSources(target, isAddress),
+  ]);
+  const blocklistSources = [];
+  if (blocklists?.domain) {
+    blocklistSources.push({ source: `Domain blocklists (${blocklists.domain.checked})`, state: blocklists.domain.listed ? "flagged" : "clean",
+      detail: blocklists.domain.listed ? `Listed on ${blocklists.domain.lists.filter((list) => list.status === "listed").map((list) => list.name).join(", ")}` : "Not listed" });
+  }
+  for (const entry of blocklists?.ips || []) {
+    blocklistSources.push({ source: `IP blocklists for ${entry.address} (${entry.checked})`, state: entry.listed ? "flagged" : "clean",
+      detail: entry.listed ? `Listed on ${entry.lists.filter((list) => list.status === "listed").map((list) => list.name).join(", ")}` : "Not listed" });
+  }
+  const sources = [...(protective?.verdicts || []), ...blocklistSources, ...optional];
+  const flagged = sources.filter((source) => source.state === "flagged");
+  const suspicious = sources.filter((source) => source.state === "suspicious");
+  return {
+    target,
+    isAddress,
+    addresses,
+    exists: isAddress || Boolean(protective?.baseline?.addresses?.length) || protective?.baseline?.status === 0,
+    verdict: flagged.length >= 2 ? "malicious" : flagged.length || suspicious.length ? "suspicious" : "clean",
+    flagged: flagged.length,
+    checked: sources.filter((source) => !["off", "error"].includes(source.state)).length,
+    sources,
+    durationMs: Date.now() - started,
+  };
+}
+
+async function reputationCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 2048, response);
+  if (rawName === null) return;
+  if (!acquireHeavyJob("reputation")) {
+    sendJson(response, 503, { error: "The server is busy with other reputation checks. Try again shortly." });
+    return;
+  }
+  try {
+    sendJson(response, 200, await runReputation(rawName));
+  } catch (error) {
+    if (error.statusCode) sendJson(response, error.statusCode, { error: error.message });
+    else {
+      console.error("Reputation check failed:", error);
+      sendJson(response, 500, { error: "Unable to complete the reputation check." });
+    }
+  } finally {
+    releaseHeavyJob("reputation");
+  }
+}
+
+// ---------------------------------------------------------------- Lookalike domains
+
+const keyboardNeighbours = {
+  q: "wa", w: "qeas", e: "wrds", r: "etdf", t: "ryfg", y: "tugh", u: "yihj", i: "uojk", o: "ipkl", p: "ol",
+  a: "qwsz", s: "awedxz", d: "serfcx", f: "drtgvc", g: "ftyhbv", h: "gyujnb", j: "huikmn", k: "jiolm", l: "kop",
+  z: "asx", x: "zsdc", c: "xdfv", v: "cfgb", b: "vghn", n: "bhjm", m: "njk",
+  1: "2q", 2: "13w", 3: "24e", 4: "35r", 5: "46t", 6: "57y", 7: "68u", 8: "79i", 9: "80o", 0: "9p",
+};
+const homoglyphs = { o: ["0"], 0: ["o"], l: ["1", "i"], i: ["1", "l"], 1: ["l", "i"], e: ["3"], a: ["4"], s: ["5"], g: ["9", "q"], q: ["g"], b: ["6"], z: ["2"], m: ["rn", "nn"], w: ["vv"], d: ["cl"], u: ["v"], v: ["u"], c: ["e"], n: ["m"] };
+const lookalikeTlds = ["com", "net", "org", "co", "io", "info", "biz", "app", "xyz", "online", "site", "shop", "eu", "nl", "de", "uk", "us", "me", "cc", "top"];
+const lookalikeWords = ["login", "secure", "account", "support", "mail", "my", "app", "online", "verify", "help"];
+const lookalikeLimits = { variants: 260, concurrency: 10 };
+
+function splitRegistrable(domain) {
+  const org = organizationalDomain(domain);
+  const index = org.indexOf(".");
+  return { label: org.slice(0, index), suffix: org.slice(index + 1) };
+}
+
+function generateLookalikes(domain) {
+  const { label, suffix } = splitRegistrable(domain);
+  const variants = new Map();
+  const add = (candidateLabel, kind, candidateSuffix = suffix) => {
+    const name = `${candidateLabel}.${candidateSuffix}`;
+    if (candidateLabel === label && candidateSuffix === suffix) return;
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(candidateLabel) || candidateLabel.includes("--")) return;
+    if (!variants.has(name)) variants.set(name, kind);
+  };
+  const chars = [...label];
+  chars.forEach((character, index) => {
+    for (const glyph of homoglyphs[character] || []) add(label.slice(0, index) + glyph + label.slice(index + 1), "Homoglyph");
+  });
+  for (const [from, to] of [["rn", "m"], ["vv", "w"], ["cl", "d"], ["nn", "m"]]) if (label.includes(from)) add(label.replace(from, to), "Homoglyph");
+  chars.forEach((_character, index) => add(label.slice(0, index) + label.slice(index + 1), "Missing letter"));
+  for (let index = 0; index < chars.length - 1; index += 1) {
+    if (chars[index] !== chars[index + 1]) add(label.slice(0, index) + chars[index + 1] + chars[index] + label.slice(index + 2), "Swapped letters");
+  }
+  chars.forEach((character, index) => {
+    for (const neighbour of keyboardNeighbours[character] || "") add(label.slice(0, index) + neighbour + label.slice(index + 1), "Typo (nearby key)");
+  });
+  for (const tld of lookalikeTlds) add(label, "Other TLD", tld);
+  if (suffix.includes(".")) add(label, "Other TLD", suffix.split(".").pop());
+  for (let index = 1; index < chars.length; index += 1) add(`${label.slice(0, index)}-${label.slice(index)}`, "Hyphen");
+  for (const word of lookalikeWords) {
+    add(`${label}-${word}`, "Added word");
+    add(`${word}-${label}`, "Added word");
+    add(`${label}${word}`, "Added word");
+  }
+  chars.forEach((character, index) => add(label.slice(0, index) + character + label.slice(index), "Doubled letter"));
+  chars.forEach((character, index) => {
+    for (let bit = 0; bit < 7; bit += 1) {
+      const flipped = String.fromCharCode(character.charCodeAt(0) ^ (1 << bit));
+      if (/[a-z0-9]/.test(flipped)) add(label.slice(0, index) + flipped + label.slice(index + 1), "Bit flip");
+    }
+  });
+  return { label, suffix, variants: [...variants.entries()].slice(0, lookalikeLimits.variants).map(([name, kind]) => ({ name, kind })) };
+}
+
+async function runLookalike(input) {
+  const domain = normalizeDomain(hostFromInput(String(input || "").trim()));
+  if (!domain) throw Object.assign(new Error("Enter a valid domain name."), { statusCode: 400 });
+  const started = Date.now();
+  const { label, suffix, variants } = generateLookalikes(domain);
+  const results = [];
+  let next = 0;
+  let failed = 0;
+  await Promise.all(Array.from({ length: lookalikeLimits.concurrency }, async () => {
+    while (next < variants.length) {
+      const variant = variants[next];
+      next += 1;
+      const ns = await dohAnswers(variant.name, "NS");
+      if (ns.status === null) {
+        failed += 1;
+        continue;
+      }
+      if (ns.status === 3) continue;
+      const [a, mx] = await Promise.all([dohAnswers(variant.name, "A"), dohAnswers(variant.name, "MX")]);
+      if (!ns.values.length && !a.values.length && !mx.values.length) continue;
+      const mail = mx.values.some((value) => !/\s\.?$/.test(value) && value.split(/\s+/)[1] !== ".");
+      results.push({
+        ...variant,
+        nameservers: ns.values.slice(0, 2),
+        addresses: a.values.slice(0, 3),
+        mx: mx.values.map((value) => value.split(/\s+/)[1] || value).slice(0, 2),
+        risk: mail ? "high" : a.values.length ? "medium" : "low",
+      });
+    }
+  }));
+  const order = { high: 0, medium: 1, low: 2 };
+  results.sort((left, right) => order[left.risk] - order[right.risk] || left.name.localeCompare(right.name));
+  return {
+    domain,
+    base: `${label}.${suffix}`,
+    checked: variants.length,
+    failed,
+    registered: results,
+    counts: { high: results.filter((entry) => entry.risk === "high").length, medium: results.filter((entry) => entry.risk === "medium").length, low: results.filter((entry) => entry.risk === "low").length },
+    kinds: [...new Set(variants.map((variant) => variant.kind))],
+    durationMs: Date.now() - started,
+  };
+}
+
+async function lookalikeCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  if (!acquireHeavyJob("lookalike")) {
+    sendJson(response, 503, { error: "The server is busy with other lookalike searches. Try again shortly." });
+    return;
+  }
+  try {
+    sendJson(response, 200, await runLookalike(rawName));
+  } catch (error) {
+    if (error.statusCode) sendJson(response, error.statusCode, { error: error.message });
+    else {
+      console.error("Lookalike search failed:", error);
+      sendJson(response, 500, { error: "Unable to complete the lookalike search." });
+    }
+  } finally {
+    releaseHeavyJob("lookalike");
+  }
+}
+
+// ---------------------------------------------------------------- Certificate Transparency (monitor)
+
+async function fetchCertificateIssuances(domain) {
+  const normalize = (entries) => entries.map((entry) => `${entry.notBefore.slice(0, 10)}|${[...new Set(entry.names)].sort().join(",").slice(0, 300)}|${entry.issuer.slice(0, 80)}`);
+  try {
+    const lists = await Promise.all([domain, `%.${domain}`].map((query) => {
+      const url = new URL("https://crt.sh/");
+      url.searchParams.set("q", query);
+      url.searchParams.set("output", "json");
+      url.searchParams.set("exclude", "expired");
+      return fetchCertificateTransparencyJson(url);
+    }));
+    const entries = lists.flat().filter((entry) => entry && typeof entry.name_value === "string").map((entry) => ({
+      notBefore: String(entry.not_before || ""),
+      names: entry.name_value.split(/\n/).map((name) => name.trim().toLowerCase()).filter(Boolean),
+      issuer: (String(entry.issuer_name || "").match(/O=([^,]+)/)?.[1] || String(entry.issuer_name || "")).replace(/"/g, ""),
+    }));
+    return { source: "crt.sh", certificates: [...new Set(normalize(entries))] };
+  } catch {
+    const url = new URL("https://api.certspotter.com/v1/issuances");
+    url.searchParams.set("domain", domain);
+    url.searchParams.set("include_subdomains", "true");
+    url.searchParams.append("expand", "dns_names");
+    url.searchParams.append("expand", "issuer");
+    const entries = await fetchCertificateTransparencyJson(url);
+    if (!Array.isArray(entries)) throw new Error("Certificate Transparency service returned invalid data.");
+    return {
+      source: "CertSpotter",
+      certificates: [...new Set(normalize(entries.map((entry) => ({
+        notBefore: String(entry.not_before || ""),
+        names: (entry.dns_names || []).map((name) => String(name).toLowerCase()),
+        issuer: String(entry.issuer?.friendly_name || entry.issuer?.name || "").replace(/^.*O=([^,]+).*$/, "$1"),
+      }))))],
+    };
+  }
+}
+
+// ---------------------------------------------------------------- SPF flattener
+
+async function flattenSpf(domain) {
+  const ip4 = new Set();
+  const ip6 = new Set();
+  const kept = [];
+  const notes = [];
+  let lookups = 0;
+  const visited = new Set();
+  async function addHostAddresses(host, why) {
+    lookups += 1;
+    const [v4, v6] = await Promise.all([dohAnswers(host, "A"), dohAnswers(host, "AAAA")]);
+    v4.values.forEach((address) => ip4.add(address));
+    v6.values.forEach((address) => ip6.add(address));
+    if (!v4.values.length && !v6.values.length) notes.push(`${why} ${host} has no addresses.`);
+  }
+  async function walk(name, depth) {
+    if (depth > 10 || visited.has(name) || lookups > 60) return;
+    visited.add(name);
+    const records = (await queryTxtRecords(name).catch(() => ({ records: [] }))).records.filter((record) => /^v=spf1\b/i.test(record.trim()));
+    if (records.length !== 1) {
+      notes.push(records.length ? `${name} publishes more than one SPF record.` : `${name} has no SPF record.`);
+      return;
+    }
+    for (const term of records[0].trim().split(/\s+/).slice(1)) {
+      const match = term.match(/^([+\-~?]?)([a-z0-9]+)(?:[:=](.*))?$/i);
+      if (!match) continue;
+      const [, qualifier, mechanismRaw, value] = match;
+      const mechanism = mechanismRaw.toLowerCase();
+      if (qualifier && qualifier !== "+" && mechanism !== "all") {
+        kept.push(term);
+        continue;
+      }
+      if (mechanism === "ip4") ip4.add(value);
+      else if (mechanism === "ip6") ip6.add(value);
+      else if (mechanism === "include" || mechanism === "redirect") {
+        lookups += 1;
+        await walk(String(value).toLowerCase(), depth + 1);
+      } else if (mechanism === "a") await addHostAddresses(value ? value.split("/")[0] : name, "a:");
+      else if (mechanism === "mx") {
+        lookups += 1;
+        const hosts = (await dohAnswers(value ? value.split("/")[0] : name, "MX")).values.map((entry) => entry.split(/\s+/)[1]).filter(Boolean);
+        for (const host of hosts.slice(0, 10)) await addHostAddresses(host, "MX host");
+      } else if (["ptr", "exists"].includes(mechanism)) {
+        kept.push(term);
+        notes.push(`${term} (in ${name}) cannot be flattened and is kept as is.`);
+      }
+    }
+  }
+  await walk(domain, 0);
+  const root = (await queryTxtRecords(domain).catch(() => ({ records: [] }))).records.find((record) => /^v=spf1\b/i.test(record.trim())) || null;
+  const all = root?.match(/\s([-~?+]?all)\b/i)?.[1] || "~all";
+  const terms = [...[...ip4].sort().map((value) => `ip4:${value}`), ...[...ip6].sort().map((value) => `ip6:${value}`), ...kept];
+  const chunks = [];
+  let current = [];
+  for (const term of terms) {
+    if ([...current, term].join(" ").length > 220) {
+      chunks.push(current);
+      current = [];
+    }
+    current.push(term);
+  }
+  if (current.length) chunks.push(current);
+  const single = `v=spf1 ${terms.join(" ")} ${all}`.replace(/\s+/g, " ");
+  const records = single.length <= 255
+    ? [{ name: domain, value: single }]
+    : [
+      { name: domain, value: `v=spf1 ${chunks.map((_chunk, index) => `include:_spf${index + 1}.${domain}`).join(" ")} ${all}` },
+      ...chunks.map((chunk, index) => ({ name: `_spf${index + 1}.${domain}`, value: `v=spf1 ${chunk.join(" ")} -all` })),
+    ];
+  if (chunks.length > 9) notes.push("Too many addresses to fit in nine include records; remove senders you no longer use.");
+  return {
+    domain,
+    original: root,
+    originalLookups: lookups,
+    ip4: ip4.size,
+    ip6: ip6.size,
+    kept,
+    records,
+    flattenedLookups: (records.length > 1 ? records.length - 1 : 0) + kept.filter((term) => /^[-~?+]?(ptr|exists|include|a|mx|redirect)\b/i.test(term)).length,
+    notes,
+  };
+}
+
+async function spfFlattenCheck(url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const domain = normalizeDomain(hostFromInput(rawName));
+  if (!domain) {
+    sendJson(response, 400, { error: "Enter a valid domain name." });
+    return;
+  }
+  sendJson(response, 200, await flattenSpf(domain));
+}
 
 const ripeStatCache = new Map();
 
@@ -5375,6 +6091,7 @@ function readCookie(request, name) {
 }
 
 function currentUser(request, { allowPending = false } = {}) {
+  if (request.apiUser) return request.apiUser;
   const token = readCookie(request, sessionCookieName);
   if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
@@ -5614,6 +6331,311 @@ async function handleInitialSetup(request, response) {
   }
 }
 
+// ---------------------------------------------------------------- Two-factor login (TOTP, RFC 6238)
+
+const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+const twoFactorChallenges = new Map();
+const twoFactorLimits = { challengeMs: 5 * 60 * 1000, attempts: 5, recoveryCodes: 10 };
+
+function base32Encode(buffer) {
+  let bits = 0;
+  let value = 0;
+  let output = "";
+  for (const byte of buffer) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += base32Alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) output += base32Alphabet[(value << (5 - bits)) & 31];
+  return output;
+}
+
+function base32Decode(text) {
+  let bits = 0;
+  let value = 0;
+  const bytes = [];
+  for (const character of String(text).replace(/=+$/, "").toUpperCase()) {
+    const index = base32Alphabet.indexOf(character);
+    if (index < 0) continue;
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+function totpCode(secret, step) {
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(step));
+  const hmac = crypto.createHmac("sha1", base32Decode(secret)).update(counter).digest();
+  const offset = hmac[hmac.length - 1] & 15;
+  return String((hmac.readUInt32BE(offset) & 0x7fffffff) % 1000000).padStart(6, "0");
+}
+
+// Accepts the current 30-second code or one step either side, and never the same step twice.
+function verifyTotp(secret, code, lastStep) {
+  if (!/^\d{6}$/.test(String(code || ""))) return null;
+  const now = Math.floor(Date.now() / 30000);
+  for (const step of [now, now - 1, now + 1]) {
+    if (step <= (lastStep || 0)) continue;
+    const expected = Buffer.from(totpCode(secret, step));
+    if (crypto.timingSafeEqual(expected, Buffer.from(String(code)))) return step;
+  }
+  return null;
+}
+
+function hashRecoveryCode(code) {
+  return crypto.createHash("sha256").update(String(code).toUpperCase().replace(/[^A-Z0-9]/g, "")).digest("hex");
+}
+
+function newRecoveryCodes() {
+  return Array.from({ length: twoFactorLimits.recoveryCodes }, () => {
+    const raw = base32Encode(crypto.randomBytes(7)).slice(0, 10);
+    return `${raw.slice(0, 5)}-${raw.slice(5)}`;
+  });
+}
+
+function twoFactorStatus(userId) {
+  const row = database.prepare("SELECT totp_enabled, totp_recovery FROM users WHERE id = ?").get(userId);
+  let recovery = [];
+  try {
+    recovery = JSON.parse(row?.totp_recovery || "[]");
+  } catch {
+    recovery = [];
+  }
+  return { enabled: Boolean(row?.totp_enabled), recoveryCodesLeft: recovery.length };
+}
+
+// Checks a TOTP or recovery code for a user and records it as used. Returns "totp", "recovery" or null.
+function consumeSecondFactor(userId, code) {
+  const row = database.prepare("SELECT totp_secret, totp_enabled, totp_last_step, totp_recovery FROM users WHERE id = ?").get(userId);
+  if (!row?.totp_enabled || !row.totp_secret) return null;
+  const step = verifyTotp(row.totp_secret, String(code || "").replace(/\s+/g, ""), row.totp_last_step);
+  if (step !== null) {
+    database.prepare("UPDATE users SET totp_last_step = ? WHERE id = ?").run(step, userId);
+    return "totp";
+  }
+  let recovery = [];
+  try {
+    recovery = JSON.parse(row.totp_recovery || "[]");
+  } catch {
+    recovery = [];
+  }
+  const hash = hashRecoveryCode(code);
+  if (String(code || "").replace(/[^A-Za-z0-9]/g, "").length === 10 && recovery.includes(hash)) {
+    database.prepare("UPDATE users SET totp_recovery = ? WHERE id = ?").run(JSON.stringify(recovery.filter((entry) => entry !== hash)), userId);
+    return "recovery";
+  }
+  return null;
+}
+
+function createTwoFactorChallenge(user) {
+  const now = Date.now();
+  for (const [id, challenge] of twoFactorChallenges) if (challenge.expiresAt < now) twoFactorChallenges.delete(id);
+  if (twoFactorChallenges.size > 5000) twoFactorChallenges.clear();
+  const id = crypto.randomBytes(24).toString("base64url");
+  twoFactorChallenges.set(id, { userId: user.id, username: user.username, mustChangePassword: Boolean(user.must_change_password), role: user.role, attempts: 0, expiresAt: now + twoFactorLimits.challengeMs });
+  return id;
+}
+
+async function handleTwoFactorLogin(request, response) {
+  if (!enforceSameOrigin(request, response)) return;
+  if (!allowAuthAttempt(request)) {
+    sendJson(response, 429, { error: "Too many login attempts. Try again in 15 minutes." });
+    return;
+  }
+  const body = await readAuthBody(request, response);
+  if (!body) return;
+  const challenge = twoFactorChallenges.get(typeof body.challenge === "string" ? body.challenge : "");
+  if (!challenge || challenge.expiresAt < Date.now()) {
+    sendJson(response, 401, { error: "The sign-in has expired. Enter your password again.", restart: true });
+    return;
+  }
+  challenge.attempts += 1;
+  const method = consumeSecondFactor(challenge.userId, body.code);
+  if (!method) {
+    if (challenge.attempts >= twoFactorLimits.attempts) twoFactorChallenges.delete(body.challenge);
+    recordAccountLoginFailure(challenge.username);
+    recordAdminLog("login", request, "Two-factor code rejected", "", 401, challenge.username);
+    sendJson(response, 401, { error: challenge.attempts >= twoFactorLimits.attempts ? "Too many wrong codes. Enter your password again." : "That code is not valid.", restart: challenge.attempts >= twoFactorLimits.attempts });
+    return;
+  }
+  twoFactorChallenges.delete(body.challenge);
+  resetAuthAttempts(request);
+  await establishSession(challenge.userId, response);
+  if (!challenge.mustChangePassword) recordNmapLoginIp(request, challenge.username);
+  recordAdminLog("login", request, method === "recovery" ? "Login successful (recovery code)" : "Login successful (two-factor)", "", 200, challenge.username);
+  sendJson(response, 200, {
+    user: { username: challenge.username, role: challenge.role },
+    mustChangePassword: challenge.mustChangePassword,
+    recoveryCodeUsed: method === "recovery",
+    recoveryCodesLeft: twoFactorStatus(challenge.userId).recoveryCodesLeft,
+  });
+}
+
+async function verifyAccountPassword(userId, password) {
+  const row = database.prepare("SELECT password_hash, password_salt FROM users WHERE id = ?").get(userId);
+  if (!row || typeof password !== "string" || password.length > 128) return false;
+  const supplied = await scrypt(password, row.password_salt, 64);
+  const stored = Buffer.from(row.password_hash, "hex");
+  return stored.length === supplied.length && crypto.timingSafeEqual(stored, supplied);
+}
+
+async function handleAccountTwoFactor(request, response, action) {
+  if (!enforceSameOrigin(request, response)) return;
+  const user = currentUser(request);
+  if (!user || request.apiUser) {
+    sendJson(response, 401, { error: "Log in to continue." });
+    return;
+  }
+  if (request.method !== "POST") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!allowAuthAttempt(request)) {
+    sendJson(response, 429, { error: "Too many attempts. Try again in 15 minutes." });
+    return;
+  }
+  const body = await readAuthBody(request, response);
+  if (!body) return;
+  const status = twoFactorStatus(user.id);
+  if (action === "setup") {
+    if (status.enabled) return sendJson(response, 409, { error: "Two-factor login is already on." });
+    if (!await verifyAccountPassword(user.id, body.password)) return sendJson(response, 401, { error: "The password is incorrect." });
+    const secret = base32Encode(crypto.randomBytes(20));
+    database.prepare("UPDATE users SET totp_secret = ?, totp_enabled = 0, totp_last_step = 0 WHERE id = ?").run(secret, user.id);
+    const issuer = getSiteTitle().replace(/[:]/g, "") || "BNGlookup";
+    const label = `${issuer}:${user.username}`;
+    sendJson(response, 200, {
+      secret,
+      uri: `otpauth://totp/${encodeURIComponent(label)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`,
+    });
+    return;
+  }
+  if (action === "enable") {
+    const row = database.prepare("SELECT totp_secret, totp_enabled FROM users WHERE id = ?").get(user.id);
+    if (row.totp_enabled) return sendJson(response, 409, { error: "Two-factor login is already on." });
+    const step = row.totp_secret ? verifyTotp(row.totp_secret, String(body.code || "").replace(/\s+/g, ""), 0) : null;
+    if (step === null) return sendJson(response, 400, { error: "That code is not valid. Check the time on your phone and try the next code." });
+    const codes = newRecoveryCodes();
+    database.prepare("UPDATE users SET totp_enabled = 1, totp_last_step = ?, totp_recovery = ? WHERE id = ?").run(step, JSON.stringify(codes.map(hashRecoveryCode)), user.id);
+    recordAdminLog("audit", request, "Two-factor login enabled", "", 200, user.username);
+    sendJson(response, 200, { enabled: true, recoveryCodes: codes });
+    return;
+  }
+  if (action === "disable" || action === "recovery-codes") {
+    if (!status.enabled) return sendJson(response, 409, { error: "Two-factor login is off." });
+    if (!await verifyAccountPassword(user.id, body.password)) return sendJson(response, 401, { error: "The password is incorrect." });
+    if (!consumeSecondFactor(user.id, body.code)) return sendJson(response, 401, { error: "That code is not valid." });
+    if (action === "disable") {
+      database.prepare("UPDATE users SET totp_enabled = 0, totp_secret = NULL, totp_recovery = NULL, totp_last_step = 0 WHERE id = ?").run(user.id);
+      recordAdminLog("audit", request, "Two-factor login disabled", "", 200, user.username);
+      sendJson(response, 200, { enabled: false });
+    } else {
+      const codes = newRecoveryCodes();
+      database.prepare("UPDATE users SET totp_recovery = ? WHERE id = ?").run(JSON.stringify(codes.map(hashRecoveryCode)), user.id);
+      recordAdminLog("audit", request, "Two-factor recovery codes replaced", "", 200, user.username);
+      sendJson(response, 200, { enabled: true, recoveryCodes: codes });
+    }
+    return;
+  }
+  sendJson(response, 404, { error: "Not found." });
+}
+
+// ---------------------------------------------------------------- API tokens
+
+const apiTokenLimits = { perUser: 10, requestsPerHour: 600 };
+const apiTokenPaths = new Set([
+  "/api/lookup", "/api/domain-info", "/api/scan", "/api/custom-port-scan", "/api/bulk-port-scan", "/api/mac-lookup",
+  "/api/dig", "/api/blocklist", "/api/propagation", "/api/email-check", "/api/asn", "/api/web-check", "/api/email-headers",
+  "/api/dmarc-sources", "/api/record-import", "/api/bulk-domain-check", "/api/dns-health", "/api/reputation",
+  "/api/lookalike", "/api/spf-flatten", "/api/ping", "/api/sslscan", "/api/ping-scan", "/api/traceroute", "/api/multi-traceroute",
+]);
+const apiTokenUsage = new Map();
+
+function apiTokenFromRequest(request) {
+  const header = String(request.headers.authorization || "");
+  const match = header.match(/^Bearer\s+(bngl_[A-Za-z0-9_-]{40,60})$/);
+  return match ? match[1] : null;
+}
+
+// Resolves a bearer token to its user (with the same role checks as a session).
+function authenticateApiToken(token) {
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const row = database.prepare(`
+    SELECT api_tokens.id AS tokenId, api_tokens.expires_at AS expiresAt, users.id, users.username, users.role, users.email, users.must_change_password
+    FROM api_tokens JOIN users ON users.id = api_tokens.user_id
+    WHERE api_tokens.token_hash = ? AND users.active = 1
+  `).get(tokenHash);
+  if (!row || row.must_change_password || (row.expiresAt && row.expiresAt < Date.now())) return null;
+  database.prepare("UPDATE api_tokens SET last_used_at = ? WHERE id = ?").run(Date.now(), row.tokenId);
+  return { id: row.id, username: row.username, role: row.role, email: row.email || "", mustChangePassword: false, tokenId: row.tokenId };
+}
+
+function allowApiTokenRequest(tokenId) {
+  const now = Date.now();
+  const recent = (apiTokenUsage.get(tokenId) || []).filter((time) => now - time < 3600000);
+  if (recent.length >= apiTokenLimits.requestsPerHour) return false;
+  recent.push(now);
+  apiTokenUsage.set(tokenId, recent);
+  return true;
+}
+
+async function handleAccountTokens(request, response, tokenId) {
+  const user = currentUser(request);
+  if (!user || request.apiUser) {
+    sendJson(response, 401, { error: "Log in to manage API tokens." });
+    return;
+  }
+  if (!checkFeatureAccess(request, response, "api-tokens", true)) return;
+  const describe = (row) => ({
+    id: row.id,
+    name: row.name,
+    prefix: row.prefix,
+    createdAt: new Date(row.created_at).toISOString(),
+    lastUsedAt: row.last_used_at ? new Date(row.last_used_at).toISOString() : null,
+    expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+  });
+  if (!tokenId && request.method === "GET") {
+    sendJson(response, 200, { tokens: database.prepare("SELECT * FROM api_tokens WHERE user_id = ? ORDER BY id DESC").all(user.id).map(describe), limit: apiTokenLimits.perUser, requestsPerHour: apiTokenLimits.requestsPerHour });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  if (!tokenId && request.method === "POST") {
+    const body = await readAuthBody(request, response, 2048);
+    if (!body) return;
+    const name = typeof body.name === "string" ? body.name.trim().replace(/[\u0000-\u001f]/g, "").slice(0, 60) : "";
+    const days = body.expiresInDays === null || body.expiresInDays === undefined ? null : Number(body.expiresInDays);
+    if (!name) return sendJson(response, 400, { error: "Give the token a name, such as the script that uses it." });
+    if (days !== null && ![30, 90, 365].includes(days)) return sendJson(response, 400, { error: "Choose an expiry of 30, 90 or 365 days, or none." });
+    if (database.prepare("SELECT COUNT(*) AS count FROM api_tokens WHERE user_id = ?").get(user.id).count >= apiTokenLimits.perUser) {
+      return sendJson(response, 400, { error: `You can have up to ${apiTokenLimits.perUser} tokens. Revoke one first.` });
+    }
+    const token = `bngl_${crypto.randomBytes(32).toString("base64url")}`;
+    const created = database.prepare("INSERT INTO api_tokens (user_id, name, token_hash, prefix, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(user.id, name, crypto.createHash("sha256").update(token).digest("hex"), token.slice(0, 12), Date.now(), days ? Date.now() + days * 86400000 : null);
+    recordAdminLog("audit", request, "API token created", name, 200, user.username);
+    sendJson(response, 201, { token, ...describe(database.prepare("SELECT * FROM api_tokens WHERE id = ?").get(Number(created.lastInsertRowid))) });
+    return;
+  }
+  if (tokenId && request.method === "DELETE") {
+    const row = database.prepare("SELECT * FROM api_tokens WHERE id = ? AND user_id = ?").get(tokenId, user.id);
+    if (!row) return sendJson(response, 404, { error: "Token not found." });
+    database.prepare("DELETE FROM api_tokens WHERE id = ?").run(tokenId);
+    apiTokenUsage.delete(tokenId);
+    recordAdminLog("audit", request, "API token revoked", row.name, 200, user.username);
+    sendJson(response, 200, { revoked: true });
+    return;
+  }
+  sendJson(response, 405, { error: "Method not allowed." });
+}
+
 async function establishSession(userId, response) {
   const token = crypto.randomBytes(32).toString("base64url");
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
@@ -5666,6 +6688,11 @@ async function handleLogin(request, response) {
   }
   resetAuthAttempts(request);
   accountLoginFailures.delete(username.toLowerCase());
+  if (twoFactorStatus(user.id).enabled) {
+    recordAdminLog("login", request, "Password accepted, two-factor code requested", "", 200, user.username);
+    sendJson(response, 200, { twoFactorRequired: true, challenge: createTwoFactorChallenge(user) });
+    return;
+  }
   await establishSession(user.id, response);
   if (!user.must_change_password) recordNmapLoginIp(request, user.username);
   recordAdminLog("login", request, "Login successful", "", 200, user.username);
@@ -6110,6 +7137,11 @@ function handleAccount(request, response) {
       role: user.role,
       email: user.email,
       mailEnabled: Boolean(getMailConfig()),
+      twoFactor: twoFactorStatus(user.id),
+      apiTokensAllowed: (() => {
+        const access = getFeatureAccess()["api-tokens"] || "admin";
+        return access !== "admin" || user.role === "admin";
+      })(),
     });
     return;
   }
@@ -6190,7 +7222,7 @@ function handleAdminUsers(request, response) {
   if (!admin) return;
   if (request.method === "GET") {
     const users = database.prepare(`
-      SELECT id, username, role, active, email, created_at AS createdAt
+      SELECT id, username, role, active, email, created_at AS createdAt, totp_enabled AS twoFactor
       FROM users ORDER BY id
     `).all();
     sendJson(response, 200, { users });
@@ -6341,6 +7373,10 @@ function handleAdminUser(request, response, userId) {
     if (email !== undefined) {
       database.prepare("UPDATE users SET email = ? WHERE id = ?").run(email || null, userId);
     }
+    const resetTwoFactor = body.resetTwoFactor === true;
+    if (resetTwoFactor) {
+      database.prepare("UPDATE users SET totp_enabled = 0, totp_secret = NULL, totp_recovery = NULL, totp_last_step = 0 WHERE id = ?").run(userId);
+    }
     if (!active || hasPassword) {
       database.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
     }
@@ -6349,6 +7385,7 @@ function handleAdminUser(request, response, userId) {
       target.active !== active ? `active ${target.active ? "yes" : "no"} → ${active ? "yes" : "no"}` : "",
       hasPassword ? "password reset" : "",
       email !== undefined ? "email updated" : "",
+      resetTwoFactor ? "two-factor login reset" : "",
     ].filter(Boolean);
     recordAdminLog(
       "audit",
@@ -6763,7 +7800,7 @@ function handleAdminAbout(request, response) {
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
   "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
-  "web", "email-headers", "dmarc-reports", "bulk-domains",
+  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 
@@ -6883,7 +7920,7 @@ async function handleShares(request, url, response) {
 }
 
 const historyLimits = { perUser: 100, lifetimeMs: 30 * 24 * 3600_000, payloadBytes: 512 * 1024 };
-const historyParamKeys = ["type", "method", "port", "selectors", "ports", "targets", "bulkPort", "scanType", "ptr", "tlsGrade", "scanPorts", "scanEmail", "scanSsl", "scanTlsGrade", "scanWeb", "domains"];
+const historyParamKeys = ["type", "method", "port", "selectors", "ports", "targets", "bulkPort", "scanType", "ptr", "tlsGrade", "scanPorts", "scanEmail", "scanSsl", "scanTlsGrade", "scanWeb", "scanDnsHealth", "domains"];
 
 function cleanHistoryParams(params) {
   const clean = {};
@@ -7100,7 +8137,7 @@ function handleAdminInsights(request, url, response) {
   database.prepare("DELETE FROM domain_ratings WHERE checked_at < ?").run(Date.now() - ratingRetentionMs);
   const describe = (row) => ({ domain: row.domain, grade: row.grade, score: row.score, detail: row.detail, checkedAt: new Date(row.checked_at).toISOString() });
   const ratings = {};
-  for (const kind of ["web", "tls", "email"]) {
+  for (const kind of ["web", "tls", "email", "dns"]) {
     const summary = database.prepare("SELECT COUNT(*) AS count, AVG(score) AS average FROM domain_ratings WHERE kind = ? AND checked_at >= ?").get(kind, since);
     ratings[kind] = {
       label: ratingKinds[kind],
@@ -7113,7 +8150,7 @@ function handleAdminInsights(request, url, response) {
   }
   const takeoverRisks = database.prepare("SELECT * FROM domain_ratings WHERE kind = 'takeover' AND checked_at >= ? ORDER BY score ASC, checked_at DESC LIMIT 10").all(since).map(describe);
   const cutoff = new Date(since).toISOString().replace("T", " ").slice(0, 19);
-  const usageActions = ["Web check", "Email check", "Email header analysis", "DMARC report sources", "Record builder import", "Bulk domain check", "Magic scan", "TLS test and grade"];
+  const usageActions = ["Web check", "Email check", "Email header analysis", "DMARC report sources", "Record builder import", "Bulk domain check", "Magic scan", "TLS test and grade", "DNS health check", "Reputation check", "Lookalike domains", "SPF flattener"];
   const usageRows = database.prepare(`
     SELECT action, COUNT(*) AS count FROM admin_logs
     WHERE category = 'query' AND created_at >= ? AND action IN (${usageActions.map(() => "?").join(", ")})
@@ -7856,7 +8893,7 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6 };
 const heavyJobsActive = Object.fromEntries(Object.keys(heavyJobLimits).map((kind) => [kind, 0]));
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
@@ -9003,10 +10040,34 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     response.end(keyAuthorization);
     return;
   }
+  // API tokens (Authorization: Bearer bngl_…) may only call the lookup tools and monitors.
+  const apiToken = apiTokenFromRequest(request);
+  if (apiToken) {
+    if (!apiTokenPaths.has(url.pathname) && !url.pathname.startsWith("/api/monitors")) {
+      sendJson(response, 403, { error: "API tokens can only call lookup tools and monitors." });
+      return;
+    }
+    const tokenUser = authenticateApiToken(apiToken);
+    if (!tokenUser) {
+      sendJson(response, 401, { error: "The API token is invalid, expired or revoked." });
+      return;
+    }
+    const tokenAccess = getFeatureAccess()["api-tokens"] || "admin";
+    if (tokenAccess === "admin" && tokenUser.role !== "admin") {
+      sendJson(response, 403, { error: "API tokens are restricted to administrators." });
+      return;
+    }
+    if (!allowApiTokenRequest(tokenUser.tokenId)) {
+      sendJson(response, 429, { error: `API tokens are limited to ${apiTokenLimits.requestsPerHour} requests per hour.` });
+      return;
+    }
+    request.apiUser = tokenUser;
+  }
   // Defence in depth against CSRF: every state-changing API request must come from this
   // site, even endpoints that are also protected by JSON-only bodies and SameSite cookies.
+  // Token requests carry no cookies, so they cannot be forged by another site.
   if (url.pathname.startsWith("/api/") && !["GET", "HEAD", "OPTIONS"].includes(request.method) &&
-    !enforceSameOrigin(request, response)) {
+    !request.apiUser && !enforceSameOrigin(request, response)) {
     return;
   }
   const queryKeys = new Set();
@@ -9036,6 +10097,10 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/dmarc-sources": { method: "POST", action: "DMARC report sources" },
     "/api/record-import": { method: "GET", action: "Record builder import", keys: ["name"] },
     "/api/bulk-domain-check": { method: "POST", action: "Bulk domain check" },
+    "/api/dns-health": { method: "GET", action: "DNS health check", keys: ["name"] },
+    "/api/reputation": { method: "GET", action: "Reputation check", keys: ["name"] },
+    "/api/lookalike": { method: "GET", action: "Lookalike domains", keys: ["name"] },
+    "/api/spf-flatten": { method: "GET", action: "SPF flattener", keys: ["name"] },
     "/api/ping": { method: "GET", action: "Ping", keys: ["name", "method"] },
     "/api/sslscan": { method: "GET", action: "SSL/TLS check", keys: ["name", "port"] },
     "/api/tls-grade": { method: "POST", action: "TLS test and grade" },
@@ -9118,6 +10183,36 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     void handleInitialSetup(request, response).catch((error) => {
       console.error("Initial admin setup failed:", error);
       sendJson(response, 500, { error: "Unable to complete initial admin setup." });
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/login/2fa") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void handleTwoFactorLogin(request, response).catch((error) => {
+      console.error("Two-factor login failed:", error);
+      if (!response.headersSent) sendJson(response, 500, { error: "Unable to sign in." });
+    });
+    return;
+  }
+
+  const twoFactorMatch = url.pathname.match(/^\/api\/account\/2fa\/(setup|enable|disable|recovery-codes)$/);
+  if (twoFactorMatch) {
+    void handleAccountTwoFactor(request, response, twoFactorMatch[1]).catch((error) => {
+      console.error("Two-factor setting failed:", error);
+      if (!response.headersSent) sendJson(response, 500, { error: "Unable to change two-factor login." });
+    });
+    return;
+  }
+
+  const tokenMatch = url.pathname.match(/^\/api\/account\/tokens(?:\/(\d+))?$/);
+  if (tokenMatch) {
+    void handleAccountTokens(request, response, tokenMatch[1] ? Number(tokenMatch[1]) : null).catch((error) => {
+      console.error("API token request failed:", error);
+      if (!response.headersSent) sendJson(response, 500, { error: "Unable to manage API tokens." });
     });
     return;
   }
@@ -9271,6 +10366,10 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/dmarc-sources": "dmarc-reports",
     "/api/record-import": "record-builder",
     "/api/bulk-domain-check": "bulk-domains",
+    "/api/dns-health": "dns-health",
+    "/api/reputation": "reputation",
+    "/api/lookalike": "lookalike",
+    "/api/spf-flatten": "record-builder",
     "/api/ping": "ping",
     "/api/sslscan": "sslscan",
     "/api/tls-grade": "sslscan",
@@ -9423,6 +10522,24 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     void postRoutes[url.pathname](request, response).catch((error) => {
+      console.error(`${url.pathname} failed:`, error);
+      if (!response.headersSent) sendJson(response, 500, { error: "The request could not be completed." });
+    });
+    return;
+  }
+
+  const getRoutes = {
+    "/api/dns-health": (request, url, response) => dnsHealthCheck(request, url, response),
+    "/api/reputation": (request, url, response) => reputationCheck(request, url, response),
+    "/api/lookalike": (request, url, response) => lookalikeCheck(request, url, response),
+    "/api/spf-flatten": (_request, url, response) => spfFlattenCheck(url, response),
+  };
+  if (getRoutes[url.pathname]) {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    void getRoutes[url.pathname](request, url, response).catch((error) => {
       console.error(`${url.pathname} failed:`, error);
       if (!response.headersSent) sendJson(response, 500, { error: "The request could not be completed." });
     });

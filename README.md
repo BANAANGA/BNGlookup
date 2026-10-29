@@ -30,6 +30,11 @@ small Docker container with no application dependencies.
 - **Email tools**: next to the domain check, a **header analyzer** (delivery path, SPF/DKIM/DMARC results, alignment, spam scores), a **DMARC report viewer** (reads aggregate rua reports in the browser) and a **record builder** for SPF, DMARC, MTA-STS, TLS-RPT and BIMI.
 - **Web check**: redirect chain, HTTPS and certificate, security headers with a grade, cookies, compression, HTTP/2 and HTTP/3.
 - **Bulk check**: MX, SPF, DMARC, HTTPS certificate and blocklists for up to 50 domains at once, exportable as CSV.
+- **Security**: a **DNS health** check (delegation, glue, SOA serials, lame servers, open zone transfers and open recursion), a **reputation** check (filtering resolvers, blocklists, optional URLhaus, VirusTotal and Google Safe Browsing) and a **lookalike domain** finder for typo and homoglyph domains.
+- **IP calculator**: IPv4 and IPv6 network, range, mask and subnet splitting, calculated in the browser.
+- **SPF flattener** (Email tab): replaces includes with IP ranges to get under the 10-lookup limit.
+- **Print / save as PDF** for any result.
+- **Two-factor login** (authenticator app with recovery codes) and **API tokens** for scripts.
 - **Monitors**: scheduled checks of websites, certificates, DNS records, email security and blocklists, with email alerts when something changes or breaks.
 - **ASN**: which network (AS) announces an IP, its RPKI status, and every IPv4/IPv6 prefix that AS announces.
 - **History**: signed-in users can view, re-run and compare their recent lookups.
@@ -372,6 +377,51 @@ Several tools send data to external services; these are listed under
   *Monitor this* under a DNS, SSLscan, Email, Web check or Magic scan result opens
   the Monitors page with the target filled in. Targets follow the same
   private-address rules as the tools.
+- **DNS health** (feature `dns-health`, Security tab; also a Magic scan option):
+  finds the zone (via its SOA), asks a server of the parent zone which name
+  servers and glue it delegates to, then queries every name server directly
+  (up to 8, two addresses each) without recursion over UDP and TCP. It reports
+  fewer than two name servers, parent/zone mismatches, missing glue, lame
+  (non-authoritative or silent) servers, differing SOA serials, servers without
+  TCP, open recursion (a recursive query for another domain is answered), zone
+  transfers (AXFR) open to anyone, all name servers in one /24, missing IPv6 and
+  unusual SOA timers. Results are rated for the dashboard.
+- **Reputation** (feature `reputation`, Security tab) accepts a domain, URL or
+  public IP. Without any keys it compares the domain's address on Quad9,
+  Cloudflare for Families and DNS4EU protective DNS with an unfiltered answer (a
+  block means the service considers it malicious) and checks the spam
+  blocklists. With `URLHAUS_AUTH_KEY`, `VIRUSTOTAL_API_KEY` or
+  `GOOGLE_SAFE_BROWSING_KEY` set, those services are asked too. The target is sent
+  to the services that are used.
+- **Lookalike domains** (feature `lookalike`, Security tab): generates up to 260
+  variants of the registrable domain (homoglyphs such as `0`/`o` and `rn`/`m`,
+  missing, swapped, doubled and nearby-key letters, hyphens, added words such as
+  `-login`, bit flips and other TLDs), checks which exist through DNS (NS, A and
+  MX) and lists the registered ones; those with mail servers come first, since
+  they can send phishing mail. *Monitor this* under the result sets up a
+  Certificate Transparency monitor for your domain.
+- **SPF flattener** (Email tab, same access as the record builder): resolves the
+  domain's SPF record (includes, `a`, `mx`, redirects) into `ip4`/`ip6` ranges and
+  proposes a single record, or a main record with `_spf1.`, `_spf2.` … includes
+  when it is longer than 255 characters. `ptr` and `exists` cannot be flattened
+  and are kept. Flattened records must be refreshed when providers change their
+  addresses.
+- **IP calculator** (feature `ip-calc`): IPv4 address with prefix, netmask or
+  wildcard (`10.1.2.3/22`, `10.1.2.3 255.255.252.0`) or IPv6 prefix; shows
+  network, broadcast, host range, counts, netmask in binary, address type,
+  reverse DNS zone and the subnets of a chosen size (first 256). Nothing is sent
+  to the server.
+- **Web check additions**: `/.well-known/security.txt` (Contact and Expires per RFC
+  9116), `robots.txt` (sitemaps, blocking all crawlers), the sitemap, and mixed
+  content (scripts, images, frames or stylesheets loaded over `http://` on an
+  HTTPS page).
+- **Print / save as PDF**: the button under every result prints just the result in
+  dark-on-white, with collapsed sections opened; choose *Save as PDF* in the
+  browser's print dialog.
+- **Certificate Transparency monitor**: a Monitors type that checks crt.sh (or
+  CertSpotter) for unexpired certificates covering the domain and its subdomains,
+  and alerts on every newly logged one, which can reveal phishing or unknown
+  services using your name.
 - **Subdomain takeover** (every Magic scan): CNAMEs of found hosts (up to 25)
   are checked for targets that no longer exist (NXDOMAIN) and for services such as
   GitHub Pages, Heroku, Azure, S3, Shopify, Fastly, Netlify and Zendesk that show
@@ -445,7 +495,7 @@ Several tools send data to external services; these are listed under
 | Feature | Default access |
 | --- | --- |
 | DNS lookup, Reverse lookup, Whois, Dig, MAC lookup, Ping, SSLscan, Traceroute | Logged-in users |
-| Email check and email tools, Web check, ASN, Propagation, Monitors, History | Logged-in users |
+| Email check and email tools, Web check, Security tools, IP calculator, ASN, Propagation, Monitors, API tokens, History | Logged-in users |
 | Magic scan, Ping scan, Multi traceroute, Port scan, Bulk port scan, Nmap, Bulk check | Administrators |
 
 - Ping scan, Multi traceroute, both port scans, Nmap and Bulk check need a login even if set to Public; Monitors always need a login.
@@ -455,6 +505,21 @@ Several tools send data to external services; these are listed under
   until it is changed, the session has no access to any feature.
 - **Users** can be disabled (reversible) or removed permanently. You cannot remove yourself
   or the last active administrator.
+- **Two-factor login**: on *My account*, confirm your password, scan the QR code
+  with an authenticator app (Google or Microsoft Authenticator, 1Password, Aegis,
+  …) and enter a code. Ten one-time recovery codes are shown once. Afterwards the
+  login asks for a 6-digit code (or a recovery code) after the password; codes
+  are valid for one 30-second step either side and cannot be reused. You can
+  turn it off or create new recovery codes with your password and a code;
+  admins can reset it for a user who lost their phone (Admin → Users).
+- **API tokens** (feature `api-tokens`): on *My account*, create up to 10 named
+  tokens (expiring after 30, 90 or 365 days, or never). Send
+  `Authorization: Bearer bngl_…` to call the lookup tools and Monitors API with
+  the same access rights as the account, for example
+  `curl -H "Authorization: Bearer $TOKEN" "https://lookup.example.com/api/lookup?name=example.com&type=MX"`.
+  Tokens cannot reach account, history, sharing or admin endpoints, are limited
+  to 600 requests per hour each, are stored only as hashes, and are revoked
+  immediately when deleted. Requests are logged under the account.
 - **Email**: in Settings → **Email**, configure an SMTP server (STARTTLS, TLS or none, optional
   login, sender) and send a test message. Users add an optional address on **My account**
   (click their name in the header); a ✉ **Email these results to me** button then appears under
@@ -515,6 +580,7 @@ Environment variables:
 | `DOH_ENDPOINT` | Extra custom DoH JSON endpoint, offered as a resolver choice. |
 | `SETUP_TOKEN` | Optional secret required during first-run setup, so a fresh instance reachable from the internet cannot be claimed by someone else. Set it before first start; it is no longer used once an administrator exists. |
 | `WHOIS_SERVERS` | Per-TLD WHOIS server overrides for registries that publish none at IANA, e.g. `ga=whois.example.ga,xyz=whois.nic.xyz`. |
+| `URLHAUS_AUTH_KEY`, `VIRUSTOTAL_API_KEY`, `GOOGLE_SAFE_BROWSING_KEY` | Optional keys for the reputation check (abuse.ch URLhaus, VirusTotal, Google Safe Browsing). Without them the check uses filtering DNS resolvers and blocklists only. |
 | `BLOCKLIST_RESOLVER` | DNS server(s) for blocklist checks, e.g. `192.168.1.53` or `10.0.0.2:5353`, comma-separated. Default: the container's system resolver. |
 | `UPDATE_CHECK=false` | Disable the dashboard's check for new releases (otherwise the server asks the GitHub API at most every 6 hours, only while an admin views the dashboard). |
 | `APP_VERSION`, `APP_COMMIT`, `APP_BUILD_DATE` | Build information shown on the dashboard. Set automatically by the release workflow as Docker build arguments; local builds show `dev`. |

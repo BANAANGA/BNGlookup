@@ -8,6 +8,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="stylesheet" href="/styles.css">
     <script src="/branding.js" defer></script>
+    <script src="/qr.js" defer></script>
     <script src="/my-account.js" defer></script>
   </head>
   <body>
@@ -30,6 +31,10 @@
           <p class="success-message" id="auth-success" role="status" hidden></p>
           <button class="submit-button" type="submit"><span>Save</span><span aria-hidden="true">→</span></button>
         </form>
+        <h2 class="policy-heading">Two-factor login</h2>
+        <div id="twofactor-panel" class="twofactor-panel"><p class="form-hint">Loading…</p></div>
+        <h2 class="policy-heading" id="tokens-heading" hidden>API tokens</h2>
+        <div id="tokens-panel" class="tokens-panel" hidden></div>
         <h2 class="policy-heading">My shared links</h2>
         <p class="form-hint">Links you created with “Create a share link”. Anyone with a link can view that result until it expires (30 days).</p>
         <div class="share-list" id="share-list"><p class="form-hint">Loading…</p></div>

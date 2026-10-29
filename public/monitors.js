@@ -17,6 +17,7 @@ const kindHints = {
   dns: ["example.com", "Alerts when A, AAAA, CNAME, MX, NS, TXT or CAA records change."],
   email: ["example.com", "Alerts when MX, SPF, DMARC or the MTA-STS mode change, or when SPF or DMARC break."],
   blocklist: ["example.com or 203.0.113.10", "Alerts when the domain or its address appears on (or leaves) a spam blocklist."],
+  ct: ["example.com", "Alerts when a new certificate for the domain or any subdomain appears in Certificate Transparency logs, which can reveal phishing sites and unknown services."],
 };
 const statusLabels = { ok: ["found", "OK"], warn: ["warning", "Warning"], fail: ["danger", "Problem"], pending: ["missing", "Pending"] };
 
