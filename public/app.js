@@ -46,12 +46,12 @@ const monitorsLink = document.querySelector("#monitors-link");
 const watchResultLink = document.querySelector("#watch-result");
 // Tabs that group several tools, shown as sub-tabs under the main tab bar.
 const modeGroups = {
-  email: [["email", "Domain check"], ["email-headers", "Header analyzer"], ["dmarc-reports", "DMARC reports"], ["record-builder", "Record builder"], ["spf-flatten", "SPF flattener"]],
+  email: [["email", "Domain check"], ["mail-server", "Mail server"], ["email-headers", "Header analyzer"], ["dmarc-reports", "DMARC reports"], ["record-builder", "Record builder"], ["spf-flatten", "SPF flattener"]],
   security: [["dns-health", "DNS health"], ["reputation", "Reputation"], ["lookalike", "Lookalike domains"]],
 };
 const modeFeatures = { details: "whois", "spf-flatten": "record-builder" };
 // Tools whose requests and rendering live in tools.js.
-const toolModes = new Set(["web", "bulk-domains", "email-headers", "dmarc-reports", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc"]);
+const toolModes = new Set(["web", "bulk-domains", "email-headers", "dmarc-reports", "dns-health", "mail-server", "reputation", "lookalike", "spf-flatten", "ip-calc"]);
 
 function featureForMode(toolMode) {
   return modeFeatures[toolMode] || toolMode;
@@ -96,7 +96,7 @@ const shareModeLabels = {
   "multi-traceroute": "Multi traceroute", scan: "Magic scan", "custom-port": "Port scan", "bulk-port": "Bulk port scan",
   nmap: "Nmap", dnssec: "DNSSEC check", web: "Web check", "email-headers": "Header analysis",
   "dmarc-reports": "DMARC reports", "bulk-domains": "Bulk domain check", "dns-health": "DNS health",
-  reputation: "Reputation", lookalike: "Lookalike domains", "spf-flatten": "SPF flattener", "ip-calc": "IP calculator",
+  "mail-server": "Mail server check", reputation: "Reputation", lookalike: "Lookalike domains", "spf-flatten": "SPF flattener", "ip-calc": "IP calculator",
 };
 
 function historyEnabled() {
@@ -318,6 +318,7 @@ function submitLabel(currentMode) {
     web: "Check website",
     "bulk-domains": "Check domains",
     "dns-health": "Check DNS health",
+    "mail-server": "Check mail servers",
     reputation: "Check reputation",
     lookalike: "Find lookalikes",
     "spf-flatten": "Flatten SPF",
@@ -348,7 +349,7 @@ function setMode(nextMode) {
   const bulkDomains = mode === "bulk-domains";
   const group = groupOfMode(mode);
   const toolInputMode = emailHeaders || dmarcReports || recordBuilder || bulkDomains;
-  const plainInputMode = ["web", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc"].includes(mode);
+  const plainInputMode = ["web", "dns-health", "mail-server", "reputation", "lookalike", "spf-flatten", "ip-calc"].includes(mode);
   const asnMode = mode === "asn";
   const ping = mode === "ping";
   const sslscan = mode === "sslscan";
@@ -375,6 +376,7 @@ function setMode(nextMode) {
     ? "Search"
     : reverse ? "IP address" : mac ? "MAC address" : dig ? "dig command" : propagation ? "DNS name" : email ? "Domain or email address" : asnMode ? "IP address, domain or AS number"
     : ["dns-health", "lookalike", "spf-flatten"].includes(mode) ? "Domain name"
+    : mode === "mail-server" ? "Domain or email address"
     : mode === "reputation" ? "Domain, URL or IP address"
     : mode === "ip-calc" ? "IP address or prefix"
     : webCheck ? "Domain or URL" : "Domain name or IP address";
@@ -394,7 +396,7 @@ function setMode(nextMode) {
       ? "e.g. example.com, a URL or 203.0.113.7"
     : mode === "ip-calc"
       ? "e.g. 192.168.10.0/22, 10.1.2.3 255.255.255.0 or 2001:db8::/48"
-    : ["dns-health", "lookalike", "spf-flatten"].includes(mode)
+    : ["dns-health", "lookalike", "spf-flatten", "mail-server"].includes(mode)
       ? "e.g. example.com"
     : details || ping || sslscan || traceroute || nmapScan
       ? "e.g. example.com or 8.8.8.8"
@@ -474,6 +476,8 @@ function setMode(nextMode) {
         ? "Read DMARC aggregate (rua) reports to see who sends mail as your domain and whether it passes, before you tighten your DMARC policy."
       : recordBuilder
         ? "Build correct SPF, DMARC, MTA-STS, TLS-RPT and BIMI records. Load a domain's current records to start from them."
+      : mode === "mail-server"
+        ? "Connect to each mail server (MX) on port 25: STARTTLS and its certificate, whether it is an open relay (no message is sent), forward-confirmed reverse DNS, the name it introduces itself with, and password login offered before encryption."
       : mode === "dns-health"
         ? "Query each of the domain's name servers directly: delegation from the parent zone, glue, matching SOA serials, TCP support, open zone transfers (AXFR) and open recursion."
       : mode === "reputation"
@@ -3079,6 +3083,7 @@ function renderSharedResult(shareMode, payload) {
     case "dmarc-reports": renderDmarcReportResult(data); break;
     case "bulk-domains": renderBulkDomainsResult(data); break;
     case "dns-health": renderDnsHealthResult(data); break;
+    case "mail-server": renderMailServerResult(data); break;
     case "reputation": renderReputationResult(data); break;
     case "lookalike": renderLookalikeResult(data); break;
     case "spf-flatten": renderSpfFlattenResult(data); break;

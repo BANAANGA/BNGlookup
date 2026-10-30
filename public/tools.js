@@ -107,6 +107,7 @@ async function runToolMode(toolMode, lookupName) {
   }
   const getTools = {
     "dns-health": ["/api/dns-health", renderDnsHealthResult, (data) => data.zone || data.domain],
+    "mail-server": ["/api/mail-server", renderMailServerResult, (data) => data.domain],
     reputation: ["/api/reputation", renderReputationResult, (data) => data.target],
     lookalike: ["/api/lookalike", renderLookalikeResult, (data) => data.domain],
     "spf-flatten": ["/api/spf-flatten", renderSpfFlattenResult, (data) => data.domain],
@@ -921,6 +922,54 @@ function dnsHealthHtml(data) {
 
 function renderDnsHealthResult(data) {
   resultPanel.innerHTML = dnsHealthHtml(data);
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- Mail server check
+
+function renderMailServerResult(data) {
+  const problems = data.issues.filter((issue) => issue.severity === "high").length;
+  const warnings = data.issues.filter((issue) => issue.severity === "medium").length;
+  const reachable = data.servers.filter((server) => server.connected && !server.error);
+  const yesNo = (value, good = true) => pill(value === good ? "ok" : "fail", value ? "Yes" : "No");
+  const serverSections = data.servers.map((server) => {
+    if (!server.connected || server.error) {
+      return `<section class="record-section"><h3>${copyableResult(server.host)}${server.address ? ` <span class="trace-silent">${escapeHtml(server.address)}</span>` : ""}</h3>
+        <p class="detail-notice">${escapeHtml(server.error || "The server could not be reached.")}</p></section>`;
+    }
+    const tlsInfo = server.tls;
+    const rows = [
+      ["Open relay", server.relay ? (server.relay.tested ? (server.relay.open ? pill("fail", "Yes, accepts mail for other domains") : pill("ok", "No")) : pill("info", "Not tested")) : pill("info", "Not tested"),
+        server.relay?.reply ? escapeHtml(server.relay.reply) : ""],
+      ["STARTTLS", yesNo(server.starttls), ""],
+      ["TLS", tlsInfo ? pill(/^TLSv1(\.1)?$/.test(tlsInfo.protocol || "") ? "warn" : "ok", tlsInfo.protocol || "?") : pill("info", "—"), tlsInfo?.cipher ? escapeHtml(tlsInfo.cipher) : ""],
+      ["Certificate", tlsInfo ? pill(tlsInfo.authorized && tlsInfo.nameMatches ? "ok" : "warn", tlsInfo.authorized ? (tlsInfo.nameMatches ? "Trusted" : "Name does not match") : "Not trusted") : pill("info", "—"),
+        tlsInfo ? escapeHtml([tlsInfo.subject, tlsInfo.issuer, tlsInfo.validTo ? `valid until ${tlsInfo.validTo.slice(0, 10)}${tlsInfo.daysRemaining !== null ? ` (${tlsInfo.daysRemaining} days)` : ""}` : ""].filter(Boolean).join(" · ")) : ""],
+      ["Reverse DNS", pill(server.ptr.confirmed ? "ok" : server.ptr.names.length ? "warn" : "fail", server.ptr.confirmed ? "Forward-confirmed" : server.ptr.names.length ? "Not confirmed" : "None"),
+        escapeHtml(server.ptr.names.join(", "))],
+      ["Introduces itself as", escapeHtml(server.bannerHost || "—"), escapeHtml(server.banner || "")],
+      ["Password login before TLS", server.authBeforeTls ? pill("warn", "Offered") : pill("ok", "No"), escapeHtml(server.authMechanisms.join(" "))],
+      ["Message size limit", escapeHtml(server.sizeLimit ? `${(server.sizeLimit / 1048576).toFixed(server.sizeLimit >= 10485760 ? 0 : 1)} MB` : "Not announced"), ""],
+      ["Extensions", escapeHtml(server.features.join(", ") || "—"), ""],
+      ["Response time", escapeHtml(server.bannerMs !== undefined ? `${server.connectMs} ms connect, ${server.bannerMs} ms to greeting` : ""), ""],
+    ].map(([label, value, detail]) => `<tr><td>${escapeHtml(label)}</td><td>${value}</td><td>${detail}</td></tr>`);
+    return `<section class="record-section"><h3>${copyableResult(server.host)} <span class="trace-silent">${escapeHtml(server.address)} · priority ${escapeHtml(server.priority)}</span></h3>
+      ${dataTable(["Check", "Result", "Details"], rows, "web-checks-table")}</section>`;
+  }).join("");
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">MAIL SERVER CHECK</p><h2>${copyableResult(data.domain)}</h2></div>
+      <span class="status-badge ${problems || warnings ? "warning" : "success"}">${escapeHtml(problems ? `${problems} problem(s)` : warnings ? `${warnings} warning(s)` : reachable.length ? "Looks good" : "Not tested")}</span>
+    </div>
+    ${scoreTiles([
+      ["Mail servers", data.mx.length ? "ok" : "bad", data.nullMx ? "Null MX" : String(data.mx.length)],
+      ["Open relay", data.servers.some((server) => server.relay?.open) ? "bad" : reachable.length ? "ok" : "none", data.servers.some((server) => server.relay?.open) ? "Yes" : reachable.length ? "No" : "Not tested"],
+      ["Encryption", reachable.length ? (reachable.every((server) => server.starttls) ? "ok" : "bad") : "none", reachable.length ? `${reachable.filter((server) => server.starttls).length} of ${reachable.length}` : "Not tested"],
+      ["Reverse DNS", data.servers.length ? (data.servers.every((server) => server.ptr?.confirmed) ? "ok" : "warn") : "none", `${data.servers.filter((server) => server.ptr?.confirmed).length} of ${data.servers.length} confirmed`],
+    ])}
+    ${data.issues.length ? `<section class="record-section"><h3>Findings</h3><ul class="dnssec-issues">${data.issues.map((issue) => `<li class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join("")}</ul></section>` : ""}
+    ${serverSections || '<p class="empty-result">No mail servers to test.</p>'}
+    <p class="scan-disclaimer">The open relay test offers a message from example.org to example.com and stops before any message is sent. Port 25 is often blocked by hosting providers; if every server is unreachable, the check could not run from this server.</p>`;
   resultPanel.hidden = false;
 }
 

@@ -206,6 +206,7 @@ function planJobs(target, allowed, token) {
     add("propagation", { id: "propagation", category: "dns", title: "Propagation", render: renderPropagation, load: () => call(query("/api/propagation", { name, type: "A" })) });
     add("dns-health", { id: "dns-health", category: "dns", title: "Name server health", render: renderDnsHealth, load: () => call(query("/api/dns-health", { name })) });
     add("email", { id: "email", category: "email", title: "Email security", render: renderEmail, load: () => call(query("/api/email-check", { name })) });
+    add("mail-server", { id: "mail-server", category: "email", title: "Mail servers", render: renderMailServers, load: () => call(query("/api/mail-server", { name })) });
     add("web", { id: "web", category: "web", title: "Website", render: renderWeb, load: () => call(query("/api/web-check", { name })) });
     add("sslscan", { id: "tls", category: "web", title: "TLS certificate", render: renderTls, load: () => call(query("/api/sslscan", { name, port: "443" })) });
     add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => call(query("/api/reputation", { name })) });
@@ -379,6 +380,24 @@ function renderEmail(data) {
   };
 }
 
+function renderMailServers(data) {
+  const reachable = data.servers.filter((server) => server.connected && !server.error);
+  const issues = normalizeIssues(data.issues);
+  return {
+    status: !data.servers.length || !reachable.length ? statusFromIssues(issues, "info") : statusFromIssues(issues),
+    summary: data.nullMx ? "This domain does not accept mail."
+      : !data.servers.length ? "No mail servers to test."
+      : !reachable.length ? "The mail servers could not be reached on port 25 from this server."
+      : `${plural(reachable.length, "mail server")} tested on port 25.`,
+    checks: reachable.flatMap((server) => [
+      { state: server.relay?.open ? "bad" : server.relay?.tested ? "good" : "info", label: `${server.host}: open relay`, text: server.relay?.open ? "Accepts mail for other domains." : server.relay?.tested ? "No." : "Not tested." },
+      { state: server.ptr?.confirmed ? "good" : "warn", label: `${server.host}: reverse DNS`, text: server.ptr?.confirmed ? server.ptr.confirmedName : server.ptr?.names?.length ? `${server.ptr.names[0]} (not confirmed)` : "None." },
+      { state: server.authBeforeTls ? "warn" : "good", label: `${server.host}: login before TLS`, text: server.authBeforeTls ? "Offered." : "No." },
+    ]),
+    issues,
+  };
+}
+
 function renderWeb(data) {
   const score = Number(data.score);
   const issues = normalizeIssues(data.issues);
@@ -530,6 +549,9 @@ const fixCatalog = [
   { match: /mta-sts.*testing mode/i, text: "After a few weeks of clean TLS reports, change mode: testing to mode: enforce in the policy file and update the id in the _mta-sts record." },
   { match: /mta-sts/i, text: "Publish an MTA-STS policy so senders require TLS. You need a TXT record plus a policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt (BNGlookup can host it).", snippet: (d) => `_mta-sts.${d}. TXT "v=STSv1; id=${new Date().toISOString().slice(0, 10).replace(/-/g, "")}"` },
   { match: /tls-rpt/i, text: "Publish a TLS-RPT record to receive reports about failed encrypted deliveries.", snippet: (d) => `_smtp._tls.${d}. TXT "v=TLSRPTv1; rua=mailto:tls-reports@${d}"` },
+  { match: /open relay|accepts mail for other domains/i, text: "Only relay mail for your own domains and for users who log in. In Postfix, check smtpd_relay_restrictions (permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination)." },
+  { match: /login before tls|auth\) before encryption|password login/i, text: "Only offer AUTH after STARTTLS. For Postfix: smtpd_tls_auth_only = yes." },
+  { match: /reverse dns.*(not confirmed|does not point back)|not forward-confirmed/i, text: "Make the reverse DNS (PTR) name of the mail server's address resolve back to the same address, ideally the name it uses in HELO. Your hosting provider sets the PTR record." },
   { match: /bimi requires dmarc/i, text: "BIMI logos are only shown when DMARC is enforced: raise the DMARC policy to quarantine or reject.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@${d}"` },
   { match: /logo could not be fetched|logo.*served as/i, text: "Serve the BIMI logo directly (no redirects) over HTTPS as image/svg+xml in the SVG Tiny Portable/Secure format. BNGlookup can host it at /logo.svg." },
   { match: /mark certificate.*(expire|not valid)/i, text: "Renew the Verified Mark Certificate with your certificate authority and replace the file at the a= address." },
@@ -569,7 +591,7 @@ const fixCatalog = [
   { match: /look-alike/i, text: "Watch the high-risk look-alikes. Consider registering the most dangerous ones yourself, and report abuse to their registrar." },
   { match: /did not answer|not reachable/i, text: "Check that the host is up and that a firewall allows the check (ICMP or HTTPS)." },
   { match: /rpki-invalid/i, text: "The announcing network is not authorized by the address holder's ROA. Ask the network operator to fix the route or the ROA." },
-  { match: /no ptr record|no reverse dns/i, text: "Ask the owner of the IP address (usually your hosting provider) to set a reverse DNS (PTR) name." },
+  { match: /no ptr record|no reverse dns|reverse dns: none/i, text: "Ask the owner of the IP address (usually your hosting provider) to set a reverse DNS (PTR) name." },
 ];
 
 function fixFor(text) {
@@ -604,6 +626,7 @@ document.addEventListener("click", async (event) => {
 // tables, plus the raw JSON and a link to the same tool in the full interface.
 
 const fullModes = {
+  "mail-server": "mail-server",
   records: "forward", dnssec: "forward", whois: "details", propagation: "propagation", "dns-health": "dns-health", email: "email",
   web: "web", tls: "sslscan", reputation: "reputation", lookalike: "lookalike", ping: "ping", asn: "asn", reverse: "reverse", mac: "mac",
 };
@@ -1285,7 +1308,7 @@ function setCompareMode(on) {
 
 // ------------------------------------------------------------------ Share and PDF
 
-const allLandingFeatures = new Set(["forward", "whois", "propagation", "dns-health", "email", "web", "sslscan", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+const allLandingFeatures = new Set(["forward", "whois", "propagation", "dns-health", "email", "mail-server", "web", "sslscan", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
 
 async function shareScan() {
   const box = byId("share-box");

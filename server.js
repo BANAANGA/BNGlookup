@@ -161,6 +161,7 @@ const featureAccessDefaults = {
   "bulk-domains": "admin",
   monitors: "user",
   "dns-health": "user",
+  "mail-server": "user",
   reputation: "user",
   lookalike: "user",
   "ip-calc": "user",
@@ -194,6 +195,7 @@ const featureNames = {
   "bulk-domains": "Bulk domain check (up to 50 domains)",
   monitors: "Monitoring and email alerts (requires login)",
   "dns-health": "DNS health check (delegation, SOA, zone transfer, open recursion)",
+  "mail-server": "Mail server check (open relay, reverse DNS, TLS on port 25)",
   reputation: "Reputation check (protective DNS, blocklists, optional threat feeds)",
   lookalike: "Lookalike domain finder",
   "ip-calc": "IP / CIDR calculator",
@@ -2838,7 +2840,9 @@ function parseSmtpReplies(buffer) {
 
 const smtpHeloName = /^[a-z0-9.-]{1,253}$/i.test(process.env.SMTP_TEST_HELO || "") ? process.env.SMTP_TEST_HELO : "bnglookup.localdomain";
 
-function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
+// With deep: true the probe also records the greeting and timings and tests whether the
+// server relays: it offers a foreign sender and recipient and stops before DATA.
+function testSmtpStartTls(host, address, { timeoutMs = 15000, deep = false } = {}) {
   return new Promise((resolve) => {
     const started = Date.now();
     const result = { host, address, connected: false, banner: null, ehlo: false, starttls: false, tls: null, capabilities: [], capabilitiesAfterTls: [], error: null };
@@ -2864,19 +2868,25 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
       ? "Could not connect to port 25 in time. Outbound port 25 may be blocked by this server's network or hosting provider."
       : `The server stopped responding (${stage}).`), timeoutMs);
     const send = (line) => socket.write(`${line}\r\n`);
+    const startRelayTest = () => {
+      stage = "mail";
+      send("MAIL FROM:<bnglookup-relay-test@example.org>");
+    };
     const onReply = (reply) => {
       const text = reply.lines.join(" ").slice(0, 300);
       if (stage === "banner") {
         if (reply.code !== 220) return finish(`The server refused the connection: ${reply.code} ${text}`);
         result.banner = text;
+        if (deep) result.bannerMs = Date.now() - started;
         stage = "ehlo";
         send(`EHLO ${smtpHeloName}`);
       } else if (stage === "ehlo") {
         if (reply.code !== 250) return finish(`EHLO was rejected: ${reply.code} ${text}`);
         result.ehlo = true;
+        result.greeting = reply.lines[0]?.slice(0, 200) || null;
         result.capabilities = reply.lines.slice(1).map((line) => line.trim().toUpperCase()).filter(Boolean).slice(0, 30);
         result.starttls = result.capabilities.some((capability) => capability.split(" ")[0] === "STARTTLS");
-        if (!result.starttls) return finish(null);
+        if (!result.starttls) return deep ? startRelayTest() : finish(null);
         stage = "starttls";
         send("STARTTLS");
       } else if (stage === "starttls") {
@@ -2909,6 +2919,19 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
         secure.once("error", (error) => finish(`The TLS handshake failed (${error.code || error.message}).`));
       } else if (stage === "ehlo-tls") {
         if (reply.code === 250) result.capabilitiesAfterTls = reply.lines.slice(1).map((line) => line.trim().toUpperCase()).filter(Boolean).slice(0, 30);
+        if (deep) return startRelayTest();
+        finish(null);
+      } else if (stage === "mail") {
+        if (reply.code !== 250) {
+          result.relay = { tested: false, open: false, reply: `${reply.code} ${text}` };
+          return finish(null);
+        }
+        stage = "rcpt";
+        send("RCPT TO:<bnglookup-relay-test@example.com>");
+      } else if (stage === "rcpt") {
+        result.relay = { tested: true, open: reply.code === 250 || reply.code === 251, reply: `${reply.code} ${text}` };
+        stage = "rset";
+        send("RSET");
         finish(null);
       }
     };
@@ -2922,7 +2945,10 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
         onReply(reply);
       }
     };
-    socket.once("connect", () => { result.connected = true; });
+    socket.once("connect", () => {
+      result.connected = true;
+      if (deep) result.connectMs = Date.now() - started;
+    });
     socket.on("data", onData);
     socket.once("error", (error) => finish(error.code === "ECONNREFUSED"
       ? "Port 25 refused the connection."
@@ -2930,6 +2956,133 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
         ? `Could not reach port 25 (${error.code}). Outbound port 25 may be blocked by this server's network or hosting provider.`
         : `The connection failed (${error.code || error.message}).`));
   });
+}
+
+// ---------------------------------------------------------------- Mail server deep check
+
+async function resolveMailHosts(domain) {
+  let records = [];
+  let nullMx = false;
+  let implicit = false;
+  try {
+    const mxData = await queryDohDns(domain, "MX");
+    records = mxData.answers
+      .filter((answer) => answer.type === 15 || answer.typeName === "MX")
+      .map((answer) => {
+        const [priority, host] = String(answer.data).split(/\s+/);
+        return { priority: Number(priority), host: String(host || "").replace(/\.$/, "").toLowerCase() };
+      })
+      .sort((left, right) => left.priority - right.priority || left.host.localeCompare(right.host));
+    nullMx = records.length === 1 && (!records[0].host || records[0].host === ".");
+    if (!records.length) {
+      implicit = true;
+      records = [{ priority: 0, host: domain }];
+    }
+  } catch {
+    records = [];
+  }
+  if (nullMx) records = [];
+  const resolved = await Promise.all(records.slice(0, 10).map(async (record) => {
+    const [v4, v6] = await Promise.all(["A", "AAAA"].map((type) => queryDohDns(record.host, type).then(
+      (data) => data.answers.filter((answer) => answer.type === (type === "A" ? 1 : 28) || answer.typeName === type).map((answer) => answer.data),
+      () => [],
+    )));
+    return { ...record, addresses: [...v4, ...v6] };
+  }));
+  return { records: resolved, nullMx, implicit };
+}
+
+// Forward-confirmed reverse DNS: the PTR name must resolve back to the same address.
+async function forwardConfirmedPtr(address) {
+  let ptr;
+  try {
+    ptr = await fetchPtr(address);
+  } catch {
+    return { names: [], confirmed: false, error: "The PTR lookup failed." };
+  }
+  const names = (ptr.answers || []).map((name) => String(name).replace(/\.$/, "").toLowerCase()).slice(0, 4);
+  for (const name of names) {
+    const type = isIP(address) === 6 ? "AAAA" : "A";
+    const forward = await queryDohDns(name, type).then((data) => data.answers.map((answer) => answer.data), () => []);
+    if (forward.includes(address)) return { names, confirmed: true, confirmedName: name };
+  }
+  return { names, confirmed: false };
+}
+
+const hostnameToken = (text) => {
+  const token = String(text || "").trim().split(/\s+/)[0]?.replace(/[[\]]/g, "").toLowerCase() || "";
+  return /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(token) ? token : null;
+};
+
+function mailServerIssues(server) {
+  const issues = [];
+  if (!server.connected || server.error) {
+    if (server.error) issues.push({ severity: "low", message: `${server.host}: ${server.error}` });
+    return issues;
+  }
+  if (server.relay?.open) issues.push({ severity: "high", message: `${server.host} accepts mail for other domains without logging in (open relay); spammers can abuse it.` });
+  if (!server.starttls) issues.push({ severity: "high", message: `${server.host} does not offer STARTTLS, so mail to it travels unencrypted.` });
+  if (server.tls) {
+    if (/^TLSv1(\.1)?$/.test(server.tls.protocol || "")) issues.push({ severity: "medium", message: `${server.host} negotiated the outdated ${server.tls.protocol}.` });
+    if (server.tls.daysRemaining !== null && server.tls.daysRemaining < 0) issues.push({ severity: "high", message: `The certificate of ${server.host} has expired.` });
+    else if (server.tls.daysRemaining !== null && server.tls.daysRemaining < 14) issues.push({ severity: "medium", message: `The certificate of ${server.host} expires in ${server.tls.daysRemaining} days.` });
+    if (!server.tls.authorized) issues.push({ severity: "medium", message: `The certificate of ${server.host} is not trusted (${server.tls.authorizationError}); MTA-STS and DANE senders will refuse it.` });
+    else if (!server.tls.nameMatches) issues.push({ severity: "medium", message: `The certificate of ${server.host} does not cover that name.` });
+  }
+  if (server.authBeforeTls) issues.push({ severity: "medium", message: `${server.host} offers password login (AUTH) before encryption, so passwords can be sent in clear text.` });
+  if (!server.ptr.names.length) issues.push({ severity: "medium", message: `${server.address} has no reverse DNS (PTR) name; many receivers reject mail from such addresses.` });
+  else if (!server.ptr.confirmed) issues.push({ severity: "medium", message: `The reverse DNS name of ${server.address} (${server.ptr.names[0]}) does not point back to it (not forward-confirmed).` });
+  if (server.bannerHost && server.ptr.names.length && !server.ptr.names.includes(server.bannerHost) && server.bannerHost !== server.host) {
+    issues.push({ severity: "low", message: `${server.host} introduces itself as ${server.bannerHost}, which matches neither its MX name nor its reverse DNS.` });
+  }
+  if (server.bannerMs > 5000) issues.push({ severity: "low", message: `${server.host} took ${(server.bannerMs / 1000).toFixed(1)} s to greet; senders may time out.` });
+  return issues;
+}
+
+async function mailServerCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 320, response);
+  if (rawName === null) return;
+  const input = rawName.trim();
+  const domain = normalizeDomain(hostFromInput(input.includes("@") ? input.slice(input.lastIndexOf("@") + 1) : input));
+  if (!domain) return sendJson(response, 400, { error: "Enter a domain name or a mail server name." });
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("mailServer")) return sendJson(response, 503, { error: "The server is busy with other mail server checks. Try again shortly." });
+  try {
+    const started = Date.now();
+    const { records, nullMx, implicit } = await resolveMailHosts(domain);
+    const targets = records.filter((record) => record.addresses.length).slice(0, 3);
+    const servers = await Promise.all(targets.map(async (record) => {
+      const address = record.addresses.find((candidate) => isIP(candidate) === 4 && isScannableAddress(candidate, allowLocal));
+      if (!address) return { host: record.host, priority: record.priority, address: null, error: "No public IPv4 address to test (private or reserved addresses are not tested).", ptr: { names: [], confirmed: false }, issues: [] };
+      const [probe, ptr] = await Promise.all([testSmtpStartTls(record.host, address, { deep: true }), forwardConfirmedPtr(address)]);
+      const authBefore = probe.capabilities.some((capability) => /^AUTH\b/.test(capability));
+      const caps = probe.capabilitiesAfterTls.length ? probe.capabilitiesAfterTls : probe.capabilities;
+      const size = caps.find((capability) => /^SIZE\b/.test(capability))?.split(/\s+/)[1];
+      const server = {
+        ...probe,
+        priority: record.priority,
+        ptr,
+        bannerHost: hostnameToken(probe.banner),
+        greetingHost: hostnameToken(probe.greeting),
+        authBeforeTls: authBefore && probe.starttls,
+        authMechanisms: (caps.find((capability) => /^AUTH\b/.test(capability)) || "").split(/\s+/).slice(1),
+        sizeLimit: size && /^\d+$/.test(size) && Number(size) > 0 ? Number(size) : null,
+        features: ["PIPELINING", "8BITMIME", "SMTPUTF8", "REQUIRETLS", "CHUNKING", "DSN", "ENHANCEDSTATUSCODES"].filter((name) => caps.some((capability) => capability.split(/\s+/)[0] === name)),
+      };
+      server.issues = mailServerIssues(server);
+      return server;
+    }));
+    const issues = servers.flatMap((server) => server.issues);
+    if (nullMx) issues.push({ severity: "low", message: "The domain publishes a null MX: it does not accept mail." });
+    else if (!records.length) issues.push({ severity: "medium", message: "No mail servers were found for this domain." });
+    sendJson(response, 200, { domain, nullMx, implicitMx: implicit, mx: records, servers, issues, durationMs: Date.now() - started });
+  } catch (error) {
+    console.error("Mail server check failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the mail server check." });
+  } finally {
+    releaseHeavyJob("mailServer");
+  }
 }
 
 async function analyzeDkimSelector(domain, selector, provider) {
@@ -5293,7 +5446,7 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS landing_shares_client ON landing_shares(client_hash, created_at);
 `);
 const landingShareLimits = { payloadBytes: 768 * 1024, anonymousPerDay: 10, anonymousTotal: 5000, userLifetimeMs: 30 * 86400000, anonymousLifetimeMs: 7 * 86400000 };
-const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
 
 function validLandingSharePayload(body) {
   const target = body?.target;
@@ -7709,6 +7862,7 @@ const apiTokenPaths = new Set([
   "/api/dig", "/api/blocklist", "/api/propagation", "/api/email-check", "/api/asn", "/api/web-check", "/api/email-headers",
   "/api/dmarc-sources", "/api/record-import", "/api/bulk-domain-check", "/api/dns-health", "/api/reputation",
   "/api/lookalike", "/api/spf-flatten", "/api/ping", "/api/sslscan", "/api/ping-scan", "/api/traceroute", "/api/multi-traceroute",
+  "/api/mail-server",
 ]);
 const apiTokenUsage = new Map();
 
@@ -8953,7 +9107,7 @@ function handleAdminAbout(request, response) {
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
   "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
-  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc",
+  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 
@@ -10053,7 +10207,7 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3 };
 const heavyJobsActive = Object.fromEntries(Object.keys(heavyJobLimits).map((kind) => [kind, 0]));
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
@@ -11264,6 +11418,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/record-import": { method: "GET", action: "Record builder import", keys: ["name"] },
     "/api/bulk-domain-check": { method: "POST", action: "Bulk domain check" },
     "/api/dns-health": { method: "GET", action: "DNS health check", keys: ["name"] },
+    "/api/mail-server": { method: "GET", action: "Mail server check", keys: ["name"] },
     "/api/reputation": { method: "GET", action: "Reputation check", keys: ["name"] },
     "/api/lookalike": { method: "GET", action: "Lookalike domains", keys: ["name"] },
     "/api/spf-flatten": { method: "GET", action: "SPF flattener", keys: ["name"] },
@@ -11576,6 +11731,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/record-import": "record-builder",
     "/api/bulk-domain-check": "bulk-domains",
     "/api/dns-health": "dns-health",
+    "/api/mail-server": "mail-server",
     "/api/reputation": "reputation",
     "/api/lookalike": "lookalike",
     "/api/spf-flatten": "record-builder",
@@ -11739,6 +11895,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
 
   const getRoutes = {
     "/api/dns-health": (request, url, response) => dnsHealthCheck(request, url, response),
+    "/api/mail-server": (request, url, response) => mailServerCheck(request, url, response),
     "/api/reputation": (request, url, response) => reputationCheck(request, url, response),
     "/api/lookalike": (request, url, response) => lookalikeCheck(request, url, response),
     "/api/spf-flatten": (_request, url, response) => spfFlattenCheck(url, response),
