@@ -85,6 +85,7 @@ the main [README](../README.md).
 | [Two-factor login](two-factor.md) | Adds an authenticator code to your login. |
 | [API tokens](api-tokens.md) | Use the tools from scripts. |
 | [Dashboard](dashboard.md) | Server status, activity and insights for administrators. |
+| [Site files](site-files.md) | Publish robots.txt, security.txt and humans.txt for this site. |
 
 ## Who can use what
 

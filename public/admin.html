@@ -75,6 +75,7 @@
           <button class="settings-tab" id="mail-tab" type="button" role="tab" aria-selected="false" aria-controls="mail-panel" tabindex="-1">Email</button>
           <button class="settings-tab" id="about-tab" type="button" role="tab" aria-selected="false" aria-controls="about-panel" tabindex="-1">About page</button>
           <button class="settings-tab" id="landing-tab" type="button" role="tab" aria-selected="false" aria-controls="landing-panel" tabindex="-1">Landing page</button>
+          <button class="settings-tab" id="site-files-tab" type="button" role="tab" aria-selected="false" aria-controls="site-files-panel" tabindex="-1">Site files</button>
         </div>
         <form id="settings-form">
           <section class="settings-panel" id="general-panel" role="tabpanel" aria-labelledby="general-tab">
@@ -228,6 +229,13 @@
           </form>
           <h2 class="policy-heading">Preview</h2>
           <div class="about-content about-preview" id="about-preview"></div>
+        </section>
+        <section class="settings-panel" id="site-files-panel" role="tabpanel" aria-labelledby="site-files-tab" hidden>
+          <h2>Site files</h2>
+          <p class="form-hint">Standard files that crawlers, security researchers and password managers look for. Each one is only served while it is published; changes go live when you save. The hosted MTA-STS policy is managed in the email record builder.</p>
+          <div id="site-files"></div>
+          <h2 class="policy-heading">Change-password link</h2>
+          <label class="branding-reset site-file-toggle" for="site-change-password"><input id="site-change-password" type="checkbox"> Redirect <code>/.well-known/change-password</code> to the account page, so password managers can open it directly</label>
         </section>
         <section class="settings-panel" id="landing-panel" role="tabpanel" aria-labelledby="landing-tab" hidden>
           <h2>Landing page</h2>
