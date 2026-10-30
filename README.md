@@ -264,7 +264,7 @@ addresses unless the user's role allows local targets.
 | Area | Tools |
 | --- | --- |
 | DNS and domains | [Auto lookup](#auto-lookup) · [DNS lookup and DNSSEC](#dns-lookup-and-dnssec) · [Reverse lookup](#reverse-lookup) · [Whois](#whois) · [Dig](#dig) · [Propagation](#propagation) · [ASN](#asn) · [Magic scan](#magic-scan) |
-| Email | [Email check](#email-check) · [Header analyzer](#header-analyzer) · [DMARC reports](#dmarc-reports) · [Record builder](#record-builder) · [SPF flattener](#spf-flattener) |
+| Email | [Email check](#email-check) · [Mail server check](#mail-server-check) · [Header analyzer](#header-analyzer) · [DMARC reports](#dmarc-reports) · [TLS reports](#tls-reports) · [Record builder](#record-builder) · [SPF flattener](#spf-flattener) |
 | Web and TLS | [Web check](#web-check) · [SSLscan and TLS grade](#sslscan-and-tls-grade) · [Website previews](#website-previews) |
 | Security | [DNS health](#dns-health) · [Reputation](#reputation) · [Lookalike domains](#lookalike-domains) · [Blocklists](#blocklists) · [Subdomain takeover](#subdomain-takeover) |
 | Network | [Ping](#ping) · [Traceroute](#traceroute) · [Ping scan](#ping-scan) · [Port scan and Bulk port scan](#port-scan-and-bulk-port-scan) · [Nmap](#nmap) · [MAC lookup](#mac-lookup) · [IP calculator](#ip-calculator) |
@@ -395,6 +395,25 @@ Accepts a domain or an email address and reviews the whole mail setup:
 
 Results open with a scorecard and a list of problems sorted by severity.
 
+#### Mail server check
+
+Connects to up to three of a domain's mail servers (MX) on port 25 and reports per
+server:
+
+- **Open relay**: a foreign sender and recipient are offered; a server that
+  accepts the recipient relays mail for anyone. The session stops before `DATA`,
+  so no message is ever sent.
+- **STARTTLS**, the negotiated TLS version and the certificate (trusted, name,
+  expiry).
+- **Forward-confirmed reverse DNS**: the PTR name of the address must resolve back
+  to it, which many receivers require.
+- The host name in the greeting, **password login offered before encryption**,
+  the message size limit, extensions (PIPELINING, SMTPUTF8, REQUIRETLS, …) and
+  response times.
+
+Many hosting providers block outbound port 25; the check then explains that it
+could not run from this server.
+
 #### Header analyzer
 
 Paste the headers of a received message (up to 256 KB) to see:
@@ -416,6 +435,16 @@ the server, to look up their host names. The result shows message totals,
 DMARC/DKIM/SPF pass rates, every sending source with its results and
 disposition, the reporting organizations, and whether the domain is ready for a
 stricter policy.
+
+#### TLS reports
+
+Select up to 50 SMTP TLS reports (TLS-RPT, RFC 8460) as `.json`, `.json.gz` or
+`.zip`, as received at the `rua=` address of your `_smtp._tls` record. They are
+read in your browser and never sent to the server. The result shows the share of
+sessions that were encrypted and verified, the MTA-STS or DANE policy and mode,
+every failure grouped by reason and receiving server (with an explanation of each
+result type), and the reporters. It tells you when MTA-STS can move from
+`testing` to `enforce`: only when no session failed.
 
 #### Record builder
 
@@ -687,8 +716,8 @@ Users are **Admins** or **Users**. Administrators set each feature to
 
 - Ping scan, Multi traceroute, both port scans, Nmap and Bulk check need a login
   even when set to Public. Monitors, website previews and API tokens always need a login.
-- Public features are limited to 15 lookups per client IP per UTC day; signed-in
-  users are exempt.
+- Public features are limited per client IP per UTC day (15 by default; see
+  [Public lookup limits](#public-lookup-limits)); signed-in users are exempt.
 - New accounts and password resets by an administrator require a **password
   change at first login**; until then the session has no access to any feature.
 - Users can be disabled (reversible) or removed. You cannot remove yourself or
@@ -705,6 +734,36 @@ Ten one-time recovery codes are shown once.
 - Turning it off or creating new recovery codes requires the password and a code.
 - Administrators can reset two-factor login for a user who lost their phone
   (**Admin → Users**).
+
+### Passkeys
+
+On **My account**, add a passkey (fingerprint, face, device PIN or a security key,
+up to 10 per user) and sign in with **Sign in with a passkey** on the login page.
+Passkeys need HTTPS (or `localhost`) and are tied to the site's host name.
+
+- A passkey that verified you (PIN, fingerprint or face) replaces the two-factor
+  code; otherwise the code is still asked.
+- Passkeys are checked by the server without external libraries: challenge,
+  origin, host name, user presence, signature and signature counter (a counter
+  that goes backwards blocks a copied passkey).
+
+### Single sign-on
+
+**Admin → Single sign-on** connects an OpenID Connect provider (Microsoft Entra
+ID, Google, Okta, Authentik, Keycloak, Authelia, …). Register BNGlookup there as
+a web application with the redirect address shown in the tab
+(`https://<your-site>/api/auth/oidc/callback`), then enter the issuer URL,
+client ID and secret. A **Sign in with …** button appears on the login page.
+
+- The authorization code flow with PKCE is used; the ID token's signature
+  (RS256, PS256, ES256 or EdDSA), issuer, audience, expiry and nonce are checked.
+- Sign-ins are matched to users by their provider identity. New users can be
+  created automatically (optionally only for listed email domains, with a chosen
+  role). Linking to existing users by verified email address is off by default:
+  users enter their own address on My account, so only turn it on when you trust
+  those addresses. It never links when two accounts share an address.
+- Sign-ins through the provider skip BNGlookup's own two-factor code; use the
+  provider's multi-factor login. The client secret is never shown again.
 
 ### API tokens
 
@@ -757,7 +816,7 @@ Settings are grouped in tabs under **Admin**:
 | Tab | Settings |
 | --- | --- |
 | General | Site title and icon (upload PNG, JPEG, GIF, WebP or ICO up to 256 KB, or an HTTPS URL), the [BIMI logo](#bimi-logo), and the default DNS resolver: Google Public DNS, Cloudflare, Quad9 or DNS4EU ([protective](https://joindns4.eu/for-public), may filter malicious domains), plus `DOH_ENDPOINT`. |
-| Access & network | Public, Logged-in users or Administrators per feature, and the [trusted reverse proxies](#reverse-proxies-and-cloudflare). |
+| Access & network | Public, Logged-in users or Administrators per feature, the [trusted reverse proxies](#reverse-proxies-and-cloudflare) and the [public lookup limits](#public-lookup-limits). |
 | Port scans | Maximum ports and local-network access per role, the largest bulk-scan CIDR, the zmap rate and the networks approved for Nmap. |
 | SSL certificate | The [built-in certificate client](#ssl-certificate-acme). |
 | Users | Create, edit, disable, remove users, reset passwords and two-factor login. |
@@ -765,6 +824,8 @@ Settings are grouped in tabs under **Admin**:
 | About page | Content of the public [About page](#about-page). |
 | Landing page | Theme, texts and background of the public [landing page](#landing-page), with a live preview. |
 | Site files | [robots.txt, security.txt, humans.txt](#site-files) and the change-password link. |
+| Single sign-on | The [OpenID Connect provider](#single-sign-on). |
+| Backup | [Download and restore](#backup-and-restore) a full backup. |
 
 #### Reverse proxies and Cloudflare
 
@@ -776,13 +837,31 @@ IPv6 ranges are downloaded over HTTPS, cached, and refreshed at startup and ever
 also add the address of the `cloudflared` connector, since connections come from
 that connector rather than from Cloudflare's edge.
 
+#### Public lookup limits
+
+In **Admin → Access & network**, set how many public lookups each IP address may
+make per UTC day (1–100,000; 15 by default), networks with **no limit** (one
+address or CIDR per line) and **blocked networks**. Blocked networks cannot use
+public lookups, or, if you choose, the whole site. A whole-site block that would
+include your own address is refused, and the tab shows the address the server
+sees for you.
+
 #### Landing page
 
 Visitors who are not logged in see a simple landing page at `/`: one search box
 that runs every tool set to **Public** at once and shows the results in animated
-tabs (Overview, DNS, Email, Web & TLS, Security, Network). Every result card
-expands to its full details (with Copy JSON and a link to the same tool in the
-full interface). A whole scan counts as a single public lookup. A small *Log in* button leads to the full interface.
+tabs (Overview, DNS, Email, Web & TLS, Security, Network). A whole scan counts as
+a single public lookup.
+
+- Every warning has a **How to fix** explanation, often with a ready-made record,
+  header or setting for the scanned domain and a Copy button.
+- Every result card expands to its **full details** (with Copy JSON and a link to
+  the same tool in the full interface).
+- **Share link** stores the result at `/s/<id>` (30 days, or 7 days and 10 per
+  day for visitors without an account); **Save as PDF** prints a clean report with
+  all categories and fixes.
+- **Compare with another domain** scans two domains side by side, highlights the
+  better result per check and lets you open either full result (two lookups). A small *Log in* button leads to the full interface.
 Logged-in users switch between the simple and the full interface with the
 *Simple / Full* switch at the top right; the choice is remembered in their
 browser, and the administrator chooses which one they start in.
@@ -793,6 +872,21 @@ gradient, solid or an uploaded PNG/JPEG/WebP/GIF up to 5 MB, with dimming and
 blur), all texts and tab names, and the interface logged-in users start in. It
 can also be turned off for visitors who are not logged in. See the
 [wiki page](docs/landing-page.md).
+
+#### Backup and restore
+
+**Admin → Backup** downloads a `.tar.gz` with a consistent snapshot of the
+database (users, settings, monitors, history, logs and statistics), the SSL
+certificate and the landing page background. It contains password hashes,
+two-factor secrets and keys, so store it safely.
+
+Restoring checks the upload first (only the files a backup contains, an intact
+BNGlookup database with at least one administrator), then restarts BNGlookup and
+swaps the files in at startup. Everyone is logged out. The replaced data is kept
+in `pre-restore-<time>/` in the data volume (the last three). With Docker the
+container restarts by itself (`restart: unless-stopped`); without a process
+manager, start BNGlookup again. Uploads are limited to 256 MB and must arrive
+within the server's 30-second request timeout.
 
 #### Site files
 
@@ -901,7 +995,8 @@ curl -H "Authorization: Bearer $TOKEN" "https://lookup.example.com/api/monitors"
 **Accounts and sessions**
 
 - Passwords are stored as salted scrypt hashes. Sessions use `HttpOnly`,
-  `SameSite=Strict` cookies and expire after 12 hours. Two-factor login is available.
+  `SameSite=Strict` cookies and expire after 12 hours. Two-factor login,
+  [passkeys](#passkeys) and [single sign-on](#single-sign-on) are available.
 - Logins are limited per client IP (10 per 15 minutes) and per account (30
   failures per 15 minutes from any number of IPs), with identical responses for
   unknown usernames.
@@ -978,6 +1073,9 @@ To run a specific release, `git fetch --tags && git checkout v2.4.0` and rebuild
 `git checkout main && git pull` returns to the latest code.
 
 **Backup**
+
+The simplest way is **Admin → Backup** ([Backup and restore](#backup-and-restore)).
+From the command line:
 
 ```sh
 # the volume is named <folder>_app_data; check with: sudo docker volume ls

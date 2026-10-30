@@ -34,6 +34,35 @@ lookups.
 
 ![Full details](images/landing-details.jpg)
 
+## How to fix
+
+Every warning and problem has a **How to fix** toggle with a short explanation
+and, where it applies, a ready-made record, header or setting for the scanned
+domain with a Copy button: SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI, DNSSEC, CAA,
+name server problems, security headers, HTTPS, certificates, open relays and more.
+
+![How to fix](images/landing-fix.jpg)
+
+## Share and PDF
+
+When a scan has finished, **Share link** stores the result and gives a link
+(`/s/<id>`) that opens it in the simple interface, with full details and fixes,
+without running the tools again. Links of logged-in users last 30 days; visitors
+without an account can share 10 results per day, and their links last 7 days.
+**Save as PDF** prints a clean report with every category, all lists and the
+fixes, in light colors whatever the theme.
+
+## Compare two domains
+
+**Compare with another domain** adds a second search field. Both domains (or two
+IP addresses) are scanned at the same time and shown side by side: a score per
+domain with a **Best score** badge, and every check per category with the better
+side highlighted. **Open full result** shows either side in the normal tabs. A
+comparison counts as two public lookups and can be reloaded from its address
+(`/#compare:a.example,b.example`).
+
+![Compare](images/landing-compare.jpg)
+
 For an IP address it runs reverse DNS, IP registration, reputation, reachability
 and ASN. Tabs without public tools are hidden. The score counts good results as
 100, warnings as 60 and problems as 15, and leaves informational results out.
