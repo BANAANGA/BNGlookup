@@ -831,7 +831,6 @@ function updateSummary() {
   animateNumber(byId("ring-number"), score);
 
   const all = categoryState("overview");
-  const high = all.issues.filter((issue) => issue.severity === "high").length;
   const done = finished.length === page.jobs.length;
   byId("summary-text").textContent = done
     ? `${plural(page.jobs.length, "check")} finished${all.issues.length ? ` · ${plural(all.issues.length, "point")} to look at` : " · no problems found"}.`
@@ -842,7 +841,6 @@ function updateSummary() {
     counts.good && `<span class="pill good">${counts.good} good</span>`,
     counts.warn && `<span class="pill warn">${counts.warn} attention</span>`,
     counts.bad && `<span class="pill bad">${counts.bad} ${counts.bad === 1 ? "problem" : "problems"}</span>`,
-    high && `<span class="pill bad">${plural(high, "serious issue")}</span>`,
   ].filter(Boolean).join("");
   byId("progress-bar").style.width = `${page.jobs.length ? (finished.length / page.jobs.length) * 100 : 100}%`;
   byId("progress").classList.toggle("done", done);
@@ -851,8 +849,11 @@ function updateSummary() {
     const state = categoryState(tab.dataset.category);
     const badge = tab.querySelector(".tab-badge");
     const warnings = state.issues.length;
-    badge.className = `tab-badge ${state.busy ? "busy" : warnings ? (state.issues.some((issue) => issue.severity === "high") ? "bad" : "warn") : "good"}`;
-    badge.textContent = state.busy ? "" : warnings ? String(warnings) : "✓";
+    const tone = warnings ? (state.issues.some((issue) => issue.severity === "high") ? "bad" : "warn") : "good";
+    // Each issue is counted once, on its own category's tab; the overview only shows a status dot.
+    const overview = tab.dataset.category === "overview";
+    badge.className = `tab-badge ${state.busy ? "busy" : overview ? `dot ${tone}` : tone}`;
+    badge.textContent = state.busy || overview ? "" : warnings ? String(warnings) : "✓";
   });
   positionIndicator();
   drawOverview();
