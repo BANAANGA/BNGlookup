@@ -74,6 +74,7 @@
           <button class="settings-tab" id="users-tab" type="button" role="tab" aria-selected="false" aria-controls="users-panel" tabindex="-1">Users</button>
           <button class="settings-tab" id="mail-tab" type="button" role="tab" aria-selected="false" aria-controls="mail-panel" tabindex="-1">Email</button>
           <button class="settings-tab" id="about-tab" type="button" role="tab" aria-selected="false" aria-controls="about-panel" tabindex="-1">About page</button>
+          <button class="settings-tab" id="landing-tab" type="button" role="tab" aria-selected="false" aria-controls="landing-panel" tabindex="-1">Landing page</button>
         </div>
         <form id="settings-form">
           <section class="settings-panel" id="general-panel" role="tabpanel" aria-labelledby="general-tab">
@@ -227,6 +228,52 @@
           </form>
           <h2 class="policy-heading">Preview</h2>
           <div class="about-content about-preview" id="about-preview"></div>
+        </section>
+        <section class="settings-panel" id="landing-panel" role="tabpanel" aria-labelledby="landing-tab" hidden>
+          <h2>Landing page</h2>
+          <p class="form-hint">Visitors who are not logged in see a simple <a href="/landing" target="_blank" rel="noopener">landing page</a> at <code>/</code>. One search runs every tool that is set to <strong>Public</strong> under Access &amp; network, and counts as a single public lookup. A small login button leads to the full interface. Changes show in the preview right away and go live when you save.</p>
+          <div class="landing-editor">
+            <form id="landing-form" class="admin-create-form landing-form">
+              <label class="branding-reset landing-wide" for="landing-enabled"><input id="landing-enabled" name="enabled" type="checkbox"> Show the landing page at <code>/</code> to visitors who are not logged in</label>
+              <h3 class="landing-wide">Theme</h3>
+              <div class="landing-presets landing-wide" id="landing-presets"></div>
+              <div class="landing-colors landing-wide" id="landing-colors"></div>
+              <label for="landing-font">Font</label>
+              <select id="landing-font" name="font"></select>
+              <label for="landing-radius">Rounding</label>
+              <input id="landing-radius" name="radius" type="range" min="0" max="32" step="1">
+              <label class="branding-reset landing-wide" for="landing-animations"><input id="landing-animations" name="animations" type="checkbox"> Animations (visitors who prefer reduced motion never see them)</label>
+              <label class="branding-reset landing-wide" for="landing-glass"><input id="landing-glass" name="glass" type="checkbox"> Frosted glass cards</label>
+              <h3 class="landing-wide">Background</h3>
+              <label for="landing-background-mode">Style</label>
+              <select id="landing-background-mode" name="backgroundMode">
+                <option value="aurora">Animated aurora</option>
+                <option value="gradient">Moving gradient</option>
+                <option value="solid">Solid color</option>
+                <option value="image">Uploaded image</option>
+              </select>
+              <label for="landing-background-upload">Image</label>
+              <div class="landing-upload">
+                <input id="landing-background-upload" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+                <button class="dash-version-check" id="landing-background-remove" type="button" hidden>Remove image</button>
+              </div>
+              <p class="form-hint" id="landing-background-status">PNG, JPEG, WebP or GIF up to 5 MB. Uploading saves the image straight away.</p>
+              <label for="landing-overlay">Image dimming</label>
+              <input id="landing-overlay" name="overlay" type="range" min="0" max="95" step="1">
+              <label for="landing-blur">Image blur</label>
+              <input id="landing-blur" name="blur" type="range" min="0" max="24" step="1">
+              <h3 class="landing-wide">Text</h3>
+              <div class="landing-texts landing-wide" id="landing-texts"></div>
+              <div class="about-actions landing-wide">
+                <button class="submit-button" type="submit"><span>Save landing page</span><span aria-hidden="true">→</span></button>
+                <button class="dash-version-check" id="landing-reset" type="button">Reset theme and text</button>
+              </div>
+            </form>
+            <div class="landing-preview">
+              <div class="landing-preview-bar"><span>Preview</span><a href="/landing" target="_blank" rel="noopener">Open in new tab</a></div>
+              <iframe id="landing-preview-frame" src="/landing?preview=1" title="Landing page preview"></iframe>
+            </div>
+          </div>
         </section>
       </section>
     </main>

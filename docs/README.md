@@ -7,6 +7,12 @@ the main [README](../README.md).
 > Screenshots were made with test domains such as `webtest.test` and sample
 > data; your results will show your own domains.
 
+## Start page
+
+| Page | In one sentence |
+| --- | --- |
+| [Landing page](landing-page.md) | A simple start page that runs all public tools at once, with tabs per category. |
+
 ## DNS and domains
 
 | Tool | In one sentence |

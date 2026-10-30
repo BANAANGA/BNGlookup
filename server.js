@@ -87,6 +87,9 @@ const staticFiles = new Set([
   "/monitors.js",
   "/tools.js",
   "/qr.js",
+  "/landing.html",
+  "/landing.js",
+  "/landing.css",
   "/styles.css",
   "/app.js",
   "/account.js",
@@ -4606,6 +4609,204 @@ function zlibDecodeBuffer(body, encoding) {
   return body;
 }
 
+// ---------------------------------------------------------------- Simple landing page
+
+const landingFonts = {
+  system: "system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif",
+  rounded: "ui-rounded, \"SF Pro Rounded\", \"Nunito\", system-ui, sans-serif",
+  serif: "\"Iowan Old Style\", \"Palatino Linotype\", Georgia, serif",
+  mono: "ui-monospace, \"SF Mono\", \"Cascadia Code\", Menlo, monospace",
+  geometric: "\"Avenir Next\", \"Montserrat\", \"Century Gothic\", system-ui, sans-serif",
+};
+const landingDefaults = {
+  enabled: true,
+  theme: {
+    background: "#06080f", background2: "#11203d", surface: "#0f1524", text: "#eef2ff", muted: "#8b96b2",
+    accent: "#7c5cff", accent2: "#22d3ee", success: "#34d399", warning: "#fbbf24", danger: "#f87171",
+    font: "system", radius: 18, animations: true, glass: true,
+    backgroundMode: "aurora", overlay: 55, blur: 0,
+  },
+  content: {
+    headline: "Check any domain in seconds",
+    subheadline: "DNS, email security, HTTPS, reputation and more, in one scan.",
+    placeholder: "example.com, an IP address or a MAC address",
+    button: "Scan",
+    login: "Log in",
+    footer: "",
+    examples: "example.com, 1.1.1.1, wikipedia.org",
+    empty: "No checks are available without an account yet. Log in to use all tools.",
+    tabOverview: "Overview", tabDns: "DNS", tabEmail: "Email", tabWeb: "Web & TLS", tabSecurity: "Security", tabNetwork: "Network",
+  },
+};
+const landingContentLimits = { headline: 120, subheadline: 240, placeholder: 80, button: 24, login: 24, footer: 300, examples: 200, empty: 240 };
+const landingBackgroundTypes = { "image/png": [0x89, 0x50, 0x4e, 0x47], "image/jpeg": [0xff, 0xd8, 0xff], "image/webp": [0x52, 0x49, 0x46, 0x46], "image/gif": [0x47, 0x49, 0x46] };
+const landingBackgroundFile = path.join(dataDir, "landing-background");
+const landingScanTokens = new Map();
+const landingTokenLimits = { lifetimeMs: 5 * 60 * 1000, uses: 30, perFeature: 8 };
+
+function readLandingConfig() {
+  let saved = {};
+  try {
+    saved = JSON.parse(database.prepare("SELECT value FROM app_settings WHERE key = 'landing_config'").get()?.value || "{}");
+  } catch {
+    saved = {};
+  }
+  return {
+    enabled: typeof saved.enabled === "boolean" ? saved.enabled : landingDefaults.enabled,
+    theme: { ...landingDefaults.theme, ...(saved.theme || {}) },
+    content: { ...landingDefaults.content, ...(saved.content || {}) },
+    background: saved.background || null,
+  };
+}
+
+function validateLandingConfig(body) {
+  const theme = {};
+  const content = {};
+  const source = body && typeof body === "object" ? body : {};
+  for (const key of ["background", "background2", "surface", "text", "muted", "accent", "accent2", "success", "warning", "danger"]) {
+    const value = source.theme?.[key];
+    if (typeof value !== "string" || !/^#[0-9a-f]{6}$/i.test(value)) return { error: `Choose a valid color for ${key}.` };
+    theme[key] = value.toLowerCase();
+  }
+  if (!Object.hasOwn(landingFonts, source.theme?.font)) return { error: "Choose one of the listed fonts." };
+  theme.font = source.theme.font;
+  if (!["aurora", "gradient", "solid", "image"].includes(source.theme?.backgroundMode)) return { error: "Choose a background style." };
+  theme.backgroundMode = source.theme.backgroundMode;
+  for (const [key, min, max] of [["radius", 0, 32], ["overlay", 0, 95], ["blur", 0, 24]]) {
+    const value = Number(source.theme?.[key]);
+    if (!Number.isInteger(value) || value < min || value > max) {
+      return { error: `${{ radius: "Rounding", overlay: "Image dimming", blur: "Image blur" }[key]} must be between ${min} and ${max}.` };
+    }
+    theme[key] = value;
+  }
+  theme.animations = source.theme?.animations !== false;
+  theme.glass = source.theme?.glass !== false;
+  for (const key of Object.keys(landingDefaults.content)) {
+    const value = source.content?.[key];
+    const limit = landingContentLimits[key] || 30;
+    if (typeof value !== "string" || value.length > limit || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(value)) {
+      return { error: `The text for "${key}" must be at most ${limit} characters.` };
+    }
+    content[key] = value.trim();
+  }
+  for (const key of ["headline", "button", "placeholder", "tabOverview", "tabDns", "tabEmail", "tabWeb", "tabSecurity", "tabNetwork"]) {
+    if (!content[key]) return { error: `The text for "${key}" cannot be empty.` };
+  }
+  return { value: { enabled: source.enabled !== false, theme, content } };
+}
+
+function publicLandingConfig(config = readLandingConfig()) {
+  const access = getFeatureAccess();
+  return {
+    enabled: config.enabled,
+    siteTitle: getSiteTitle(),
+    iconUrl: getSiteIconUrl(),
+    theme: { ...config.theme, fontStack: landingFonts[config.theme.font] || landingFonts.system },
+    content: config.content,
+    background: config.background ? { url: `/landing/background?v=${encodeURIComponent(config.background.updatedAt)}` } : null,
+    publicFeatures: Object.entries(access).filter(([, level]) => level === "public").map(([feature]) => feature),
+    dailyLimit: publicLookupDailyLimit,
+  };
+}
+
+function saveLandingConfig(config) {
+  database.prepare(`
+    INSERT INTO app_settings (key, value) VALUES ('landing_config', ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(JSON.stringify(config));
+}
+
+function handleAdminLanding(request, response, url) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  const config = readLandingConfig();
+  if (url.pathname === "/api/admin/landing" && request.method === "GET") {
+    sendJson(response, 200, { ...publicLandingConfig(config), defaults: landingDefaults, fonts: landingFonts });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  if (url.pathname === "/api/admin/landing" && request.method === "PUT") {
+    void readAuthBody(request, response, 32768).then((body) => {
+      if (!body) return;
+      const result = validateLandingConfig(body);
+      if (result.error) return sendJson(response, 400, { error: result.error });
+      saveLandingConfig({ ...result.value, background: config.background });
+      recordAdminLog("audit", request, "Landing page updated", result.value.enabled ? "enabled" : "disabled", 200, admin.username);
+      sendJson(response, 200, publicLandingConfig());
+    });
+    return;
+  }
+  if (url.pathname === "/api/admin/landing/background" && request.method === "PUT") {
+    void readAuthBody(request, response, 8 * 1024 * 1024).then((body) => {
+      if (!body) return;
+      const match = String(body.image || "").match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/);
+      const data = match ? Buffer.from(match[2], "base64") : null;
+      const magic = match ? landingBackgroundTypes[match[1]] : null;
+      if (!data || !magic || !magic.every((byte, index) => data[index] === byte) || (match[1] === "image/webp" && data.subarray(8, 12).toString() !== "WEBP")) {
+        return sendJson(response, 400, { error: "Upload a PNG, JPEG, WebP or GIF image." });
+      }
+      if (data.length > 5 * 1024 * 1024) return sendJson(response, 400, { error: "The image must be 5 MB or smaller." });
+      fs.writeFileSync(landingBackgroundFile, data, { mode: 0o600 });
+      const background = { type: match[1], bytes: data.length, updatedAt: new Date().toISOString() };
+      saveLandingConfig({ ...config, background, theme: { ...config.theme, backgroundMode: "image" } });
+      recordAdminLog("audit", request, "Landing page background uploaded", `${Math.round(data.length / 1024)} KB`, 200, admin.username);
+      sendJson(response, 200, publicLandingConfig());
+    });
+    return;
+  }
+  if (url.pathname === "/api/admin/landing/background" && request.method === "DELETE") {
+    fs.rmSync(landingBackgroundFile, { force: true });
+    saveLandingConfig({ ...config, background: null, theme: { ...config.theme, backgroundMode: config.theme.backgroundMode === "image" ? "aurora" : config.theme.backgroundMode } });
+    recordAdminLog("audit", request, "Landing page background removed", null, 200, admin.username);
+    sendJson(response, 200, publicLandingConfig());
+    return;
+  }
+  sendJson(response, 405, { error: "Method not allowed." });
+}
+
+function serveLandingBackground(request, response) {
+  const background = readLandingConfig().background;
+  if (!background || !fs.existsSync(landingBackgroundFile)) {
+    response.writeHead(404, { "content-type": "text/plain" }).end("Not found");
+    return;
+  }
+  const data = fs.readFileSync(landingBackgroundFile);
+  response.writeHead(200, {
+    "content-type": background.type,
+    "content-length": data.length,
+    "cache-control": "public, max-age=86400",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "default-src 'none'; sandbox",
+  });
+  response.end(request.method === "HEAD" ? undefined : data);
+}
+
+// A combined landing scan counts as one public lookup: the token it returns lets the
+// browser call the public tools for a few minutes without using more of the daily quota.
+function handleLandingStart(request, response) {
+  if (!readLandingConfig().enabled && !currentUser(request)) {
+    sendJson(response, 404, { error: "The landing page is turned off." });
+    return;
+  }
+  const now = Date.now();
+  for (const [token, entry] of landingScanTokens) if (entry.expiresAt < now) landingScanTokens.delete(token);
+  if (landingScanTokens.size > 20000) landingScanTokens.clear();
+  if (!currentUser(request) && !consumePublicLookup(request, response)) return;
+  const token = crypto.randomBytes(24).toString("base64url");
+  landingScanTokens.set(token, { client: getClientAddress(request) || "unknown", expiresAt: now + landingTokenLimits.lifetimeMs, uses: 0, features: {} });
+  sendJson(response, 200, { token, expiresInSeconds: landingTokenLimits.lifetimeMs / 1000 });
+}
+
+function landingTokenAllows(request, feature) {
+  const token = String(request.headers["x-landing-scan"] || "");
+  const entry = token && landingScanTokens.get(token);
+  if (!entry || entry.expiresAt < Date.now() || entry.client !== (getClientAddress(request) || "unknown")) return false;
+  if (entry.uses >= landingTokenLimits.uses || (entry.features[feature] || 0) >= landingTokenLimits.perFeature) return false;
+  entry.uses += 1;
+  entry.features[feature] = (entry.features[feature] || 0) + 1;
+  return true;
+}
+
 const ripeStatCache = new Map();
 
 async function ripeStat(dataCall, params) {
@@ -8660,7 +8861,7 @@ function checkFeatureAccess(request, response, feature, requireLogin = false) {
       .includes(new URL(request.url, "http://localhost").pathname)
       ? "POST"
       : "GET";
-    if (!user && request.method === expectedMethod &&
+    if (!user && request.method === expectedMethod && !landingTokenAllows(request, feature) &&
       !consumePublicLookup(request, response)) return false;
     return true;
   }
@@ -10674,6 +10875,29 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/landing/config") {
+    if (request.method !== "GET") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    sendJson(response, 200, publicLandingConfig());
+    return;
+  }
+
+  if (url.pathname === "/api/landing/start") {
+    if (request.method !== "POST") {
+      sendJson(response, 405, { error: "Method not allowed." });
+      return;
+    }
+    handleLandingStart(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/landing" || url.pathname === "/api/admin/landing/background") {
+    handleAdminLanding(request, response, url);
+    return;
+  }
+
   if (url.pathname === "/api/admin/logo") {
     handleAdminLogo(request, response);
     return;
@@ -11083,7 +11307,19 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   if (url.pathname === "/.well-known/mta-sts.txt" && (request.method === "GET" || request.method === "HEAD") && serveMtaStsPolicy(request, response)) {
     return;
   }
-  const requestedPath = url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
+  if (url.pathname === "/landing/background" && (request.method === "GET" || request.method === "HEAD")) {
+    serveLandingBackground(request, response);
+    return;
+  }
+  // Visitors who are not logged in get the simple landing page at "/", unless they follow a
+  // link into the full interface (?mode=, ?share=, ?q=, …) or the landing page is turned off.
+  const landingRoot = url.pathname === "/" && !url.search && !currentUser(request) && readLandingConfig().enabled;
+  if (url.pathname === "/landing") {
+    // The admin settings page shows a live preview of the landing page in a frame.
+    response.setHeader("content-security-policy", response.getHeader("content-security-policy").replace("frame-ancestors 'none'", "frame-ancestors 'self'"));
+    response.setHeader("x-frame-options", "SAMEORIGIN");
+  }
+  const requestedPath = url.pathname === "/landing" || landingRoot ? "/landing.html" : url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
   if (!staticFiles.has(requestedPath)) {
     response.writeHead(404);
     response.end();
