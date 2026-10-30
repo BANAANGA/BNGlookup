@@ -777,8 +777,9 @@ that connector rather than from Cloudflare's edge.
 
 Visitors who are not logged in see a simple landing page at `/`: one search box
 that runs every tool set to **Public** at once and shows the results in animated
-tabs (Overview, DNS, Email, Web & TLS, Security, Network). A whole scan counts as a
-single public lookup. A small *Log in* button leads to the full interface.
+tabs (Overview, DNS, Email, Web & TLS, Security, Network). Every result card
+expands to its full details (with Copy JSON and a link to the same tool in the
+full interface). A whole scan counts as a single public lookup. A small *Log in* button leads to the full interface.
 Logged-in users switch between the simple and the full interface with the
 *Simple / Full* switch at the top right; the choice is remembered in their
 browser, and the administrator chooses which one they start in.
