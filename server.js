@@ -11,6 +11,8 @@ const net = require("node:net");
 const http2 = require("node:http2");
 const crypto = require("node:crypto");
 const zlib = require("node:zlib");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const { promisify } = require("node:util");
 const { DatabaseSync } = require("node:sqlite");
 const { lookup: resolveHost, Resolver: DnsResolver } = require("node:dns/promises");
@@ -18,6 +20,8 @@ const { domainToASCII } = require("node:url");
 const { createAcmeManager } = require("./acme");
 const { sendMail, validAddress } = require("./mail");
 const { analyzeEmailHeaders, organizationalDomain } = require("./email-headers");
+const webauthn = require("./webauthn");
+const oidc = require("./oidc");
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
@@ -88,6 +92,7 @@ const staticFiles = new Set([
   "/tools.js",
   "/qr.js",
   "/landing.html",
+  "/passkeys.js",
   "/landing.js",
   "/landing.css",
   "/styles.css",
@@ -105,6 +110,29 @@ const staticFiles = new Set([
 const dataDir = path.resolve(process.env.DATA_DIR || "/data");
 fs.mkdirSync(dataDir, { recursive: true });
 process.umask(0o077);
+// A restore uploaded in Admin -> Backup is staged in restore-pending/ and swapped in here,
+// before the database is opened. The replaced files are kept in pre-restore-<time>/.
+const restorePendingDir = path.join(dataDir, "restore-pending");
+const restorableNames = ["bnglookup.sqlite", "bnglookup.sqlite-wal", "bnglookup.sqlite-shm", "landing-background", "acme"];
+const restoreApplied = (function applyPendingRestore() {
+  if (!fs.existsSync(path.join(restorePendingDir, "ready"))) {
+    fs.rmSync(restorePendingDir, { recursive: true, force: true });
+    return false;
+  }
+  const keep = path.join(dataDir, `pre-restore-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+  fs.mkdirSync(keep, { mode: 0o700 });
+  for (const name of restorableNames) {
+    if (fs.existsSync(path.join(dataDir, name))) fs.renameSync(path.join(dataDir, name), path.join(keep, name));
+  }
+  for (const name of fs.readdirSync(restorePendingDir)) {
+    if (name !== "ready" && restorableNames.includes(name)) fs.renameSync(path.join(restorePendingDir, name), path.join(dataDir, name));
+  }
+  fs.rmSync(restorePendingDir, { recursive: true, force: true });
+  const previous = fs.readdirSync(dataDir).filter((name) => name.startsWith("pre-restore-")).sort();
+  for (const old of previous.slice(0, -3)) fs.rmSync(path.join(dataDir, old), { recursive: true, force: true });
+  console.log(`Restored a backup; the previous data is kept in ${keep}.`);
+  return true;
+}());
 const database = new DatabaseSync(path.join(dataDir, "bnglookup.sqlite"));
 fs.chmodSync(path.join(dataDir, "bnglookup.sqlite"), 0o600);
 const scrypt = promisify(crypto.scrypt);
@@ -132,10 +160,12 @@ const featureAccessDefaults = {
   web: "user",
   "email-headers": "user",
   "dmarc-reports": "user",
+  "tlsrpt-reports": "user",
   "record-builder": "user",
   "bulk-domains": "admin",
   monitors: "user",
   "dns-health": "user",
+  "mail-server": "user",
   reputation: "user",
   lookalike: "user",
   "ip-calc": "user",
@@ -165,10 +195,12 @@ const featureNames = {
   web: "Web check (redirects, security headers, HTTP/2 and HTTP/3)",
   "email-headers": "Email header analyzer",
   "dmarc-reports": "DMARC aggregate report viewer",
+  "tlsrpt-reports": "TLS-RPT report viewer (SMTP TLS reports)",
   "record-builder": "SPF, DMARC, MTA-STS, TLS-RPT and BIMI record builder",
   "bulk-domains": "Bulk domain check (up to 50 domains)",
   monitors: "Monitoring and email alerts (requires login)",
   "dns-health": "DNS health check (delegation, SOA, zone transfer, open recursion)",
+  "mail-server": "Mail server check (open relay, reverse DNS, TLS on port 25)",
   reputation: "Reputation check (protective DNS, blocklists, optional threat feeds)",
   lookalike: "Lookalike domain finder",
   "ip-calc": "IP / CIDR calculator",
@@ -209,7 +241,6 @@ const portScanPolicyDefaults = {
 const zmapEnabled = process.env.ZMAP_ENABLED === "true";
 const zmapRateLimits = { min: 1000, max: 100000 };
 const bulkScanLimits = { tcpConnect: 256, zmapIpv4: 65536 };
-const publicLookupDailyLimit = 15;
 database.exec(`
   PRAGMA foreign_keys = ON;
   PRAGMA journal_mode = WAL;
@@ -402,6 +433,8 @@ database.prepare(`
   INSERT OR IGNORE INTO app_settings (key, value)
   VALUES ('public_lookup_hash_key', ?)
 `).run(crypto.randomBytes(32).toString("hex"));
+// Sessions saved in a restored backup are not carried over: everyone logs in again.
+if (restoreApplied) database.exec("DELETE FROM user_sessions");
 const publicLookupHashKey = database.prepare(
   "SELECT value FROM app_settings WHERE key = 'public_lookup_hash_key'",
 ).get().value;
@@ -2812,7 +2845,9 @@ function parseSmtpReplies(buffer) {
 
 const smtpHeloName = /^[a-z0-9.-]{1,253}$/i.test(process.env.SMTP_TEST_HELO || "") ? process.env.SMTP_TEST_HELO : "bnglookup.localdomain";
 
-function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
+// With deep: true the probe also records the greeting and timings and tests whether the
+// server relays: it offers a foreign sender and recipient and stops before DATA.
+function testSmtpStartTls(host, address, { timeoutMs = 15000, deep = false } = {}) {
   return new Promise((resolve) => {
     const started = Date.now();
     const result = { host, address, connected: false, banner: null, ehlo: false, starttls: false, tls: null, capabilities: [], capabilitiesAfterTls: [], error: null };
@@ -2838,19 +2873,25 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
       ? "Could not connect to port 25 in time. Outbound port 25 may be blocked by this server's network or hosting provider."
       : `The server stopped responding (${stage}).`), timeoutMs);
     const send = (line) => socket.write(`${line}\r\n`);
+    const startRelayTest = () => {
+      stage = "mail";
+      send("MAIL FROM:<bnglookup-relay-test@example.org>");
+    };
     const onReply = (reply) => {
       const text = reply.lines.join(" ").slice(0, 300);
       if (stage === "banner") {
         if (reply.code !== 220) return finish(`The server refused the connection: ${reply.code} ${text}`);
         result.banner = text;
+        if (deep) result.bannerMs = Date.now() - started;
         stage = "ehlo";
         send(`EHLO ${smtpHeloName}`);
       } else if (stage === "ehlo") {
         if (reply.code !== 250) return finish(`EHLO was rejected: ${reply.code} ${text}`);
         result.ehlo = true;
+        result.greeting = reply.lines[0]?.slice(0, 200) || null;
         result.capabilities = reply.lines.slice(1).map((line) => line.trim().toUpperCase()).filter(Boolean).slice(0, 30);
         result.starttls = result.capabilities.some((capability) => capability.split(" ")[0] === "STARTTLS");
-        if (!result.starttls) return finish(null);
+        if (!result.starttls) return deep ? startRelayTest() : finish(null);
         stage = "starttls";
         send("STARTTLS");
       } else if (stage === "starttls") {
@@ -2883,6 +2924,19 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
         secure.once("error", (error) => finish(`The TLS handshake failed (${error.code || error.message}).`));
       } else if (stage === "ehlo-tls") {
         if (reply.code === 250) result.capabilitiesAfterTls = reply.lines.slice(1).map((line) => line.trim().toUpperCase()).filter(Boolean).slice(0, 30);
+        if (deep) return startRelayTest();
+        finish(null);
+      } else if (stage === "mail") {
+        if (reply.code !== 250) {
+          result.relay = { tested: false, open: false, reply: `${reply.code} ${text}` };
+          return finish(null);
+        }
+        stage = "rcpt";
+        send("RCPT TO:<bnglookup-relay-test@example.com>");
+      } else if (stage === "rcpt") {
+        result.relay = { tested: true, open: reply.code === 250 || reply.code === 251, reply: `${reply.code} ${text}` };
+        stage = "rset";
+        send("RSET");
         finish(null);
       }
     };
@@ -2896,7 +2950,10 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
         onReply(reply);
       }
     };
-    socket.once("connect", () => { result.connected = true; });
+    socket.once("connect", () => {
+      result.connected = true;
+      if (deep) result.connectMs = Date.now() - started;
+    });
     socket.on("data", onData);
     socket.once("error", (error) => finish(error.code === "ECONNREFUSED"
       ? "Port 25 refused the connection."
@@ -2904,6 +2961,133 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000 } = {}) {
         ? `Could not reach port 25 (${error.code}). Outbound port 25 may be blocked by this server's network or hosting provider.`
         : `The connection failed (${error.code || error.message}).`));
   });
+}
+
+// ---------------------------------------------------------------- Mail server deep check
+
+async function resolveMailHosts(domain) {
+  let records = [];
+  let nullMx = false;
+  let implicit = false;
+  try {
+    const mxData = await queryDohDns(domain, "MX");
+    records = mxData.answers
+      .filter((answer) => answer.type === 15 || answer.typeName === "MX")
+      .map((answer) => {
+        const [priority, host] = String(answer.data).split(/\s+/);
+        return { priority: Number(priority), host: String(host || "").replace(/\.$/, "").toLowerCase() };
+      })
+      .sort((left, right) => left.priority - right.priority || left.host.localeCompare(right.host));
+    nullMx = records.length === 1 && (!records[0].host || records[0].host === ".");
+    if (!records.length) {
+      implicit = true;
+      records = [{ priority: 0, host: domain }];
+    }
+  } catch {
+    records = [];
+  }
+  if (nullMx) records = [];
+  const resolved = await Promise.all(records.slice(0, 10).map(async (record) => {
+    const [v4, v6] = await Promise.all(["A", "AAAA"].map((type) => queryDohDns(record.host, type).then(
+      (data) => data.answers.filter((answer) => answer.type === (type === "A" ? 1 : 28) || answer.typeName === type).map((answer) => answer.data),
+      () => [],
+    )));
+    return { ...record, addresses: [...v4, ...v6] };
+  }));
+  return { records: resolved, nullMx, implicit };
+}
+
+// Forward-confirmed reverse DNS: the PTR name must resolve back to the same address.
+async function forwardConfirmedPtr(address) {
+  let ptr;
+  try {
+    ptr = await fetchPtr(address);
+  } catch {
+    return { names: [], confirmed: false, error: "The PTR lookup failed." };
+  }
+  const names = (ptr.answers || []).map((name) => String(name).replace(/\.$/, "").toLowerCase()).slice(0, 4);
+  for (const name of names) {
+    const type = isIP(address) === 6 ? "AAAA" : "A";
+    const forward = await queryDohDns(name, type).then((data) => data.answers.map((answer) => answer.data), () => []);
+    if (forward.includes(address)) return { names, confirmed: true, confirmedName: name };
+  }
+  return { names, confirmed: false };
+}
+
+const hostnameToken = (text) => {
+  const token = String(text || "").trim().split(/\s+/)[0]?.replace(/[[\]]/g, "").toLowerCase() || "";
+  return /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(token) ? token : null;
+};
+
+function mailServerIssues(server) {
+  const issues = [];
+  if (!server.connected || server.error) {
+    if (server.error) issues.push({ severity: "low", message: `${server.host}: ${server.error}` });
+    return issues;
+  }
+  if (server.relay?.open) issues.push({ severity: "high", message: `${server.host} accepts mail for other domains without logging in (open relay); spammers can abuse it.` });
+  if (!server.starttls) issues.push({ severity: "high", message: `${server.host} does not offer STARTTLS, so mail to it travels unencrypted.` });
+  if (server.tls) {
+    if (/^TLSv1(\.1)?$/.test(server.tls.protocol || "")) issues.push({ severity: "medium", message: `${server.host} negotiated the outdated ${server.tls.protocol}.` });
+    if (server.tls.daysRemaining !== null && server.tls.daysRemaining < 0) issues.push({ severity: "high", message: `The certificate of ${server.host} has expired.` });
+    else if (server.tls.daysRemaining !== null && server.tls.daysRemaining < 14) issues.push({ severity: "medium", message: `The certificate of ${server.host} expires in ${server.tls.daysRemaining} days.` });
+    if (!server.tls.authorized) issues.push({ severity: "medium", message: `The certificate of ${server.host} is not trusted (${server.tls.authorizationError}); MTA-STS and DANE senders will refuse it.` });
+    else if (!server.tls.nameMatches) issues.push({ severity: "medium", message: `The certificate of ${server.host} does not cover that name.` });
+  }
+  if (server.authBeforeTls) issues.push({ severity: "medium", message: `${server.host} offers password login (AUTH) before encryption, so passwords can be sent in clear text.` });
+  if (!server.ptr.names.length) issues.push({ severity: "medium", message: `${server.address} has no reverse DNS (PTR) name; many receivers reject mail from such addresses.` });
+  else if (!server.ptr.confirmed) issues.push({ severity: "medium", message: `The reverse DNS name of ${server.address} (${server.ptr.names[0]}) does not point back to it (not forward-confirmed).` });
+  if (server.bannerHost && server.ptr.names.length && !server.ptr.names.includes(server.bannerHost) && server.bannerHost !== server.host) {
+    issues.push({ severity: "low", message: `${server.host} introduces itself as ${server.bannerHost}, which matches neither its MX name nor its reverse DNS.` });
+  }
+  if (server.bannerMs > 5000) issues.push({ severity: "low", message: `${server.host} took ${(server.bannerMs / 1000).toFixed(1)} s to greet; senders may time out.` });
+  return issues;
+}
+
+async function mailServerCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 320, response);
+  if (rawName === null) return;
+  const input = rawName.trim();
+  const domain = normalizeDomain(hostFromInput(input.includes("@") ? input.slice(input.lastIndexOf("@") + 1) : input));
+  if (!domain) return sendJson(response, 400, { error: "Enter a domain name or a mail server name." });
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("mailServer")) return sendJson(response, 503, { error: "The server is busy with other mail server checks. Try again shortly." });
+  try {
+    const started = Date.now();
+    const { records, nullMx, implicit } = await resolveMailHosts(domain);
+    const targets = records.filter((record) => record.addresses.length).slice(0, 3);
+    const servers = await Promise.all(targets.map(async (record) => {
+      const address = record.addresses.find((candidate) => isIP(candidate) === 4 && isScannableAddress(candidate, allowLocal));
+      if (!address) return { host: record.host, priority: record.priority, address: null, error: "No public IPv4 address to test (private or reserved addresses are not tested).", ptr: { names: [], confirmed: false }, issues: [] };
+      const [probe, ptr] = await Promise.all([testSmtpStartTls(record.host, address, { deep: true }), forwardConfirmedPtr(address)]);
+      const authBefore = probe.capabilities.some((capability) => /^AUTH\b/.test(capability));
+      const caps = probe.capabilitiesAfterTls.length ? probe.capabilitiesAfterTls : probe.capabilities;
+      const size = caps.find((capability) => /^SIZE\b/.test(capability))?.split(/\s+/)[1];
+      const server = {
+        ...probe,
+        priority: record.priority,
+        ptr,
+        bannerHost: hostnameToken(probe.banner),
+        greetingHost: hostnameToken(probe.greeting),
+        authBeforeTls: authBefore && probe.starttls,
+        authMechanisms: (caps.find((capability) => /^AUTH\b/.test(capability)) || "").split(/\s+/).slice(1),
+        sizeLimit: size && /^\d+$/.test(size) && Number(size) > 0 ? Number(size) : null,
+        features: ["PIPELINING", "8BITMIME", "SMTPUTF8", "REQUIRETLS", "CHUNKING", "DSN", "ENHANCEDSTATUSCODES"].filter((name) => caps.some((capability) => capability.split(/\s+/)[0] === name)),
+      };
+      server.issues = mailServerIssues(server);
+      return server;
+    }));
+    const issues = servers.flatMap((server) => server.issues);
+    if (nullMx) issues.push({ severity: "low", message: "The domain publishes a null MX: it does not accept mail." });
+    else if (!records.length) issues.push({ severity: "medium", message: "No mail servers were found for this domain." });
+    sendJson(response, 200, { domain, nullMx, implicitMx: implicit, mx: records, servers, issues, durationMs: Date.now() - started });
+  } catch (error) {
+    console.error("Mail server check failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the mail server check." });
+  } finally {
+    releaseHeavyJob("mailServer");
+  }
 }
 
 async function analyzeDkimSelector(domain, selector, provider) {
@@ -4630,6 +4814,636 @@ function zlibDecodeBuffer(body, encoding) {
   return body;
 }
 
+// ---------------------------------------------------------------- Passkeys (WebAuthn)
+
+database.exec(`
+  CREATE TABLE IF NOT EXISTS passkeys (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    credential_id TEXT NOT NULL UNIQUE,
+    public_key TEXT NOT NULL,
+    algorithm INTEGER NOT NULL,
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
+  CREATE TABLE IF NOT EXISTS oidc_identities (
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (issuer, subject)
+  );
+`);
+const passkeyLimits = { perUser: 10, challengeMs: 5 * 60_000 };
+const passkeyChallenges = new Map();
+
+function newPasskeyChallenge(entry) {
+  const now = Date.now();
+  for (const [id, challenge] of passkeyChallenges) if (challenge.expiresAt < now) passkeyChallenges.delete(id);
+  if (passkeyChallenges.size > 5000) passkeyChallenges.clear();
+  const id = crypto.randomBytes(18).toString("base64url");
+  const challenge = crypto.randomBytes(32).toString("base64url");
+  passkeyChallenges.set(id, { ...entry, challenge, expiresAt: now + passkeyLimits.challengeMs });
+  return { id, challenge };
+}
+
+function takePasskeyChallenge(id, type) {
+  const entry = typeof id === "string" ? passkeyChallenges.get(id) : null;
+  if (entry) passkeyChallenges.delete(id);
+  if (!entry || entry.type !== type || entry.expiresAt < Date.now()) throw new Error("This passkey request has expired; try again.");
+  return entry;
+}
+
+// The site a passkey belongs to is the origin the browser is on, which sameOrigin()
+// has already matched against the Host header.
+const passkeySite = (request) => {
+  const origin = request.headers.origin;
+  return { origin, rpId: new URL(origin).hostname };
+};
+
+const passkeyUserHandle = (userId) => crypto.createHmac("sha256", publicLookupHashKey).update(`passkey-user:${userId}`).digest().subarray(0, 16).toString("base64url");
+
+function describePasskey(row) {
+  return { id: row.id, name: row.name, createdAt: new Date(row.created_at).toISOString(), lastUsedAt: row.last_used_at ? new Date(row.last_used_at).toISOString() : null };
+}
+
+async function handlePasskeys(request, response, url) {
+  const path = url.pathname;
+  if (path === "/api/auth/passkeys/login/options" || path === "/api/auth/passkeys/login") {
+    if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed." });
+    if (!enforceSameOrigin(request, response)) return;
+    if (!allowAuthAttempt(request)) return sendJson(response, 429, { error: "Too many login attempts. Try again in 15 minutes." });
+    const body = await readAuthBody(request, response, 16384);
+    if (!body) return;
+    const { origin, rpId } = passkeySite(request);
+    if (path.endsWith("/options")) {
+      const { id, challenge } = newPasskeyChallenge({ type: "login", origin });
+      return sendJson(response, 200, { challengeId: id, publicKey: { challenge, rpId, timeout: 120000, userVerification: "preferred", allowCredentials: [] } });
+    }
+    try {
+      const pending = takePasskeyChallenge(body.challengeId, "login");
+      if (pending.origin !== origin) throw new Error("The passkey request came from a different site.");
+      const row = typeof body.id === "string" && body.id.length <= 1400
+        ? database.prepare("SELECT passkeys.*, users.username, users.role, users.must_change_password FROM passkeys JOIN users ON users.id = passkeys.user_id WHERE credential_id = ? AND users.active = 1").get(body.id)
+        : null;
+      if (!row) throw new Error("This passkey is not registered here. Log in with your password and add it on the My account page.");
+      if (body.userHandle && body.userHandle !== passkeyUserHandle(row.user_id)) throw new Error("This passkey belongs to a different account.");
+      const result = webauthn.verifyAuthentication({
+        clientDataJSON: body.clientDataJSON, authenticatorData: body.authenticatorData, signature: body.signature,
+        challenge: pending.challenge, origin, rpId, credential: { publicKey: row.public_key, algorithm: row.algorithm, signCount: row.sign_count },
+      });
+      database.prepare("UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?").run(result.signCount, Date.now(), row.id);
+      resetAuthAttempts(request);
+      const user = { id: row.user_id, username: row.username, role: row.role, must_change_password: row.must_change_password };
+      // A passkey that verified the user (PIN, fingerprint or face) counts as two factors.
+      if (!result.userVerified && twoFactorStatus(user.id).enabled) {
+        recordAdminLog("login", request, "Passkey accepted, two-factor code requested", "", 200, user.username);
+        return sendJson(response, 200, { twoFactorRequired: true, challenge: createTwoFactorChallenge(user) });
+      }
+      await establishSession(user.id, response);
+      if (!user.must_change_password) recordNmapLoginIp(request, user.username);
+      recordAdminLog("login", request, "Login successful (passkey)", row.name, 200, user.username);
+      return sendJson(response, 200, { user: { username: user.username, role: user.role }, mustChangePassword: Boolean(user.must_change_password), featureAccess: getFeatureAccess() });
+    } catch (error) {
+      recordAdminLog("login", request, "Passkey login failed", error.message.slice(0, 120), 401, null);
+      return sendJson(response, 401, { error: error.message });
+    }
+  }
+
+  const user = currentUser(request);
+  if (!user || request.apiUser) return sendJson(response, 401, { error: "Log in to manage passkeys.", loginRequired: true });
+  if (path === "/api/auth/passkeys" && request.method === "GET") {
+    const rows = database.prepare("SELECT * FROM passkeys WHERE user_id = ? ORDER BY created_at").all(user.id);
+    return sendJson(response, 200, { passkeys: rows.map(describePasskey) });
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  const deleteMatch = path.match(/^\/api\/auth\/passkeys\/(\d+)$/);
+  if (deleteMatch && request.method === "DELETE") {
+    const row = database.prepare("SELECT * FROM passkeys WHERE id = ? AND user_id = ?").get(Number(deleteMatch[1]), user.id);
+    if (!row) return sendJson(response, 404, { error: "Passkey not found." });
+    database.prepare("DELETE FROM passkeys WHERE id = ?").run(row.id);
+    recordAdminLog("audit", request, "Passkey removed", row.name, 200, user.username);
+    return sendJson(response, 200, { deleted: true });
+  }
+  if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed." });
+  const body = await readAuthBody(request, response, 65536);
+  if (!body) return;
+  const { origin, rpId } = passkeySite(request);
+  if (path === "/api/auth/passkeys/register/options") {
+    const existing = database.prepare("SELECT credential_id FROM passkeys WHERE user_id = ?").all(user.id);
+    if (existing.length >= passkeyLimits.perUser) return sendJson(response, 400, { error: `You can have at most ${passkeyLimits.perUser} passkeys.` });
+    const { id, challenge } = newPasskeyChallenge({ type: "register", userId: user.id, origin });
+    return sendJson(response, 200, {
+      challengeId: id,
+      publicKey: {
+        challenge,
+        rp: { name: getSiteTitle(), id: rpId },
+        user: { id: passkeyUserHandle(user.id), name: user.username, displayName: user.username },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -8 }, { type: "public-key", alg: -257 }],
+        timeout: 120000,
+        attestation: "none",
+        authenticatorSelection: { residentKey: "required", requireResidentKey: true, userVerification: "preferred" },
+        excludeCredentials: existing.map((row) => ({ type: "public-key", id: row.credential_id })),
+      },
+    });
+  }
+  if (path === "/api/auth/passkeys/register") {
+    try {
+      const pending = takePasskeyChallenge(body.challengeId, "register");
+      if (pending.userId !== user.id || pending.origin !== origin) throw new Error("The passkey request does not match this session.");
+      const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 60) : "Passkey";
+      const credential = webauthn.verifyRegistration({ clientDataJSON: body.clientDataJSON, attestationObject: body.attestationObject, challenge: pending.challenge, origin, rpId });
+      if (database.prepare("SELECT 1 FROM passkeys WHERE credential_id = ?").get(credential.credentialId)) throw new Error("This passkey is already registered.");
+      if (database.prepare("SELECT COUNT(*) AS count FROM passkeys WHERE user_id = ?").get(user.id).count >= passkeyLimits.perUser) throw new Error(`You can have at most ${passkeyLimits.perUser} passkeys.`);
+      database.prepare("INSERT INTO passkeys (user_id, credential_id, public_key, algorithm, sign_count, name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(user.id, credential.credentialId, credential.publicKey, credential.algorithm, credential.signCount, name, Date.now());
+      recordAdminLog("audit", request, "Passkey added", name, 201, user.username);
+      const rows = database.prepare("SELECT * FROM passkeys WHERE user_id = ? ORDER BY created_at").all(user.id);
+      return sendJson(response, 201, { passkeys: rows.map(describePasskey) });
+    } catch (error) {
+      return sendJson(response, 400, { error: error.message });
+    }
+  }
+  sendJson(response, 404, { error: "Not found." });
+}
+
+// ---------------------------------------------------------------- Single sign-on (OpenID Connect)
+
+const ssoDefaults = { enabled: false, issuer: "", clientId: "", clientSecret: "", label: "Single sign-on", scopes: "openid email profile",
+  publicUrl: "", autoCreate: false, defaultRole: "user", allowedDomains: "", linkByEmail: false };
+const ssoStates = new Map();
+
+function readSsoConfig() {
+  let saved = {};
+  try {
+    saved = JSON.parse(database.prepare("SELECT value FROM app_settings WHERE key = 'sso_config'").get()?.value || "{}");
+  } catch {
+    saved = {};
+  }
+  return { ...ssoDefaults, ...saved };
+}
+
+function ssoPublicUrl(request, config = readSsoConfig()) {
+  if (config.publicUrl) return config.publicUrl;
+  const remote = normalizeIpAddress(request.socket.remoteAddress);
+  const forwarded = String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  const secure = request.socket.encrypted || process.env.COOKIE_SECURE === "true" || (remote && isTrustedProxy(remote) && forwarded === "https");
+  return `${secure ? "https" : "http"}://${request.headers.host}`;
+}
+
+const ssoRedirectUri = (request, config) => `${ssoPublicUrl(request, config)}/api/auth/oidc/callback`;
+
+function ssoLoginError(response, message) {
+  sendRedirect(response, `/login.html?${new URLSearchParams({ sso_error: message.slice(0, 200) })}`);
+}
+
+function ssoUsernameFrom(claims) {
+  const base = String(claims.preferred_username || (claims.email || "").split("@")[0] || claims.name || "user")
+    .normalize("NFKD").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 28) || "user";
+  const padded = base.length >= 3 ? base : `${base}user`.slice(0, 28);
+  for (let suffix = 0; suffix < 1000; suffix += 1) {
+    const name = suffix ? `${padded}${suffix}` : padded;
+    if (!database.prepare("SELECT 1 FROM users WHERE username = ?").get(name)) return name;
+  }
+  return `user${crypto.randomBytes(4).toString("hex")}`;
+}
+
+async function handleOidc(request, response, url) {
+  const config = readSsoConfig();
+  if (!config.enabled || !config.issuer || !config.clientId) return ssoLoginError(response, "Single sign-on is not set up.");
+  if (url.pathname === "/api/auth/oidc/start") {
+    try {
+      const next = String(url.searchParams.get("next") || "/");
+      const redirectUri = ssoRedirectUri(request, config);
+      const login = await oidc.startLogin({ issuer: config.issuer, clientId: config.clientId, redirectUri, scopes: config.scopes });
+      const now = Date.now();
+      for (const [state, entry] of ssoStates) if (entry.expiresAt < now) ssoStates.delete(state);
+      if (ssoStates.size > 5000) ssoStates.clear();
+      const browser = crypto.randomBytes(24).toString("base64url");
+      ssoStates.set(login.state, { nonce: login.nonce, verifier: login.verifier, redirectUri, browser, next: /^\/(?!\/)[^\s\\]*$/.test(next) ? next : "/", expiresAt: now + 10 * 60_000 });
+      // The cookie ties the callback to the browser that started the sign-in.
+      response.setHeader("set-cookie", `bnglookup_sso=${browser}; Path=/api/auth/oidc; HttpOnly; SameSite=Lax; Max-Age=600${cookieSecureAttribute(response)}`);
+      response.writeHead(302, { location: login.url, "cache-control": "no-store" });
+      return response.end();
+    } catch (error) {
+      return ssoLoginError(response, `Single sign-on failed: ${error.message}`);
+    }
+  }
+  // Callback from the identity provider.
+  const state = url.searchParams.get("state") || "";
+  const pending = ssoStates.get(state);
+  ssoStates.delete(state);
+  response.setHeader("set-cookie", `bnglookup_sso=; Path=/api/auth/oidc; HttpOnly; SameSite=Lax; Max-Age=0${cookieSecureAttribute(response)}`);
+  if (!pending || pending.expiresAt < Date.now() || readCookie(request, "bnglookup_sso") !== pending.browser) {
+    return ssoLoginError(response, "The sign-in took too long or was started in another browser. Try again.");
+  }
+  if (url.searchParams.get("error")) return ssoLoginError(response, `The identity provider refused the sign-in: ${url.searchParams.get("error_description") || url.searchParams.get("error")}`);
+  let claims;
+  try {
+    claims = await oidc.finishLogin({ issuer: config.issuer, clientId: config.clientId, clientSecret: config.clientSecret, redirectUri: pending.redirectUri, code: url.searchParams.get("code") || "", verifier: pending.verifier, nonce: pending.nonce });
+  } catch (error) {
+    recordAdminLog("login", request, "Single sign-on failed", error.message.slice(0, 120), 401, null);
+    return ssoLoginError(response, `Single sign-on failed: ${error.message}`);
+  }
+  const email = typeof claims.email === "string" && claims.email_verified !== false ? claims.email.trim().toLowerCase() : "";
+  let row = database.prepare("SELECT users.* FROM oidc_identities JOIN users ON users.id = oidc_identities.user_id WHERE issuer = ? AND subject = ?").get(config.issuer, claims.sub);
+  // Users enter their own email address, so linking by email trusts those addresses; it is
+  // off by default and never links when more than one account uses the address.
+  if (!row && config.linkByEmail && email && claims.email_verified === true) {
+    const matches = database.prepare("SELECT * FROM users WHERE lower(email) = ? LIMIT 2").all(email);
+    row = matches.length === 1 ? matches[0] : null;
+    if (matches.length > 1) return ssoLoginError(response, "More than one account uses your email address. Ask an administrator to link your sign-in.");
+    if (row) database.prepare("INSERT OR IGNORE INTO oidc_identities (issuer, subject, user_id, created_at) VALUES (?, ?, ?, ?)").run(config.issuer, claims.sub, row.id, Date.now());
+  }
+  if (!row && config.autoCreate) {
+    const domains = config.allowedDomains.split(/[\s,]+/).map((domain) => domain.trim().toLowerCase()).filter(Boolean);
+    if (domains.length && !domains.includes(email.split("@")[1] || "")) {
+      return ssoLoginError(response, "Your account is not from an allowed email domain. Ask an administrator for access.");
+    }
+    const username = ssoUsernameFrom(claims);
+    const salt = crypto.randomBytes(16).toString("hex");
+    const unusable = crypto.randomBytes(64).toString("hex");
+    const created = database.prepare("INSERT INTO users (username, password_hash, password_salt, role, email) VALUES (?, ?, ?, ?, ?)")
+      .run(username, unusable, salt, config.defaultRole === "admin" ? "admin" : "user", email || null);
+    database.prepare("INSERT INTO oidc_identities (issuer, subject, user_id, created_at) VALUES (?, ?, ?, ?)").run(config.issuer, claims.sub, created.lastInsertRowid, Date.now());
+    row = database.prepare("SELECT * FROM users WHERE id = ?").get(created.lastInsertRowid);
+    recordAdminLog("audit", request, "User created by single sign-on", `${username}${email ? ` (${email})` : ""}`, 201, username);
+  }
+  if (!row) {
+    recordAdminLog("login", request, "Single sign-on: no matching account", email || claims.sub, 403, null);
+    return ssoLoginError(response, "There is no account for this sign-in. Ask an administrator to create one or to link it to your email address.");
+  }
+  if (!row.active) return ssoLoginError(response, "This account is disabled.");
+  await establishSession(row.id, response);
+  recordNmapLoginIp(request, row.username);
+  recordAdminLog("login", request, "Login successful (single sign-on)", email || claims.sub, 200, row.username);
+  // The session cookie is SameSite=Strict, so it is not sent on a redirect chain that began
+  // at the identity provider. A same-site page that moves on by itself starts a fresh navigation.
+  const next = pending.next.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+  response.end(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${next}"><title>Signing in</title><p>Signing you in… <a href="${next}">Continue</a></p>`);
+}
+
+function ssoAdminResponse(request) {
+  const config = readSsoConfig();
+  return { ...config, clientSecret: "", clientSecretSet: Boolean(config.clientSecret), redirectUri: ssoRedirectUri(request, config) };
+}
+
+function handleAdminSso(request, response, url) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") return sendJson(response, 200, ssoAdminResponse(request));
+  if (!["PUT", "POST"].includes(request.method)) return sendJson(response, 405, { error: "Method not allowed." });
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response, 16384).then(async (body) => {
+    if (!body) return;
+    const current = readSsoConfig();
+    let issuer = "";
+    try {
+      issuer = body.issuer ? oidc.issuerUrl(body.issuer) : "";
+    } catch (error) {
+      return sendJson(response, 400, { error: error.message });
+    }
+    if (url.pathname === "/api/admin/sso/test") {
+      if (!issuer) return sendJson(response, 400, { error: "Enter the issuer URL first." });
+      try {
+        const config = await oidc.discover(issuer);
+        return sendJson(response, 200, { ok: true, authorization: config.authorization_endpoint, token: config.token_endpoint, jwks: config.jwks_uri });
+      } catch (error) {
+        return sendJson(response, 400, { error: `Discovery failed: ${error.message}` });
+      }
+    }
+    const text = (value, max) => (typeof value === "string" ? value.trim().replace(/[\u0000-\u001f\u007f]/g, "").slice(0, max) : "");
+    let publicUrl = text(body.publicUrl, 200).replace(/\/$/, "");
+    if (publicUrl) {
+      try {
+        const parsed = new URL(publicUrl);
+        if (!["http:", "https:"].includes(parsed.protocol) || parsed.pathname !== "/" || parsed.search) throw new Error();
+        publicUrl = parsed.origin;
+      } catch {
+        return sendJson(response, 400, { error: "The public address must look like https://lookup.example.com." });
+      }
+    }
+    const next = {
+      enabled: body.enabled === true,
+      issuer,
+      clientId: text(body.clientId, 200),
+      clientSecret: typeof body.clientSecret === "string" && body.clientSecret ? body.clientSecret.slice(0, 500) : current.clientSecret,
+      label: text(body.label, 40) || ssoDefaults.label,
+      scopes: /^[\w :./-]{6,200}$/.test(body.scopes || "") && /\bopenid\b/.test(body.scopes) ? body.scopes.trim() : ssoDefaults.scopes,
+      publicUrl,
+      autoCreate: body.autoCreate === true,
+      defaultRole: body.defaultRole === "admin" ? "admin" : "user",
+      allowedDomains: text(body.allowedDomains, 500),
+      linkByEmail: body.linkByEmail === true,
+    };
+    if (body.clearSecret === true) next.clientSecret = "";
+    if (next.enabled && (!next.issuer || !next.clientId)) return sendJson(response, 400, { error: "Enter the issuer and client ID before turning single sign-on on." });
+    database.prepare("INSERT INTO app_settings (key, value) VALUES ('sso_config', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(next));
+    recordAdminLog("audit", request, "Single sign-on settings saved", `${next.enabled ? "on" : "off"} ${next.issuer}`, 200, admin.username);
+    sendJson(response, 200, ssoAdminResponse(request));
+  });
+}
+
+// ---------------------------------------------------------------- Backup and restore
+
+const backupLimits = { uploadBytes: 256 * 1024 * 1024, fileBytes: 2 * 1024 * 1024 * 1024 };
+let backupBusy = false;
+
+function tarHeader(name, size, mtime = Date.now()) {
+  const header = Buffer.alloc(512);
+  const write = (value, offset, length) => header.write(value, offset, length, "utf8");
+  const octal = (value, length) => `${value.toString(8).padStart(length - 1, "0")}\0`;
+  write(name, 0, 100);
+  write(octal(0o600, 8), 100, 8);
+  write(octal(0, 8), 108, 8);
+  write(octal(0, 8), 116, 8);
+  write(octal(size, 12), 124, 12);
+  write(octal(Math.floor(mtime / 1000), 12), 136, 12);
+  write("        ", 148, 8);
+  write("0", 156, 1);
+  write("ustar\0", 257, 6);
+  write("00", 263, 2);
+  let sum = 0;
+  for (const byte of header) sum += byte;
+  write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8);
+  return header;
+}
+
+async function* tarStream(entries) {
+  for (const entry of entries) {
+    yield tarHeader(entry.name, entry.size);
+    if (entry.data) yield entry.data;
+    else for await (const chunk of fs.createReadStream(entry.file)) yield chunk;
+    if (entry.size % 512) yield Buffer.alloc(512 - (entry.size % 512));
+  }
+  yield Buffer.alloc(1024);
+}
+
+async function handleAdminBackup(request, response, admin) {
+  if (backupBusy) return sendJson(response, 409, { error: "A backup or restore is already running." });
+  backupBusy = true;
+  const snapshot = path.join(dataDir, `.backup-${crypto.randomBytes(6).toString("hex")}.sqlite`);
+  try {
+    database.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
+    const entries = [];
+    const addFile = (name, file) => entries.push({ name, file, size: fs.statSync(file).size });
+    addFile("bnglookup.sqlite", snapshot);
+    if (fs.existsSync(landingBackgroundFile)) addFile("landing-background", landingBackgroundFile);
+    const acmeDir = path.join(dataDir, "acme");
+    if (fs.existsSync(acmeDir)) {
+      for (const name of fs.readdirSync(acmeDir)) {
+        if (/^[\w.-]+$/.test(name) && fs.statSync(path.join(acmeDir, name)).isFile()) addFile(`acme/${name}`, path.join(acmeDir, name));
+      }
+    }
+    const manifest = Buffer.from(JSON.stringify({
+      app: "BNGlookup", version: appBuild.version, createdAt: new Date().toISOString(), createdBy: admin.username,
+      files: entries.map(({ name, size }) => ({ name, size })),
+    }, null, 2));
+    entries.unshift({ name: "manifest.json", data: manifest, size: manifest.length });
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+    response.writeHead(200, {
+      "content-type": "application/gzip",
+      "content-disposition": `attachment; filename="bnglookup-backup-${stamp}.tar.gz"`,
+    });
+    await pipeline(Readable.from(tarStream(entries)), zlib.createGzip(), response);
+    recordAdminLog("audit", request, "Backup downloaded", `${entries.length} files`, 200, admin.username);
+  } catch (error) {
+    if (!response.headersSent) sendJson(response, 500, { error: `The backup failed: ${error.message}` });
+    else response.destroy(error);
+  } finally {
+    fs.rmSync(snapshot, { force: true });
+    backupBusy = false;
+  }
+}
+
+// Unpacks a .tar.gz into dir, accepting only the files a backup contains.
+async function extractBackup(archiveFile, dir) {
+  const found = new Set();
+  let buffer = Buffer.alloc(0);
+  let current = null;
+  let ended = false;
+  const allowedName = (name) => ["manifest.json", "bnglookup.sqlite", "landing-background"].includes(name) || /^acme\/[\w.-]+$/.test(name);
+  for await (const chunk of fs.createReadStream(archiveFile).pipe(zlib.createGunzip())) {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (!ended) {
+      if (current) {
+        const take = Math.min(current.remaining, buffer.length);
+        if (take) {
+          fs.writeSync(current.fd, buffer.subarray(0, take));
+          buffer = buffer.subarray(take);
+          current.remaining -= take;
+        }
+        if (current.remaining) break;
+        if (buffer.length < current.padding) break;
+        buffer = buffer.subarray(current.padding);
+        fs.closeSync(current.fd);
+        current = null;
+        continue;
+      }
+      if (buffer.length < 512) break;
+      const header = buffer.subarray(0, 512);
+      buffer = buffer.subarray(512);
+      if (header.every((byte) => byte === 0)) {
+        ended = true;
+        break;
+      }
+      const field = (offset, length) => header.subarray(offset, offset + length).toString("utf8").replace(/\0.*$/s, "");
+      const prefix = field(345, 155);
+      const name = (prefix ? `${prefix}/` : "") + field(0, 100);
+      const size = parseInt(field(124, 12).trim() || "0", 8);
+      const type = field(156, 1) || "0";
+      if (type !== "0" || !allowedName(name) || name.includes("..") || !Number.isSafeInteger(size) || size > backupLimits.fileBytes) {
+        throw new Error(`This is not a BNGlookup backup (unexpected entry "${name.slice(0, 60)}").`);
+      }
+      if (found.has(name)) throw new Error(`The backup contains "${name}" twice.`);
+      found.add(name);
+      const target = path.join(dir, name);
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      current = { fd: fs.openSync(target, "wx", 0o600), remaining: size, padding: (512 - (size % 512)) % 512 };
+      if (!size && !current.padding) {
+        fs.closeSync(current.fd);
+        current = null;
+      }
+    }
+  }
+  if (current) throw new Error("The backup file is incomplete.");
+  return found;
+}
+
+function handleAdminRestore(request, response, admin) {
+  if (backupBusy) return sendJson(response, 409, { error: "A backup or restore is already running." });
+  backupBusy = true;
+  const upload = path.join(dataDir, `.restore-upload-${crypto.randomBytes(6).toString("hex")}`);
+  const staging = path.join(dataDir, `.restore-staging-${crypto.randomBytes(6).toString("hex")}`);
+  const finish = (status, body) => {
+    fs.rmSync(upload, { force: true });
+    fs.rmSync(staging, { recursive: true, force: true });
+    backupBusy = false;
+    sendJson(response, status, body);
+  };
+  if (Number(request.headers["content-length"] || 0) > backupLimits.uploadBytes) {
+    request.resume();
+    return finish(413, { error: "The backup file is larger than 256 MB." });
+  }
+  let received = 0;
+  const output = fs.createWriteStream(upload, { mode: 0o600 });
+  request.on("data", (chunk) => {
+    received += chunk.length;
+    if (received > backupLimits.uploadBytes) request.destroy(new Error("too large"));
+  });
+  pipeline(request, output).then(async () => {
+    fs.mkdirSync(staging, { mode: 0o700 });
+    const found = await extractBackup(upload, staging);
+    if (!found.has("manifest.json") || !found.has("bnglookup.sqlite")) throw new Error("This is not a BNGlookup backup (the manifest or database is missing).");
+    const manifest = JSON.parse(fs.readFileSync(path.join(staging, "manifest.json"), "utf8"));
+    if (manifest.app !== "BNGlookup") throw new Error("This is not a BNGlookup backup.");
+    const check = new DatabaseSync(path.join(staging, "bnglookup.sqlite"), { readOnly: true });
+    try {
+      if (check.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok") throw new Error("The database in the backup is damaged.");
+      const admins = check.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin'").get().count;
+      if (!admins) throw new Error("The backup has no administrator account, so nobody could log in after restoring it.");
+    } catch (error) {
+      throw new Error(/no such table/i.test(error.message) ? "The database in the backup is not a BNGlookup database." : error.message);
+    } finally {
+      check.close();
+    }
+    fs.rmSync(path.join(staging, "manifest.json"));
+    fs.rmSync(restorePendingDir, { recursive: true, force: true });
+    fs.renameSync(staging, restorePendingDir);
+    fs.writeFileSync(path.join(restorePendingDir, "ready"), new Date().toISOString(), { mode: 0o600 });
+    recordAdminLog("audit", request, "Backup restore scheduled", `backup from ${String(manifest.createdAt || "unknown").slice(0, 19)}`, 200, admin.username);
+    finish(200, { restarting: true, createdAt: manifest.createdAt || null, version: manifest.version || null });
+    console.log("A backup restore was uploaded; restarting to apply it.");
+    setTimeout(() => shutdown("restore"), 500);
+  }).catch((error) => {
+    const message = error.code === "Z_DATA_ERROR" || /incorrect header check/i.test(error.message)
+      ? "The file is not a .tar.gz backup."
+      : error.message === "too large" ? "The backup file is larger than 256 MB." : error.message;
+    finish(400, { error: message });
+  });
+}
+
+function handleAdminBackupRoutes(request, response, url) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed." });
+  if (!enforceSameOrigin(request, response)) return;
+  if (url.pathname === "/api/admin/backup") return void handleAdminBackup(request, response, admin);
+  return handleAdminRestore(request, response, admin);
+}
+
+// ---------------------------------------------------------------- Public lookup limits and IP lists
+
+const publicAccessDefaults = { dailyLimit: 15, unlimited: [], blocked: [], blockSite: false };
+let publicAccessCache = null;
+
+// Parses one CIDR or address per line; minPrefix stops a block list from covering everyone.
+function parseAccessRanges(value, label, minPrefix) {
+  if (typeof value !== "string" || value.length > 12288) throw new Error(`The ${label} list is too long.`);
+  const entries = [...new Set(value.split(/[,\s]+/).map((entry) => entry.trim()).filter(Boolean))];
+  if (entries.length > 500) throw new Error(`The ${label} list may contain at most 500 entries.`);
+  const ranges = new net.BlockList();
+  for (const entry of entries) {
+    const [address, prefixText, ...extra] = entry.split("/");
+    const family = isIP(address);
+    const maxPrefix = family === 4 ? 32 : 128;
+    const prefix = prefixText === undefined ? maxPrefix : Number(prefixText);
+    const lowest = family === 4 ? minPrefix.ipv4 : minPrefix.ipv6;
+    if (!family || extra.length || (prefixText !== undefined && !/^\d+$/.test(prefixText)) || prefix < lowest || prefix > maxPrefix) {
+      throw new Error(`Invalid ${label} entry: ${entry}. Use an address or CIDR (IPv4 /${minPrefix.ipv4}–/32, IPv6 /${minPrefix.ipv6}–/128).`);
+    }
+    ranges.addSubnet(address, prefix, family === 4 ? "ipv4" : "ipv6");
+  }
+  return { entries, ranges };
+}
+
+function getPublicAccess() {
+  if (publicAccessCache) return publicAccessCache;
+  let saved = {};
+  try {
+    saved = JSON.parse(database.prepare("SELECT value FROM app_settings WHERE key = 'public_access'").get()?.value || "{}");
+  } catch {
+    saved = {};
+  }
+  const safe = (list, label, minPrefix) => {
+    try {
+      return parseAccessRanges((Array.isArray(list) ? list : []).join("\n"), label, minPrefix);
+    } catch {
+      return { entries: [], ranges: new net.BlockList() };
+    }
+  };
+  publicAccessCache = {
+    dailyLimit: Number.isInteger(saved.dailyLimit) ? saved.dailyLimit : publicAccessDefaults.dailyLimit,
+    unlimited: safe(saved.unlimited, "unlimited", { ipv4: 0, ipv6: 0 }),
+    blocked: safe(saved.blocked, "blocked", { ipv4: 8, ipv6: 16 }),
+    blockSite: saved.blockSite === true,
+  };
+  return publicAccessCache;
+}
+
+function addressInRanges(ranges, address) {
+  const plain = String(address || "").replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/i, "");
+  const family = isIP(plain);
+  return Boolean(family) && ranges.check(plain, family === 4 ? "ipv4" : "ipv6");
+}
+
+function publicAccessResponse(request) {
+  const access = getPublicAccess();
+  return {
+    dailyLimit: access.dailyLimit,
+    unlimited: access.unlimited.entries.join("\n"),
+    blocked: access.blocked.entries.join("\n"),
+    blockSite: access.blockSite,
+    yourAddress: getClientAddress(request) || null,
+  };
+}
+
+function handleAdminPublicAccess(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") {
+    sendJson(response, 200, publicAccessResponse(request));
+    return;
+  }
+  if (request.method !== "PUT") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response, 65536).then((body) => {
+    if (!body) return;
+    const dailyLimit = Number(body.dailyLimit);
+    if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 100000) {
+      return sendJson(response, 400, { error: "The daily limit must be a whole number from 1 to 100,000." });
+    }
+    if (typeof body.blockSite !== "boolean") return sendJson(response, 400, { error: "Choose what blocked networks may do." });
+    let unlimited;
+    let blocked;
+    try {
+      unlimited = parseAccessRanges(body.unlimited ?? "", "unlimited", { ipv4: 0, ipv6: 0 });
+      blocked = parseAccessRanges(body.blocked ?? "", "blocked", { ipv4: 8, ipv6: 16 });
+    } catch (error) {
+      return sendJson(response, 400, { error: error.message });
+    }
+    const own = getClientAddress(request);
+    if (body.blockSite && own && addressInRanges(blocked.ranges, own)) {
+      return sendJson(response, 400, { error: `Your own address (${own}) is in the blocked list, so this would lock you out. Remove it or only block public lookups.` });
+    }
+    database.prepare(`
+      INSERT INTO app_settings (key, value) VALUES ('public_access', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(JSON.stringify({ dailyLimit, unlimited: unlimited.entries, blocked: blocked.entries, blockSite: body.blockSite }));
+    publicAccessCache = null;
+    recordAdminLog("audit", request, "Public access limits updated",
+      `${dailyLimit}/day, ${unlimited.entries.length} unlimited, ${blocked.entries.length} blocked${body.blockSite ? " (whole site)" : ""}`, 200, admin.username);
+    sendJson(response, 200, publicAccessResponse(request));
+  });
+}
+
 // ---------------------------------------------------------------- Site files (robots.txt, security.txt, …)
 
 const siteFiles = {
@@ -4880,7 +5694,7 @@ function publicLandingConfig(config = readLandingConfig()) {
     content: config.content,
     background: config.background ? { url: `/landing/background?v=${encodeURIComponent(config.background.updatedAt)}` } : null,
     publicFeatures: Object.entries(access).filter(([, level]) => level === "public").map(([feature]) => feature),
-    dailyLimit: publicLookupDailyLimit,
+    dailyLimit: getPublicAccess().dailyLimit,
   };
 }
 
@@ -4954,6 +5768,87 @@ function serveLandingBackground(request, response) {
     "content-security-policy": "default-src 'none'; sandbox",
   });
   response.end(request.method === "HEAD" ? undefined : data);
+}
+
+// Shared landing page scans: stored results anyone with the link can open at /s/<id>.
+// Anonymous visitors may share too, with a per-IP daily limit and a shorter lifetime.
+database.exec(`
+  CREATE TABLE IF NOT EXISTS landing_shares (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    client_hash TEXT,
+    title TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS landing_shares_client ON landing_shares(client_hash, created_at);
+`);
+const landingShareLimits = { payloadBytes: 768 * 1024, anonymousPerDay: 10, anonymousTotal: 5000, userLifetimeMs: 30 * 86400000, anonymousLifetimeMs: 7 * 86400000 };
+const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+
+function validLandingSharePayload(body) {
+  const target = body?.target;
+  if (!target || !["domain", "ip", "mac"].includes(target.kind) || typeof target.value !== "string" || !target.value || target.value.length > 253 ||
+    /[\s\u0000-\u001f<>"]/.test(target.value)) return null;
+  if (!Array.isArray(body.jobs) || !body.jobs.length || body.jobs.length > 20) return null;
+  const jobs = [];
+  for (const job of body.jobs) {
+    if (!job || !landingJobIds.has(job.id) || jobs.some((item) => item.id === job.id)) return null;
+    if (job.error !== undefined) {
+      if (typeof job.error !== "string") return null;
+      jobs.push({ id: job.id, error: job.error.slice(0, 300) });
+    } else if (job.data && typeof job.data === "object") {
+      jobs.push({ id: job.id, data: job.data });
+    } else {
+      return null;
+    }
+  }
+  return { target: { kind: target.kind, value: target.value }, jobs, createdAt: new Date().toISOString() };
+}
+
+async function handleLandingShares(request, url, response) {
+  const now = Date.now();
+  database.prepare("DELETE FROM landing_shares WHERE expires_at <= ?").run(now);
+  if (url.pathname.startsWith("/api/landing/shares/")) {
+    const id = url.pathname.slice("/api/landing/shares/".length);
+    const row = /^[A-Za-z0-9_-]{22}$/.test(id) && request.method === "GET" ? database.prepare("SELECT * FROM landing_shares WHERE id = ?").get(id) : null;
+    if (!row) return sendJson(response, request.method === "GET" ? 404 : 405, { error: "This shared result does not exist or has expired." });
+    response.setHeader("x-robots-tag", "noindex");
+    return sendJson(response, 200, { id: row.id, title: row.title, expiresAt: new Date(row.expires_at).toISOString(), ...JSON.parse(row.payload) });
+  }
+  if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed." });
+  if (!enforceSameOrigin(request, response)) return;
+  const user = currentUser(request);
+  if (!user && !readLandingConfig().enabled) return sendJson(response, 404, { error: "The landing page is turned off." });
+  let body;
+  try {
+    body = await readJsonRequest(request, landingShareLimits.payloadBytes + 4096);
+  } catch (error) {
+    return sendJson(response, error.statusCode || 400, { error: error.message });
+  }
+  const payload = validLandingSharePayload(body);
+  if (!payload) return sendJson(response, 400, { error: "This result cannot be shared." });
+  const text = JSON.stringify(payload);
+  if (Buffer.byteLength(text) > landingShareLimits.payloadBytes) return sendJson(response, 413, { error: "This result is too large to share." });
+  let clientHash = null;
+  if (!user) {
+    clientHash = crypto.createHmac("sha256", publicLookupHashKey).update(getClientAddress(request) || "unknown").digest("hex");
+    const today = database.prepare("SELECT COUNT(*) AS count FROM landing_shares WHERE client_hash = ? AND created_at > ?").get(clientHash, now - 86400000).count;
+    if (today >= landingShareLimits.anonymousPerDay) {
+      return sendJson(response, 429, { error: `You can share ${landingShareLimits.anonymousPerDay} results per day without an account.` });
+    }
+    const total = database.prepare("SELECT COUNT(*) AS count FROM landing_shares WHERE user_id IS NULL").get().count;
+    if (total >= landingShareLimits.anonymousTotal) {
+      database.prepare("DELETE FROM landing_shares WHERE id IN (SELECT id FROM landing_shares WHERE user_id IS NULL ORDER BY created_at LIMIT ?)").run(total - landingShareLimits.anonymousTotal + 1);
+    }
+  }
+  const id = crypto.randomBytes(16).toString("base64url").slice(0, 22);
+  const expiresAt = now + (user ? landingShareLimits.userLifetimeMs : landingShareLimits.anonymousLifetimeMs);
+  database.prepare("INSERT INTO landing_shares (id, user_id, client_hash, title, payload, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(id, user?.id ?? null, clientHash, payload.target.value, text, now, expiresAt);
+  recordAdminLog("audit", request, "Landing scan shared", payload.target.value, 201, user?.username ?? null);
+  sendJson(response, 201, { id, url: `/s/${id}`, expiresAt: new Date(expiresAt).toISOString() });
 }
 
 // A combined landing scan counts as one public lookup: the token it returns lets the
@@ -7000,6 +7895,8 @@ function handleAuthStatus(request, response) {
     featureAccess: getFeatureAccess(),
     features: featureNames,
     previewAvailable: previewsAvailable(),
+    publicLookupLimit: getPublicAccess().dailyLimit,
+    sso: readSsoConfig().enabled ? { label: readSsoConfig().label } : null,
   });
 }
 
@@ -7305,6 +8202,7 @@ const apiTokenPaths = new Set([
   "/api/dig", "/api/blocklist", "/api/propagation", "/api/email-check", "/api/asn", "/api/web-check", "/api/email-headers",
   "/api/dmarc-sources", "/api/record-import", "/api/bulk-domain-check", "/api/dns-health", "/api/reputation",
   "/api/lookalike", "/api/spf-flatten", "/api/ping", "/api/sslscan", "/api/ping-scan", "/api/traceroute", "/api/multi-traceroute",
+  "/api/mail-server",
 ]);
 const apiTokenUsage = new Map();
 
@@ -8549,7 +9447,7 @@ function handleAdminAbout(request, response) {
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
   "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
-  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc",
+  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 
@@ -9060,6 +9958,13 @@ function consumePublicLookup(request, response) {
     lastPublicQuotaCleanupDate = utcDate;
   }
   const clientAddress = getClientAddress(request) || "unknown";
+  const access = getPublicAccess();
+  const publicLookupDailyLimit = access.dailyLimit;
+  if (addressInRanges(access.blocked.ranges, clientAddress)) {
+    sendJson(response, 403, { error: "Public lookups from your network are blocked by the administrator. Log in to continue." });
+    return false;
+  }
+  if (addressInRanges(access.unlimited.ranges, clientAddress)) return true;
   const clientHash = crypto
     .createHmac("sha256", publicLookupHashKey)
     .update(clientAddress)
@@ -9085,7 +9990,7 @@ function consumePublicLookup(request, response) {
 
   response.setHeader("retry-after", String(Math.ceil((resetAt - now.getTime()) / 1000)));
   sendJson(response, 429, {
-    error: "Daily public lookup limit reached (15 lookups per IP). Try again after 00:00 UTC.",
+    error: `Daily public lookup limit reached (${publicLookupDailyLimit} lookups per IP). Try again after 00:00 UTC.`,
     limit: publicLookupDailyLimit,
     remaining: 0,
     resetAt: new Date(resetAt).toISOString(),
@@ -9642,7 +10547,7 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3 };
 const heavyJobsActive = Object.fromEntries(Object.keys(heavyJobLimits).map((kind) => [kind, 0]));
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
@@ -10775,6 +11680,12 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     response.end(request.method === "HEAD" ? undefined : "ok\n");
     return;
   }
+  const publicAccess = getPublicAccess();
+  if (publicAccess.blockSite && publicAccess.blocked.entries.length && addressInRanges(publicAccess.blocked.ranges, getClientAddress(request))) {
+    response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+    response.end("Access from your network is blocked.\n");
+    return;
+  }
   const challengePrefix = "/.well-known/acme-challenge/";
   if (url.pathname.startsWith(challengePrefix)) {
     const keyAuthorization = request.method === "GET"
@@ -10847,6 +11758,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/record-import": { method: "GET", action: "Record builder import", keys: ["name"] },
     "/api/bulk-domain-check": { method: "POST", action: "Bulk domain check" },
     "/api/dns-health": { method: "GET", action: "DNS health check", keys: ["name"] },
+    "/api/mail-server": { method: "GET", action: "Mail server check", keys: ["name"] },
     "/api/reputation": { method: "GET", action: "Reputation check", keys: ["name"] },
     "/api/lookalike": { method: "GET", action: "Lookalike domains", keys: ["name"] },
     "/api/spf-flatten": { method: "GET", action: "SPF flattener", keys: ["name"] },
@@ -10966,6 +11878,28 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/auth/passkeys" || url.pathname.startsWith("/api/auth/passkeys/")) {
+    void handlePasskeys(request, response, url).catch((error) => {
+      console.error("Passkey request failed:", error);
+      if (!response.headersSent) sendJson(response, 500, { error: "The passkey request could not be completed." });
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/oidc/start" || url.pathname === "/api/auth/oidc/callback") {
+    if (request.method !== "GET") return sendJson(response, 405, { error: "Method not allowed." });
+    void handleOidc(request, response, url).catch((error) => {
+      console.error("Single sign-on failed:", error);
+      if (!response.headersSent) ssoLoginError(response, "Single sign-on failed.");
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/admin/sso" || url.pathname === "/api/admin/sso/test") {
+    handleAdminSso(request, response, url);
+    return;
+  }
+
   if (url.pathname === "/api/auth/login") {
     if (request.method !== "POST") {
       sendJson(response, 405, { error: "Method not allowed." });
@@ -11059,12 +11993,27 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/landing/share" || url.pathname.startsWith("/api/landing/shares/")) {
+    void handleLandingShares(request, url, response);
+    return;
+  }
+
   if (url.pathname === "/api/landing/start") {
     if (request.method !== "POST") {
       sendJson(response, 405, { error: "Method not allowed." });
       return;
     }
     handleLandingStart(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/backup" || url.pathname === "/api/admin/restore") {
+    handleAdminBackupRoutes(request, response, url);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/public-access") {
+    handleAdminPublicAccess(request, response);
     return;
   }
 
@@ -11144,6 +12093,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/record-import": "record-builder",
     "/api/bulk-domain-check": "bulk-domains",
     "/api/dns-health": "dns-health",
+    "/api/mail-server": "mail-server",
     "/api/reputation": "reputation",
     "/api/lookalike": "lookalike",
     "/api/spf-flatten": "record-builder",
@@ -11307,6 +12257,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
 
   const getRoutes = {
     "/api/dns-health": (request, url, response) => dnsHealthCheck(request, url, response),
+    "/api/mail-server": (request, url, response) => mailServerCheck(request, url, response),
     "/api/reputation": (request, url, response) => reputationCheck(request, url, response),
     "/api/lookalike": (request, url, response) => lookalikeCheck(request, url, response),
     "/api/spf-flatten": (_request, url, response) => spfFlattenCheck(url, response),
@@ -11514,7 +12465,8 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     response.setHeader("content-security-policy", response.getHeader("content-security-policy").replace("frame-ancestors 'none'", "frame-ancestors 'self'"));
     response.setHeader("x-frame-options", "SAMEORIGIN");
   }
-  const requestedPath = url.pathname === "/landing" || landingRoot ? "/landing.html" : url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
+  const sharedScan = /^\/s\/[A-Za-z0-9_-]{22}$/.test(url.pathname);
+  const requestedPath = url.pathname === "/landing" || landingRoot || sharedScan ? "/landing.html" : url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
   if (!staticFiles.has(requestedPath)) {
     response.writeHead(404);
     response.end();

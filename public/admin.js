@@ -981,3 +981,177 @@ siteChangePassword.addEventListener("change", async () => {
 });
 
 loadSiteFiles();
+
+const publicAccessFields = {
+  dailyLimit: document.querySelector("#public-daily-limit"),
+  unlimited: document.querySelector("#public-unlimited"),
+  blocked: document.querySelector("#public-blocked"),
+  blockSite: document.querySelector("#public-block-site"),
+};
+const publicAccessStatus = document.querySelector("#public-access-status");
+
+function renderPublicAccess(data) {
+  publicAccessFields.dailyLimit.value = data.dailyLimit;
+  publicAccessFields.unlimited.value = data.unlimited;
+  publicAccessFields.blocked.value = data.blocked;
+  publicAccessFields.blockSite.checked = data.blockSite;
+  publicAccessStatus.textContent = data.yourAddress ? `Your address as seen by the server: ${data.yourAddress}` : "";
+}
+
+async function loadPublicAccess() {
+  try {
+    renderPublicAccess(await api("/api/admin/public-access"));
+  } catch (error) {
+    publicAccessStatus.textContent = error.message;
+  }
+}
+
+document.querySelector("#public-access-save").addEventListener("click", async () => {
+  try {
+    renderPublicAccess(await api("/api/admin/public-access", {
+      method: "PUT",
+      body: JSON.stringify({
+        dailyLimit: Number(publicAccessFields.dailyLimit.value),
+        unlimited: publicAccessFields.unlimited.value,
+        blocked: publicAccessFields.blocked.value,
+        blockSite: publicAccessFields.blockSite.checked,
+      }),
+    }));
+    showAdminSuccess("Public lookup limits saved.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+loadPublicAccess();
+
+const backupStatus = document.querySelector("#backup-status");
+
+document.querySelector("#backup-download").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  backupStatus.textContent = "Preparing the backup…";
+  try {
+    const response = await fetch("/api/admin/backup", { method: "POST", credentials: "same-origin" });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "The backup failed.");
+    const blob = await response.blob();
+    const name = (response.headers.get("content-disposition") || "").match(/filename="([^"]+)"/)?.[1] || "bnglookup-backup.tar.gz";
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    backupStatus.textContent = `Downloaded ${name} (${(blob.size / 1048576).toFixed(1)} MB).`;
+  } catch (error) {
+    backupStatus.textContent = "";
+    showAdminError(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+async function waitForRestart() {
+  const started = Date.now();
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  while (Date.now() - started < 120000) {
+    try {
+      const response = await fetch("/healthz", { cache: "no-store" });
+      if (response.ok) {
+        window.location.assign("/login.html?next=%2Fadmin.html");
+        return;
+      }
+    } catch {
+      // Still restarting.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  backupStatus.textContent = "BNGlookup has not come back yet. If it does not run under Docker or a process manager, start it again.";
+}
+
+document.querySelector("#restore-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = document.querySelector("#restore-file").files[0];
+  if (!file) return;
+  if (!window.confirm(`Replace ALL current data with "${file.name}" and restart BNGlookup? Everyone will be logged out.`)) return;
+  const button = event.currentTarget.querySelector("button");
+  button.disabled = true;
+  backupStatus.textContent = "Uploading and checking the backup…";
+  try {
+    const response = await fetch("/api/admin/restore", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/gzip" },
+      body: file,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "The restore failed.");
+    backupStatus.textContent = `Backup${result.createdAt ? ` from ${new Date(result.createdAt).toLocaleString()}` : ""} accepted. Restarting BNGlookup…`;
+    await waitForRestart();
+  } catch (error) {
+    backupStatus.textContent = "";
+    showAdminError(error.message);
+    button.disabled = false;
+  }
+});
+
+const ssoForm = document.querySelector("#sso-form");
+const ssoStatus = document.querySelector("#sso-status");
+
+function renderSso(data) {
+  const field = (name) => ssoForm.elements[name];
+  field("enabled").checked = data.enabled;
+  field("publicUrl").value = data.publicUrl || "";
+  field("issuer").value = data.issuer || "";
+  field("clientId").value = data.clientId || "";
+  field("clientSecret").value = "";
+  field("clientSecret").placeholder = data.clientSecretSet ? "Saved; leave empty to keep it" : "Not set";
+  field("label").value = data.label || "";
+  field("scopes").value = data.scopes || "";
+  field("linkByEmail").checked = data.linkByEmail;
+  field("autoCreate").checked = data.autoCreate;
+  field("defaultRole").value = data.defaultRole || "user";
+  field("allowedDomains").value = data.allowedDomains || "";
+  document.querySelector("#sso-redirect").value = data.redirectUri;
+}
+
+function ssoBody() {
+  const field = (name) => ssoForm.elements[name];
+  return {
+    enabled: field("enabled").checked, publicUrl: field("publicUrl").value, issuer: field("issuer").value, clientId: field("clientId").value,
+    clientSecret: field("clientSecret").value, label: field("label").value, scopes: field("scopes").value, linkByEmail: field("linkByEmail").checked,
+    autoCreate: field("autoCreate").checked, defaultRole: field("defaultRole").value, allowedDomains: field("allowedDomains").value,
+  };
+}
+
+async function loadSso() {
+  try {
+    renderSso(await api("/api/admin/sso"));
+  } catch (error) {
+    ssoStatus.textContent = error.message;
+  }
+}
+
+ssoForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    renderSso(await api("/api/admin/sso", { method: "PUT", body: JSON.stringify(ssoBody()) }));
+    ssoStatus.textContent = "";
+    showAdminSuccess("Single sign-on settings saved.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+document.querySelector("#sso-test").addEventListener("click", async () => {
+  ssoStatus.textContent = "Contacting the identity provider…";
+  try {
+    const result = await api("/api/admin/sso/test", { method: "POST", body: JSON.stringify(ssoBody()) });
+    ssoStatus.textContent = `Discovery works. Sign-in page: ${result.authorization}`;
+  } catch (error) {
+    ssoStatus.textContent = error.message;
+  }
+});
+
+loadSso();

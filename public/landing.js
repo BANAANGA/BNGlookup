@@ -167,8 +167,8 @@ function classify(raw) {
   return { kind: "domain", value };
 }
 
-async function api(url) {
-  const response = await fetch(url, { credentials: "same-origin", headers: { "x-landing-scan": page.token } });
+async function api(url, token = page.token) {
+  const response = await fetch(url, { credentials: "same-origin", headers: { "x-landing-scan": token } });
   let data = null;
   try {
     data = await response.json();
@@ -181,14 +181,16 @@ async function api(url) {
 
 const query = (path, params) => `${path}?${new URLSearchParams(params)}`;
 
-async function pingTarget(name) {
-  const icmp = await api(query("/api/ping", { name }));
+async function pingTarget(name, call = api) {
+  const icmp = await call(query("/api/ping", { name }));
   if (icmp.up || !/not available/i.test(icmp.error || "")) return icmp;
-  return api(query("/api/ping", { name, method: "https" }));
+  return call(query("/api/ping", { name, method: "https" }));
 }
 
-function planJobs(target, allowed) {
+// token is the landing scan token the tool calls use (each compared scan has its own).
+function planJobs(target, allowed, token) {
   const name = target.value;
+  const call = (url) => api(url, token ?? page.token);
   const jobs = [];
   const add = (feature, job) => {
     if (allowed.has(feature)) jobs.push({ feature, ...job });
@@ -197,27 +199,28 @@ function planJobs(target, allowed) {
     add("forward", {
       id: "records", category: "dns", title: "DNS records", render: renderRecords,
       load: async () => Object.fromEntries(await Promise.all(["A", "AAAA", "MX", "NS", "TXT", "CAA"]
-        .map(async (type) => [type, await api(query("/api/lookup", { name, type }))]))),
+        .map(async (type) => [type, await call(query("/api/lookup", { name, type }))]))),
     });
-    add("forward", { id: "dnssec", category: "dns", title: "DNSSEC", render: renderDnssec, load: () => api(query("/api/lookup", { name, type: "DNSSEC" })) });
-    add("whois", { id: "whois", category: "dns", title: "Registration", render: renderWhois, load: () => api(query("/api/domain-info", { name })) });
-    add("propagation", { id: "propagation", category: "dns", title: "Propagation", render: renderPropagation, load: () => api(query("/api/propagation", { name, type: "A" })) });
-    add("dns-health", { id: "dns-health", category: "dns", title: "Name server health", render: renderDnsHealth, load: () => api(query("/api/dns-health", { name })) });
-    add("email", { id: "email", category: "email", title: "Email security", render: renderEmail, load: () => api(query("/api/email-check", { name })) });
-    add("web", { id: "web", category: "web", title: "Website", render: renderWeb, load: () => api(query("/api/web-check", { name })) });
-    add("sslscan", { id: "tls", category: "web", title: "TLS certificate", render: renderTls, load: () => api(query("/api/sslscan", { name, port: "443" })) });
-    add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => api(query("/api/reputation", { name })) });
-    add("lookalike", { id: "lookalike", category: "security", title: "Look-alike domains", render: renderLookalike, load: () => api(query("/api/lookalike", { name })) });
-    add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name) });
-    add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => api(query("/api/asn", { name })) });
+    add("forward", { id: "dnssec", category: "dns", title: "DNSSEC", render: renderDnssec, load: () => call(query("/api/lookup", { name, type: "DNSSEC" })) });
+    add("whois", { id: "whois", category: "dns", title: "Registration", render: renderWhois, load: () => call(query("/api/domain-info", { name })) });
+    add("propagation", { id: "propagation", category: "dns", title: "Propagation", render: renderPropagation, load: () => call(query("/api/propagation", { name, type: "A" })) });
+    add("dns-health", { id: "dns-health", category: "dns", title: "Name server health", render: renderDnsHealth, load: () => call(query("/api/dns-health", { name })) });
+    add("email", { id: "email", category: "email", title: "Email security", render: renderEmail, load: () => call(query("/api/email-check", { name })) });
+    add("mail-server", { id: "mail-server", category: "email", title: "Mail servers", render: renderMailServers, load: () => call(query("/api/mail-server", { name })) });
+    add("web", { id: "web", category: "web", title: "Website", render: renderWeb, load: () => call(query("/api/web-check", { name })) });
+    add("sslscan", { id: "tls", category: "web", title: "TLS certificate", render: renderTls, load: () => call(query("/api/sslscan", { name, port: "443" })) });
+    add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => call(query("/api/reputation", { name })) });
+    add("lookalike", { id: "lookalike", category: "security", title: "Look-alike domains", render: renderLookalike, load: () => call(query("/api/lookalike", { name })) });
+    add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name, call) });
+    add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => call(query("/api/asn", { name })) });
   } else if (target.kind === "ip") {
-    add("reverse", { id: "reverse", category: "dns", title: "Reverse DNS", render: renderReverse, load: () => api(query("/api/lookup", { name, reverse: "true" })) });
-    add("whois", { id: "whois", category: "dns", title: "IP registration", render: renderIpWhois, load: () => api(query("/api/domain-info", { name })) });
-    add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => api(query("/api/reputation", { name })) });
-    add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name) });
-    add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => api(query("/api/asn", { name })) });
+    add("reverse", { id: "reverse", category: "dns", title: "Reverse DNS", render: renderReverse, load: () => call(query("/api/lookup", { name, reverse: "true" })) });
+    add("whois", { id: "whois", category: "dns", title: "IP registration", render: renderIpWhois, load: () => call(query("/api/domain-info", { name })) });
+    add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => call(query("/api/reputation", { name })) });
+    add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name, call) });
+    add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => call(query("/api/asn", { name })) });
   } else {
-    add("mac", { id: "mac", category: "network", title: "MAC address vendor", render: renderMac, load: () => api(query("/api/mac-lookup", { name })) });
+    add("mac", { id: "mac", category: "network", title: "MAC address vendor", render: renderMac, load: () => call(query("/api/mac-lookup", { name })) });
   }
   return jobs;
 }
@@ -359,7 +362,8 @@ function renderEmail(data) {
     });
   }
   const issues = [
-    ...normalizeIssues(data.spf?.issues), ...normalizeIssues(data.dmarc?.issues), ...normalizeIssues(data.mtaSts?.issues),
+    // A missing record is reported once below, not also by the tool's own findings.
+    ...(data.spf?.found ? normalizeIssues(data.spf.issues) : []), ...(data.dmarc?.found ? normalizeIssues(data.dmarc.issues) : []), ...normalizeIssues(data.mtaSts?.issues),
     ...normalizeIssues(data.tlsRpt?.issues), ...normalizeIssues(data.bimi?.issues), ...smtp.flatMap((server) => normalizeIssues(server.issues)),
   ];
   if (!data.spf?.found) issues.push({ severity: "high", message: "No SPF record, so anyone can send mail that claims to come from this domain." });
@@ -372,6 +376,24 @@ function renderEmail(data) {
       : records.length ? `Mail goes to ${data.providers?.inbound?.[0] || records[0].host}.` : "No MX records: this domain does not receive mail.",
     facts: [["Mail servers", records.map((record) => `${record.priority}  ${record.host}`).join("\n"), true]].filter(([, value]) => value),
     checks,
+    issues,
+  };
+}
+
+function renderMailServers(data) {
+  const reachable = data.servers.filter((server) => server.connected && !server.error);
+  const issues = normalizeIssues(data.issues);
+  return {
+    status: !data.servers.length || !reachable.length ? statusFromIssues(issues, "info") : statusFromIssues(issues),
+    summary: data.nullMx ? "This domain does not accept mail."
+      : !data.servers.length ? "No mail servers to test."
+      : !reachable.length ? "The mail servers could not be reached on port 25 from this server."
+      : `${plural(reachable.length, "mail server")} tested on port 25.`,
+    checks: reachable.flatMap((server) => [
+      { state: server.relay?.open ? "bad" : server.relay?.tested ? "good" : "info", label: `${server.host}: open relay`, text: server.relay?.open ? "Accepts mail for other domains." : server.relay?.tested ? "No." : "Not tested." },
+      { state: server.ptr?.confirmed ? "good" : "warn", label: `${server.host}: reverse DNS`, text: server.ptr?.confirmed ? server.ptr.confirmedName : server.ptr?.names?.length ? `${server.ptr.names[0]} (not confirmed)` : "None." },
+      { state: server.authBeforeTls ? "warn" : "good", label: `${server.host}: login before TLS`, text: server.authBeforeTls ? "Offered." : "No." },
+    ]),
     issues,
   };
 }
@@ -508,11 +530,103 @@ function renderMac(data) {
   };
 }
 
+// ------------------------------------------------------------------ How to fix
+// Plain-language advice for common findings, matched on the finding's text. A snippet is
+// a ready-to-use record, header or setting for the scanned domain.
+
+const fixCatalog = [
+  { match: /more than one spf record/i, text: "Merge all SPF records into one TXT record that starts with v=spf1; receivers treat two records as an error." },
+  { match: /\+all allows every server/i, text: "Replace +all with -all (or ~all while testing) so only the listed servers may send mail.", snippet: (d) => `${d}. TXT "v=spf1 mx -all"` },
+  { match: /no spf record|spf.*no spf record/i, text: "Publish one SPF record listing the servers and services that send mail for the domain. Add include: entries for services such as your mail provider or newsletter tool.", snippet: (d) => `${d}. TXT "v=spf1 mx -all"` },
+  { match: /\?all is neutral|no all mechanism/i, text: "End the SPF record with -all (or ~all) so unlisted senders fail.", snippet: (d) => `${d}. TXT "v=spf1 mx -all"` },
+  { match: /spf needs \d+ dns lookups/i, text: "Remove unused include: entries, or flatten them into ip4:/ip6: ranges with the SPF flattener in the full interface." },
+  { match: /more than one dmarc record/i, text: "Keep exactly one TXT record at _dmarc; delete the others." },
+  { match: /no dmarc record|dmarc.*no dmarc record/i, text: "Publish a DMARC record. Start by collecting reports, then move to quarantine and reject once all your own mail passes.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@${d}"` },
+  { match: /p=none only monitors|policy: none|dmarc policy is p=none/i, text: "Check the DMARC reports; once your own mail passes SPF or DKIM, raise the policy to quarantine and later reject.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=reject; rua=mailto:dmarc-reports@${d}"` },
+  { match: /no valid p= policy/i, text: "Add a p= tag with none, quarantine or reject to the DMARC record.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@${d}"` },
+  { match: /dkim|common selectors/i, text: "Turn on DKIM signing at your mail provider and publish the public key it gives you as a TXT record at <selector>._domainkey. If you already sign, the selector may simply have an uncommon name." },
+  { match: /starttls is not offered|starttls/i, text: "Enable STARTTLS on the mail server with a valid certificate, so mail to the domain is encrypted in transit." },
+  { match: /mta-sts.*testing mode/i, text: "After a few weeks of clean TLS reports, change mode: testing to mode: enforce in the policy file and update the id in the _mta-sts record." },
+  { match: /mta-sts/i, text: "Publish an MTA-STS policy so senders require TLS. You need a TXT record plus a policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt (BNGlookup can host it).", snippet: (d) => `_mta-sts.${d}. TXT "v=STSv1; id=${new Date().toISOString().slice(0, 10).replace(/-/g, "")}"` },
+  { match: /tls-rpt/i, text: "Publish a TLS-RPT record to receive reports about failed encrypted deliveries.", snippet: (d) => `_smtp._tls.${d}. TXT "v=TLSRPTv1; rua=mailto:tls-reports@${d}"` },
+  { match: /open relay|accepts mail for other domains/i, text: "Only relay mail for your own domains and for users who log in. In Postfix, check smtpd_relay_restrictions (permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination)." },
+  { match: /login before tls|auth\) before encryption|password login/i, text: "Only offer AUTH after STARTTLS. For Postfix: smtpd_tls_auth_only = yes." },
+  { match: /reverse dns.*(not confirmed|does not point back)|not forward-confirmed/i, text: "Make the reverse DNS (PTR) name of the mail server's address resolve back to the same address, ideally the name it uses in HELO. Your hosting provider sets the PTR record." },
+  { match: /bimi requires dmarc/i, text: "BIMI logos are only shown when DMARC is enforced: raise the DMARC policy to quarantine or reject.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@${d}"` },
+  { match: /logo could not be fetched|logo.*served as/i, text: "Serve the BIMI logo directly (no redirects) over HTTPS as image/svg+xml in the SVG Tiny Portable/Secure format. BNGlookup can host it at /logo.svg." },
+  { match: /mark certificate.*(expire|not valid)/i, text: "Renew the Verified Mark Certificate with your certificate authority and replace the file at the a= address." },
+  { match: /dnssec is not enabled|dnssec/i, text: "Turn on DNSSEC signing at your DNS host, then add the DS record it shows at your domain registrar." },
+  { match: /chain of trust is broken|no ds record matches/i, text: "The DS record at the registrar does not match the zone's keys. Replace it with the DS record your DNS host currently shows." },
+  { match: /rrsig.*(expired|expires soon)/i, text: "The zone's signatures are expiring: check that automatic re-signing at your DNS host is working." },
+  { match: /no caa record/i, text: "Add a CAA record naming the certificate authorities you use, so others cannot issue certificates for the domain.", snippet: (d) => `${d}. CAA 0 issue "letsencrypt.org"` },
+  { match: /does not exist \(nxdomain\)/i, text: "Check the spelling. If the name is yours, check that it is registered and that the name servers serve the zone." },
+  { match: /registration (has expired|expires)/i, text: "Renew the domain at your registrar and turn on automatic renewal, or it may be lost." },
+  { match: /not all resolvers return the same|resolvers return \d+ different/i, text: "A recent change is still spreading (wait for the TTL to pass), or your name servers give different answers. Make sure every name server has the same zone." },
+  { match: /glue/i, text: "Add glue records (the name servers' IP addresses) at the registrar for name servers inside your own domain." },
+  { match: /lame delegation|answer authoritatively/i, text: "Remove name servers that do not serve the zone from the delegation at the registrar, or add the zone to them." },
+  { match: /parent and zone agree|not listed in the zone/i, text: "Make the NS records in the zone and the name servers set at the registrar identical." },
+  { match: /open recursion|answers recursive queries/i, text: "Turn off recursion for outside clients on the authoritative name servers (for BIND: recursion no; or allow-recursion { localhost; };)." },
+  { match: /zone transfer|axfr/i, text: "Only allow zone transfers to your own secondary name servers (for BIND: allow-transfer { <secondary IP>; };)." },
+  { match: /soa serials|different serials/i, text: "A secondary name server is not picking up changes: check zone transfers (NOTIFY / AXFR) from the primary." },
+  { match: /network diversity|same \/24|one \/24/i, text: "Add a name server in a different network or with another DNS provider, so one outage does not take the domain down." },
+  { match: /ipv6 name servers|no name server has an ipv6/i, text: "Give at least one name server an IPv6 address (AAAA record), so IPv6-only resolvers can reach it." },
+  { match: /does not redirect http to https|not redirect/i, text: "Redirect all plain HTTP requests to HTTPS with a permanent (301) redirect.", snippet: () => "# nginx\nserver { listen 80; server_name _; return 301 https://$host$request_uri; }" },
+  { match: /hsts|strict-transport-security/i, text: "Send an HSTS header from the HTTPS site so browsers always use HTTPS.", snippet: () => "Strict-Transport-Security: max-age=31536000; includeSubDomains" },
+  { match: /content-security-policy|injected scripts/i, text: "Add a Content-Security-Policy header. Start strict and allow only the sources your site really uses.", snippet: () => "Content-Security-Policy: default-src 'self'; object-src 'none'; frame-ancestors 'self'" },
+  { match: /clickjacking|frame this page/i, text: "Stop other sites from embedding your pages in a frame.", snippet: () => "X-Frame-Options: DENY\n# or, in the Content-Security-Policy: frame-ancestors 'self'" },
+  { match: /x-content-type-options|guess content types/i, text: "Tell browsers not to guess content types.", snippet: () => "X-Content-Type-Options: nosniff" },
+  { match: /referrer-policy/i, text: "Limit what other sites learn from links on your pages.", snippet: () => "Referrer-Policy: strict-origin-when-cross-origin" },
+  { match: /permissions-policy/i, text: "Turn off browser features the site does not use.", snippet: () => "Permissions-Policy: camera=(), microphone=(), geolocation=()" },
+  { match: /software version/i, text: "Hide version numbers in the Server and X-Powered-By headers (for nginx: server_tokens off; for PHP: expose_php = Off)." },
+  { match: /cookies?/i, text: "Set the Secure, HttpOnly and SameSite attributes on cookies.", snippet: () => "Set-Cookie: session=…; Secure; HttpOnly; SameSite=Lax" },
+  { match: /mixed content/i, text: "Load every image, script and stylesheet over https:// (or use relative addresses)." },
+  { match: /security\.txt/i, text: "Publish /.well-known/security.txt with a contact for security reports (RFC 9116).", snippet: (d) => `Contact: mailto:security@${d}\nExpires: ${new Date(Date.now() + 364 * 86400000).toISOString().slice(0, 10)}T00:00:00Z\nCanonical: https://${d}/.well-known/security.txt` },
+  { match: /not compressed/i, text: "Enable gzip or Brotli compression on the web server (for nginx: gzip on;)." },
+  { match: /final page returned http/i, text: "The site's start page returns an error: check the web server and application logs." },
+  { match: /certificate (has expired|expires in)/i, text: "Renew the TLS certificate and switch to automatic renewal (ACME, for example Let's Encrypt)." },
+  { match: /certificate is not trusted|does not cover|does not match/i, text: "Install a certificate from a public certificate authority that covers this exact host name, including the intermediate certificates." },
+  { match: /tlsv1(\.1)?\b|outdated tls|tls 1\.2 or newer/i, text: "Turn off TLS 1.0 and 1.1 and allow only TLS 1.2 and 1.3.", snippet: () => "# nginx\nssl_protocols TLSv1.2 TLSv1.3;" },
+  { match: /no tls connection|handshake failed/i, text: "Make sure HTTPS is served on port 443 with a valid certificate." },
+  { match: /listed as (malicious|suspicious)|flag this/i, text: "Check the site and server for malware or phishing pages, clean them up, then ask each listing service to review the domain." },
+  { match: /look-alike/i, text: "Watch the high-risk look-alikes. Consider registering the most dangerous ones yourself, and report abuse to their registrar." },
+  { match: /did not answer|not reachable/i, text: "Check that the host is up and that a firewall allows the check (ICMP or HTTPS)." },
+  { match: /rpki-invalid/i, text: "The announcing network is not authorized by the address holder's ROA. Ask the network operator to fix the route or the ROA." },
+  { match: /no ptr record|no reverse dns|reverse dns: none/i, text: "Ask the owner of the IP address (usually your hosting provider) to set a reverse DNS (PTR) name." },
+];
+
+function fixFor(text) {
+  return fixCatalog.find((fix) => fix.match.test(text)) || null;
+}
+
+function fixHtml(text) {
+  const fix = fixFor(text);
+  if (!fix) return "";
+  const domain = page.target?.kind === "domain" ? page.target.value : "example.com";
+  const snippet = fix.snippet ? fix.snippet(domain) : "";
+  return `<details class="fix"><summary>How to fix</summary><div class="fix-body"><p>${escapeHtml(fix.text)}</p>${snippet
+    ? `<div class="fix-snippet"><pre>${escapeHtml(snippet)}</pre><button class="fix-copy" type="button" data-copy="${escapeHtml(snippet)}">Copy</button></div>`
+    : ""}</div></details>`;
+}
+
+// One listener handles the Copy buttons in every fix.
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest?.(".fix-copy");
+  if (!button) return;
+  try {
+    await navigator.clipboard.writeText(button.dataset.copy);
+    button.textContent = "Copied ✓";
+  } catch {
+    button.textContent = "Copy failed";
+  }
+  window.setTimeout(() => { button.textContent = "Copy"; }, 1500);
+});
+
 // ------------------------------------------------------------------ Full details
 // Every card can expand to show everything the tool returned, laid out as readable
 // tables, plus the raw JSON and a link to the same tool in the full interface.
 
 const fullModes = {
+  "mail-server": "mail-server",
   records: "forward", dnssec: "forward", whois: "details", propagation: "propagation", "dns-health": "dns-health", email: "email",
   web: "web", tls: "sslscan", reputation: "reputation", lookalike: "lookalike", ping: "ping", asn: "asn", reverse: "reverse", mac: "mac",
 };
@@ -686,8 +800,8 @@ function drawCard(job) {
     <div class="card-head"><h3 class="card-title">${escapeHtml(job.title)}</h3>${badge}</div>
     ${view.summary ? `<p class="card-summary">${escapeHtml(view.summary)}</p>` : ""}
     ${view.facts?.length ? `<dl class="facts">${view.facts.map(([label, value, mono]) => `<dt>${escapeHtml(label)}</dt><dd${mono ? ' class="mono"' : ""}>${escapeHtml(value)}</dd>`).join("")}</dl>` : ""}
-    ${listHtml(view.checks || [], "checks", (check) => `<span class="mark ${check.state}">${markSymbol[check.state]}</span><span><span class="check-label${check.mono ? " mono" : ""}">${escapeHtml(check.label)}</span>${check.text ? ` <span class="check-text">${escapeHtml(check.text)}</span>` : ""}</span>`)}
-    ${view.checks?.length ? "" : listHtml(view.issues.filter((issue) => severityRank[issue.severity] >= 2), "issues", (issue) => `<span class="mark ${issue.severity === "high" ? "bad" : "warn"}">!</span><span>${escapeHtml(issue.message)}</span>`)}`;
+    ${listHtml(view.checks || [], "checks", (check) => `<span class="mark ${check.state}">${markSymbol[check.state]}</span><span><span class="check-label${check.mono ? " mono" : ""}">${escapeHtml(check.label)}</span>${check.text ? ` <span class="check-text">${escapeHtml(check.text)}</span>` : ""}${check.state === "warn" || check.state === "bad" ? fixHtml(`${check.label}: ${check.text || ""}`) : ""}</span>`)}
+    ${view.checks?.length ? "" : listHtml(view.issues.filter((issue) => severityRank[issue.severity] >= 2), "issues", (issue) => `<span class="mark ${issue.severity === "high" ? "bad" : "warn"}">!</span><span>${escapeHtml(issue.message)}${fixHtml(issue.message)}</span>`)}`;
   card.querySelectorAll("li").forEach((item, index) => {
     item.style.animationDelay = `${Math.min(index, 8) * 40}ms`;
   });
@@ -743,7 +857,14 @@ function buildLayout(target) {
     <div class="ring" id="ring"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="ring-track" cx="50" cy="50" r="42"/><circle class="ring-value" id="ring-value" cx="50" cy="50" r="42"/></svg>
       <div class="ring-label"><span><span id="ring-number">0</span><small>Score</small></span></div></div>
     <div><p class="summary-target" id="summary-target"></p><p class="summary-text" id="summary-text"></p>
-      <div class="summary-counts" id="summary-counts"></div><div class="progress" id="progress"><div class="progress-bar" id="progress-bar"></div></div></div>`;
+      <div class="summary-counts" id="summary-counts"></div><div class="progress" id="progress"><div class="progress-bar" id="progress-bar"></div></div>
+      <div class="summary-actions" id="summary-actions" hidden>
+        <button class="detail-action" type="button" id="share-button">Share link</button>
+        <button class="detail-action" type="button" id="pdf-button">Save as PDF</button>
+      </div>
+      <div class="share-box" id="share-box" hidden></div></div>`;
+  byId("share-button").addEventListener("click", shareScan);
+  byId("pdf-button").addEventListener("click", () => window.print());
   byId("summary-target").textContent = target.value;
   const circle = byId("ring-value");
   const length = 2 * Math.PI * 42;
@@ -862,6 +983,7 @@ function updateSummary() {
   ].filter(Boolean).join("");
   byId("progress-bar").style.width = `${page.jobs.length ? (finished.length / page.jobs.length) * 100 : 100}%`;
   byId("progress").classList.toggle("done", done);
+  byId("summary-actions").hidden = !done || page.preview;
 
   document.querySelectorAll(".tab").forEach((tab) => {
     const state = categoryState(tab.dataset.category);
@@ -894,7 +1016,7 @@ function drawOverview() {
   const firstDraw = !panel.firstElementChild;
   panel.innerHTML = `<div class="overview-grid">${tiles}</div>
     ${issues.length ? `<div class="card overview-issues ${issues.some((issue) => issue.severity === "high") ? "bad" : "warn"}"><h2>Most important findings</h2>
-      ${listHtml(issues, "issues", (issue) => `<span class="mark ${issue.severity === "high" ? "bad" : "warn"}">!</span><span><span class="check-label">${escapeHtml(issue.job.title)}:</span> <span class="check-text">${escapeHtml(issue.message)}</span></span>`)}</div>`
+      ${listHtml(issues, "issues", (issue) => `<span class="mark ${issue.severity === "high" ? "bad" : "warn"}">!</span><span><span class="check-label">${escapeHtml(issue.job.title)}:</span> <span class="check-text">${escapeHtml(issue.message)}</span>${fixHtml(issue.message)}</span>`)}</div>`
     : page.jobs.every((job) => job.done) ? '<div class="card good overview-issues"><h2>No problems found</h2><p class="card-summary">Every check passed without important findings.</p></div>' : ""}`;
   // Only the first drawing animates; later updates replace the content in place.
   panel.classList.toggle("settled", !firstDraw);
@@ -950,13 +1072,17 @@ async function startScan() {
 
   page.jobs = jobs;
   page.target = target;
+  page.shared = null;
+  page.compare = null;
+  byId("compare").hidden = true;
+  page.scannedAt = new Date();
   document.body.classList.add("has-results");
   byId("results").hidden = false;
   buildLayout(target);
   updateSummary();
   if (!page.preview) {
     try {
-      window.history.replaceState(null, "", `#${encodeURIComponent(target.value)}`);
+      window.history.replaceState(null, "", `${window.location.pathname.startsWith("/s/") ? "/" : ""}#${encodeURIComponent(target.value)}`);
     } catch {
       // Not important if the address cannot be updated.
     }
@@ -983,6 +1109,324 @@ async function startScan() {
   byId("scan-button").disabled = false;
 }
 
+// ------------------------------------------------------------------ Compare two domains
+
+const statusRank = { good: 3, info: 2, warn: 1, bad: 0 };
+
+function scoreOf(jobs) {
+  const scored = jobs.filter((job) => job.done && job.view && job.view.status !== "info");
+  const points = { good: 100, warn: 60, bad: 15 };
+  const score = scored.length ? Math.round(scored.reduce((sum, job) => sum + points[job.view.status], 0) / scored.length) : 0;
+  return { score, tone: !scored.length ? "" : score >= 80 ? "good" : score >= 50 ? "warn" : "bad" };
+}
+
+function findingCount(jobs) {
+  return jobs.flatMap((job) => (job.view?.issues || []).filter((issue) => severityRank[issue.severity] >= 2)).length;
+}
+
+function compareCell(job) {
+  if (!job) return '<span class="card-summary">—</span>';
+  if (!job.done) return '<span class="skeleton short"></span>';
+  if (job.error) return '<span class="pill info">Not available</span>';
+  const count = (job.view.issues || []).filter((issue) => severityRank[issue.severity] >= 2).length;
+  return `<span class="pill ${job.view.status}">${statusWords[job.view.status]}</span>${job.view.grade ? ` <span class="compare-grade ${job.view.status}">${escapeHtml(job.view.grade)}</span>` : ""}${count ? ` <span class="compare-count">${plural(count, "finding")}</span>` : ""}`;
+}
+
+function buildCompare() {
+  const [left, right] = page.compare;
+  const section = byId("compare");
+  const ring = (side) => `<div class="ring" id="compare-ring-${side}"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="ring-track" cx="50" cy="50" r="42"/><circle class="ring-value" cx="50" cy="50" r="42"/></svg>
+    <div class="ring-label"><span><span class="compare-number">0</span><small>Score</small></span></div></div>`;
+  const used = new Set(left.jobs.concat(right.jobs).map((job) => job.category));
+  const rows = categories.filter((category) => category.id !== "overview" && used.has(category.id)).map((category) => {
+    const ids = [...new Set(left.jobs.concat(right.jobs).filter((job) => job.category === category.id).map((job) => job.id))];
+    return `<tr class="compare-category"><th scope="rowgroup" colspan="3">${escapeHtml(page.content[category.label] || category.id)}</th></tr>
+      ${ids.map((id) => `<tr data-job="${id}"><th scope="row">${escapeHtml((left.jobs.concat(right.jobs)).find((job) => job.id === id).title)}</th><td data-side="0"></td><td data-side="1"></td></tr>`).join("")}`;
+  }).join("");
+  section.innerHTML = `
+    <div class="compare-head">
+      ${[left, right].map((side, index) => `<div class="compare-side" id="compare-side-${index}">${ring(index)}
+        <p class="summary-target">${escapeHtml(side.target.value)}</p><p class="summary-text" id="compare-text-${index}"></p>
+        <button class="detail-action" type="button" data-open="${index}">Open full result</button></div>`).join('<div class="compare-vs-big" aria-hidden="true">vs</div>')}
+    </div>
+    <div class="compare-table-wrap"><table class="compare-table">
+      <thead><tr><th scope="col">Check</th><th scope="col">${escapeHtml(left.target.value)}</th><th scope="col">${escapeHtml(right.target.value)}</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+  section.querySelectorAll("[data-open]").forEach((button) => button.addEventListener("click", () => openCompareSide(Number(button.dataset.open))));
+  section.querySelectorAll(".ring-value").forEach((circle) => {
+    const length = 2 * Math.PI * 42;
+    circle.style.strokeDasharray = String(length);
+    circle.style.strokeDashoffset = String(length);
+  });
+}
+
+function updateCompare() {
+  if (!page.compare) return;
+  const sides = page.compare;
+  const length = 2 * Math.PI * 42;
+  const scores = sides.map((side) => scoreOf(side.jobs));
+  const done = sides.every((side) => side.jobs.every((job) => job.done));
+  sides.forEach((side, index) => {
+    const ring = byId(`compare-ring-${index}`);
+    ring.className = `ring ${scores[index].tone}`;
+    ring.querySelector(".ring-value").style.strokeDashoffset = String(length - (length * scores[index].score) / 100);
+    animateNumber(ring.querySelector(".compare-number"), scores[index].score);
+    const finished = side.jobs.filter((job) => job.done).length;
+    byId(`compare-text-${index}`).textContent = finished < side.jobs.length
+      ? `Running… ${finished} of ${side.jobs.length} done.`
+      : `${plural(findingCount(side.jobs), "point")} to look at.`;
+    byId(`compare-side-${index}`).classList.toggle("winner", done && scores[index].score > scores[1 - index].score);
+  });
+  byId("compare").querySelectorAll("tr[data-job]").forEach((row) => {
+    const jobs = sides.map((side) => side.jobs.find((job) => job.id === row.dataset.job));
+    row.querySelectorAll("td").forEach((cell, index) => {
+      cell.innerHTML = compareCell(jobs[index]);
+      cell.classList.remove("better");
+    });
+    if (jobs.every((job) => job?.done && job.view)) {
+      const rank = jobs.map((job) => statusRank[job.view.status] * 100 - findingCount([job]));
+      if (rank[0] !== rank[1]) row.querySelectorAll("td")[rank[0] > rank[1] ? 0 : 1].classList.add("better");
+    }
+  });
+}
+
+function openCompareSide(index) {
+  const side = page.compare[index];
+  page.jobs = side.jobs;
+  page.target = side.target;
+  page.shared = null;
+  page.scannedAt = side.scannedAt;
+  byId("compare").hidden = true;
+  byId("results").hidden = false;
+  buildLayout(side.target);
+  page.jobs.forEach(drawCard);
+  updateSummary();
+  const notice = byId("notice");
+  notice.hidden = false;
+  notice.classList.add("shared-notice");
+  notice.innerHTML = `Full result for ${escapeHtml(side.target.value)}. <button class="example" type="button" id="back-to-compare">Back to the comparison</button>`;
+  byId("back-to-compare").addEventListener("click", () => {
+    notice.hidden = true;
+    notice.classList.remove("shared-notice");
+    byId("results").hidden = true;
+    byId("compare").hidden = false;
+  });
+  byId("results").scrollIntoView({ behavior: motionAllowed() ? "smooth" : "auto", block: "start" });
+}
+
+async function startCompare() {
+  const targets = [classify(byId("query").value), classify(byId("query2").value)];
+  if (!targets[0] || !targets[1]) {
+    showNotice("Enter two domain names (or two IP addresses) to compare.");
+    return;
+  }
+  if (targets[0].kind !== targets[1].kind || targets[0].kind === "mac") {
+    showNotice("Compare two domain names or two IP addresses.");
+    return;
+  }
+  if (targets[0].value === targets[1].value) {
+    showNotice("Enter two different names to compare.");
+    return;
+  }
+  const allowed = allowedFeatures();
+  if (!planJobs(targets[0], allowed).length) {
+    showNotice(page.content.empty);
+    return;
+  }
+  showNotice("");
+  const run = ++page.run;
+  document.body.classList.add("is-scanning");
+  byId("scan-button").disabled = true;
+  let tokens;
+  try {
+    tokens = await Promise.all(targets.map(async () => {
+      const response = await fetch("/api/landing/start", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: "{}" });
+      const started = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(started.error || "The comparison could not be started.");
+      return started.token;
+    }));
+  } catch (error) {
+    if (run === page.run) {
+      showNotice(error.message);
+      document.body.classList.remove("is-scanning");
+      byId("scan-button").disabled = false;
+    }
+    return;
+  }
+  if (run !== page.run) return;
+  page.compare = targets.map((target, index) => ({ target, jobs: planJobs(target, allowed, tokens[index]), scannedAt: new Date() }));
+  page.jobs = [];
+  document.body.classList.add("has-results");
+  byId("results").hidden = true;
+  byId("compare").hidden = false;
+  buildCompare();
+  updateCompare();
+  if (!page.preview) {
+    try {
+      window.history.replaceState(null, "", `/#compare:${encodeURIComponent(targets[0].value)},${encodeURIComponent(targets[1].value)}`);
+    } catch {
+      // Not important if the address cannot be updated.
+    }
+  }
+  let pending = false;
+  const redraw = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      if (run === page.run) updateCompare();
+    });
+  };
+  await Promise.all(page.compare.flatMap((side) => side.jobs).map(async (job) => {
+    try {
+      const data = await job.load();
+      if (run !== page.run) return;
+      job.data = data;
+      job.view = job.render(data);
+      alignStatus(job);
+    } catch (error) {
+      if (run !== page.run) return;
+      job.error = error.message;
+    }
+    job.done = true;
+    redraw();
+  }));
+  if (run !== page.run) return;
+  updateCompare();
+  document.body.classList.remove("is-scanning");
+  byId("scan-button").disabled = false;
+}
+
+function setCompareMode(on) {
+  const field = byId("compare-field");
+  field.hidden = !on;
+  byId("compare-toggle").setAttribute("aria-expanded", String(on));
+  byId("compare-toggle").textContent = on ? "Scan one domain" : "Compare with another domain";
+  if (on) byId("query2").focus();
+}
+
+// ------------------------------------------------------------------ Share and PDF
+
+const allLandingFeatures = new Set(["forward", "whois", "propagation", "dns-health", "email", "mail-server", "web", "sslscan", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+
+async function shareScan() {
+  const box = byId("share-box");
+  let link = page.shared ? window.location.href.split("#")[0] : "";
+  let expires = page.shared?.expiresAt;
+  if (!link) {
+    byId("share-button").disabled = true;
+    try {
+      const response = await fetch("/api/landing/share", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: page.target,
+          jobs: page.jobs.map((job) => (job.error ? { id: job.id, error: job.error } : { id: job.id, data: job.data })),
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "The result could not be shared.");
+      link = `${window.location.origin}${result.url}`;
+      expires = result.expiresAt;
+      page.shared = { url: result.url, expiresAt: result.expiresAt, own: true };
+    } catch (error) {
+      box.hidden = false;
+      box.innerHTML = `<p class="card-error">${escapeHtml(error.message)}</p>`;
+      return;
+    } finally {
+      byId("share-button").disabled = false;
+    }
+  }
+  box.hidden = false;
+  box.innerHTML = `<div class="share-row"><input class="share-link" type="text" readonly value="${escapeHtml(link)}" aria-label="Share link"><button class="fix-copy share-copy" type="button" data-copy="${escapeHtml(link)}">Copy</button></div>
+    <p class="card-summary">Anyone with this link can see this result${expires ? ` until ${escapeHtml(formatDate(expires))}` : ""}.</p>`;
+  box.querySelector(".share-link").select();
+}
+
+async function openSharedScan(id) {
+  let shared;
+  try {
+    const response = await fetch(`/api/landing/shares/${encodeURIComponent(id)}`, { credentials: "same-origin" });
+    shared = await response.json();
+    if (!response.ok) throw new Error(shared.error || "This shared result could not be loaded.");
+  } catch (error) {
+    showNotice(error.message);
+    return;
+  }
+  const stored = new Map(shared.jobs.map((job) => [job.id, job]));
+  page.target = shared.target;
+  page.jobs = planJobs(shared.target, allLandingFeatures).filter((job) => stored.has(job.id));
+  page.shared = { url: `/s/${shared.id}`, expiresAt: shared.expiresAt };
+  page.scannedAt = new Date(shared.createdAt);
+  for (const job of page.jobs) {
+    const entry = stored.get(job.id);
+    job.done = true;
+    if (entry.error !== undefined) {
+      job.error = entry.error;
+      continue;
+    }
+    job.data = entry.data;
+    try {
+      job.view = job.render(entry.data);
+      alignStatus(job);
+    } catch {
+      job.error = "This part of the shared result could not be shown.";
+    }
+  }
+  byId("query").value = shared.target.value;
+  document.body.classList.add("has-results");
+  byId("results").hidden = false;
+  buildLayout(shared.target);
+  page.jobs.forEach(drawCard);
+  updateSummary();
+  const notice = byId("notice");
+  notice.hidden = false;
+  notice.classList.add("shared-notice");
+  notice.innerHTML = `Shared result, scanned ${escapeHtml(page.scannedAt.toLocaleString())}. <button class="example" type="button" id="rescan">Run a new scan</button>`;
+  byId("rescan").addEventListener("click", () => {
+    notice.classList.remove("shared-notice");
+    startScan();
+  });
+}
+
+// Printing (Save as PDF) shows every category, open lists and the "How to fix" advice.
+let printState = null;
+window.addEventListener("beforeprint", () => {
+  if (!page.jobs.length || printState) return;
+  printState = {
+    // The theme's colors are set inline; printing uses its own light colors.
+    themeStyle: document.documentElement.getAttribute("style") || "",
+    panels: [...document.querySelectorAll(".panel")].map((panel) => [panel, panel.hidden]),
+    items: [...document.querySelectorAll("li[hidden]")],
+    fixes: [...document.querySelectorAll(".fix:not([open])")],
+  };
+  document.querySelectorAll(".panel").forEach((panel) => {
+    panel.hidden = false;
+    panel.dataset.title = byId(panel.getAttribute("aria-labelledby"))?.querySelector(".tab-name")?.textContent || "";
+  });
+  printState.items.forEach((item) => { item.hidden = false; });
+  printState.fixes.forEach((fix) => { fix.open = true; });
+  document.documentElement.removeAttribute("style");
+  let meta = byId("print-meta");
+  if (!meta) {
+    meta = document.createElement("p");
+    meta.id = "print-meta";
+    meta.className = "print-meta";
+    byId("results").prepend(meta);
+  }
+  meta.textContent = `${page.config?.siteTitle || "BNGlookup"} scan report · ${(page.scannedAt || new Date()).toLocaleString()}${page.shared ? ` · ${window.location.origin}${page.shared.url}` : ""}`;
+});
+window.addEventListener("afterprint", () => {
+  if (!printState) return;
+  printState.panels.forEach(([panel, hidden]) => { panel.hidden = hidden; });
+  printState.items.forEach((item) => { item.hidden = true; });
+  printState.fixes.forEach((fix) => { fix.open = false; });
+  document.documentElement.setAttribute("style", printState.themeStyle);
+  printState = null;
+});
+
 // ------------------------------------------------------------------ Start
 
 // Logged-in users switch between the simple and the full interface; the choice is kept
@@ -1000,8 +1444,16 @@ function setupInterfaceSwitch(button, target) {
 async function init() {
   byId("scan-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    startScan();
+    if (!byId("compare-field").hidden && byId("query2").value.trim()) startCompare();
+    else startScan();
   });
+  byId("query2").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      startCompare();
+    }
+  });
+  byId("compare-toggle").addEventListener("click", () => setCompareMode(byId("compare-field").hidden));
   window.addEventListener("resize", positionIndicator);
   try {
     const [configResponse, authResponse] = await Promise.all([
@@ -1024,9 +1476,20 @@ async function init() {
     byId("query").disabled = true;
     byId("scan-button").disabled = true;
     byId("examples").hidden = true;
-  } else {
+  }
+  const sharedId = window.location.pathname.match(/^\/s\/([A-Za-z0-9_-]{22})$/)?.[1];
+  if (sharedId) {
+    await openSharedScan(sharedId);
+  } else if (allowedFeatures().size) {
+    byId("compare-toggle").hidden = page.preview;
     const fromHash = decodeURIComponent(window.location.hash.slice(1));
-    if (fromHash && !page.preview) {
+    const compareHash = fromHash.match(/^compare:([^,]+),(.+)$/);
+    if (compareHash && !page.preview) {
+      byId("query").value = compareHash[1];
+      byId("query2").value = compareHash[2];
+      setCompareMode(true);
+      startCompare();
+    } else if (fromHash && !page.preview) {
       byId("query").value = fromHash;
       startScan();
     } else if (!page.preview && window.matchMedia("(min-width: 641px)").matches) {

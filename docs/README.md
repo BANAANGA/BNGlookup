@@ -11,7 +11,7 @@ the main [README](../README.md).
 
 | Page | In one sentence |
 | --- | --- |
-| [Landing page](landing-page.md) | A simple start page that runs all public tools at once, with tabs per category. |
+| [Landing page](landing-page.md) | A simple start page that runs all public tools at once, with fixes, sharing, PDF and comparison. |
 
 ## DNS and domains
 
@@ -32,8 +32,10 @@ the main [README](../README.md).
 | Tool | In one sentence |
 | --- | --- |
 | [Email check](email-check.md) | Reviews MX, STARTTLS, SPF, DKIM, DMARC, MTA-STS, TLS-RPT and BIMI. |
+| [Mail server check](mail-server.md) | Tests mail servers on port 25: open relay, TLS, reverse DNS. |
 | [Header analyzer](header-analyzer.md) | Explains how a received message was delivered and authenticated. |
 | [DMARC reports](dmarc-reports.md) | Summarizes DMARC aggregate reports in your browser. |
+| [TLS reports](tls-reports.md) | Summarizes SMTP TLS reports (TLS-RPT) in your browser. |
 | [Record builder](record-builder.md) | Builds SPF, DMARC, MTA-STS, TLS-RPT and BIMI records. |
 | [SPF flattener](spf-flattener.md) | Rewrites SPF as IP ranges to stay under 10 lookups. |
 
@@ -83,9 +85,11 @@ the main [README](../README.md).
 | Page | In one sentence |
 | --- | --- |
 | [Two-factor login](two-factor.md) | Adds an authenticator code to your login. |
+| [Passkeys and single sign-on](passkeys-and-sso.md) | Sign in with a passkey or your identity provider. |
 | [API tokens](api-tokens.md) | Use the tools from scripts. |
 | [Dashboard](dashboard.md) | Server status, activity and insights for administrators. |
 | [Site files](site-files.md) | Publish robots.txt, security.txt and humans.txt for this site. |
+| [Backup and public limits](backup.md) | Back up and restore all data; limit and block public use. |
 
 ## Who can use what
 

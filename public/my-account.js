@@ -258,3 +258,65 @@ tokensPanel.addEventListener("click", async (event) => {
 
 load();
 loadShares();
+
+// ---------------------------------------------------------------- Passkeys
+
+const passkeyPanel = document.querySelector("#passkey-panel");
+
+function guessPasskeyName() {
+  const agent = navigator.userAgent;
+  const platform = /iPhone|iPad/.test(agent) ? "iPhone or iPad" : /Android/.test(agent) ? "Android" : /Mac/.test(agent) ? "Mac" : /Windows/.test(agent) ? "Windows" : /Linux/.test(agent) ? "Linux" : "This device";
+  return platform;
+}
+
+async function loadPasskeys() {
+  let data;
+  try {
+    const response = await fetch("/api/auth/passkeys", { credentials: "same-origin" });
+    data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Passkeys could not be loaded.");
+  } catch (error) {
+    passkeyPanel.innerHTML = `<p class="form-hint">${escapeAccountHtml(error.message)}</p>`;
+    return;
+  }
+  const supported = window.bngPasskeys?.passkeysSupported();
+  passkeyPanel.innerHTML = `
+    ${data.passkeys.length ? `<div class="share-list">${data.passkeys.map((key) => `
+      <div class="share-row">
+        <div><strong>${escapeAccountHtml(key.name)}</strong>
+          <span>${escapeAccountHtml(`Added ${new Date(key.createdAt).toLocaleDateString()}${key.lastUsedAt ? ` · last used ${new Date(key.lastUsedAt).toLocaleString()}` : " · not used yet"}`)}</span></div>
+        <button type="button" data-passkey="${key.id}">Remove</button>
+      </div>`).join("")}</div>` : '<p class="form-hint">You have no passkeys yet.</p>'}
+    ${supported ? `<form class="passkey-add" id="passkey-add">
+      <label for="passkey-name">Name</label>
+      <input id="passkey-name" type="text" maxlength="60" value="${escapeAccountHtml(guessPasskeyName())}">
+      <button class="submit-button" type="submit"><span>Add a passkey</span><span aria-hidden="true">+</span></button>
+    </form>` : '<p class="form-hint">This browser cannot create passkeys here. Passkeys need a modern browser and HTTPS.</p>'}
+    <p class="error-message" id="passkey-error" role="alert" hidden></p>`;
+  passkeyPanel.querySelectorAll("[data-passkey]").forEach((button) => button.addEventListener("click", async () => {
+    if (!window.confirm("Remove this passkey? You can no longer sign in with it.")) return;
+    try {
+      await postAccount(`/api/auth/passkeys/${button.dataset.passkey}`, {}, "DELETE");
+      loadPasskeys();
+    } catch (error) {
+      window.alert(error.message);
+    }
+  }));
+  passkeyPanel.querySelector("#passkey-add")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const errorBox = passkeyPanel.querySelector("#passkey-error");
+    errorBox.hidden = true;
+    const button = event.currentTarget.querySelector("button");
+    button.disabled = true;
+    try {
+      await window.bngPasskeys.registerPasskey(passkeyPanel.querySelector("#passkey-name").value);
+      loadPasskeys();
+    } catch (error) {
+      errorBox.textContent = error.message;
+      errorBox.hidden = false;
+      button.disabled = false;
+    }
+  });
+}
+
+loadPasskeys();

@@ -215,6 +215,11 @@
             <input id="dmarc-files" type="file" multiple accept=".xml,.gz,.zip,application/xml,text/xml,application/gzip,application/zip">
             <span>Select up to 50 report files (.xml, .xml.gz or .zip) as received at your rua= address. They are read in your browser; only the sending IP addresses are sent to the server to look up their host names.</span>
           </div>
+          <div class="scan-extra-control wide-control" id="tlsrpt-control" hidden>
+            <label for="tlsrpt-files">TLS-RPT reports</label>
+            <input id="tlsrpt-files" type="file" multiple accept=".json,.gz,.zip,application/json,application/gzip,application/tlsrpt+gzip,application/tlsrpt+json,application/zip">
+            <span>Select up to 50 SMTP TLS reports (.json or .json.gz) as received at the rua= address of your _smtp._tls record. They are read in your browser and not sent to the server.</span>
+          </div>
           <div class="scan-extra-control wide-control" id="bulk-domains-control" hidden>
             <label for="bulk-domains-input">Domains</label>
             <textarea id="bulk-domains-input" rows="6" maxlength="16000" placeholder="e.g.&#10;example.com&#10;example.org" spellcheck="false"></textarea>
