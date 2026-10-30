@@ -75,6 +75,7 @@
           <button class="settings-tab" id="mail-tab" type="button" role="tab" aria-selected="false" aria-controls="mail-panel" tabindex="-1">Email</button>
           <button class="settings-tab" id="about-tab" type="button" role="tab" aria-selected="false" aria-controls="about-panel" tabindex="-1">About page</button>
           <button class="settings-tab" id="landing-tab" type="button" role="tab" aria-selected="false" aria-controls="landing-panel" tabindex="-1">Landing page</button>
+          <button class="settings-tab" id="sso-tab" type="button" role="tab" aria-selected="false" aria-controls="sso-panel" tabindex="-1">Single sign-on</button>
           <button class="settings-tab" id="backup-tab" type="button" role="tab" aria-selected="false" aria-controls="backup-panel" tabindex="-1">Backup</button>
           <button class="settings-tab" id="site-files-tab" type="button" role="tab" aria-selected="false" aria-controls="site-files-panel" tabindex="-1">Site files</button>
         </div>
@@ -243,6 +244,40 @@
           </form>
           <h2 class="policy-heading">Preview</h2>
           <div class="about-content about-preview" id="about-preview"></div>
+        </section>
+        <section class="settings-panel" id="sso-panel" role="tabpanel" aria-labelledby="sso-tab" hidden>
+          <h2>Single sign-on (OpenID Connect)</h2>
+          <p class="form-hint">Let users sign in with an identity provider such as Microsoft Entra ID, Google, Okta, Authentik, Keycloak or Authelia. Register BNGlookup there as a web application with the redirect address below, then fill in the issuer, client ID and secret. Sign-ins through the provider skip BNGlookup's own two-factor code; use the provider's MFA instead. Passkeys need no setup: users add them on My account.</p>
+          <form id="sso-form" class="admin-create-form">
+            <label class="branding-reset" for="sso-enabled"><input id="sso-enabled" name="enabled" type="checkbox"> Show a single sign-on button on the login page</label>
+            <label for="sso-redirect">Redirect address</label>
+            <input id="sso-redirect" type="text" readonly>
+            <label for="sso-public-url">Public address (optional)</label>
+            <input id="sso-public-url" name="publicUrl" type="url" maxlength="200" placeholder="https://lookup.example.com">
+            <p class="form-hint">Only needed when the redirect address above is wrong, for example behind a proxy that does not pass the original host or protocol.</p>
+            <label for="sso-issuer">Issuer URL</label>
+            <input id="sso-issuer" name="issuer" type="url" maxlength="300" placeholder="https://login.example.com/realms/main">
+            <label for="sso-client-id">Client ID</label>
+            <input id="sso-client-id" name="clientId" type="text" maxlength="200" autocomplete="off">
+            <label for="sso-client-secret">Client secret</label>
+            <input id="sso-client-secret" name="clientSecret" type="password" maxlength="500" autocomplete="new-password">
+            <label for="sso-label">Button text</label>
+            <input id="sso-label" name="label" type="text" maxlength="40" placeholder="Single sign-on">
+            <label for="sso-scopes">Scopes</label>
+            <input id="sso-scopes" name="scopes" type="text" maxlength="200" placeholder="openid email profile">
+            <label class="branding-reset" for="sso-link-email"><input id="sso-link-email" name="linkByEmail" type="checkbox"> Link sign-ins to existing users with the same verified email address</label>
+            <p class="form-hint">Only turn this on if you trust the email addresses on your accounts: users can enter their own address on My account, so someone could add another person's address to their account and receive that person's sign-in.</p>
+            <label class="branding-reset" for="sso-auto-create"><input id="sso-auto-create" name="autoCreate" type="checkbox"> Create an account automatically for new users</label>
+            <label for="sso-default-role">Role for new accounts</label>
+            <select id="sso-default-role" name="defaultRole"><option value="user">User</option><option value="admin">Admin</option></select>
+            <label for="sso-domains">Allowed email domains</label>
+            <input id="sso-domains" name="allowedDomains" type="text" maxlength="500" placeholder="example.com, example.org (empty: any)">
+            <p class="form-hint" id="sso-status"></p>
+            <div class="about-actions">
+              <button class="submit-button" type="submit"><span>Save single sign-on</span><span aria-hidden="true">→</span></button>
+              <button class="dash-version-check" id="sso-test" type="button">Test discovery</button>
+            </div>
+          </form>
         </section>
         <section class="settings-panel" id="backup-panel" role="tabpanel" aria-labelledby="backup-tab" hidden>
           <h2>Download a backup</h2>

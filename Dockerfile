@@ -36,6 +36,8 @@ COPY server.js ./server.js
 COPY acme.js ./acme.js
 COPY mail.js ./mail.js
 COPY email-headers.js ./email-headers.js
+COPY webauthn.js ./webauthn.js
+COPY oidc.js ./oidc.js
 COPY public ./public
 
 RUN mkdir -p /data && chown node:node /data

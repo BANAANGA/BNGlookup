@@ -1095,3 +1095,63 @@ document.querySelector("#restore-form").addEventListener("submit", async (event)
     button.disabled = false;
   }
 });
+
+const ssoForm = document.querySelector("#sso-form");
+const ssoStatus = document.querySelector("#sso-status");
+
+function renderSso(data) {
+  const field = (name) => ssoForm.elements[name];
+  field("enabled").checked = data.enabled;
+  field("publicUrl").value = data.publicUrl || "";
+  field("issuer").value = data.issuer || "";
+  field("clientId").value = data.clientId || "";
+  field("clientSecret").value = "";
+  field("clientSecret").placeholder = data.clientSecretSet ? "Saved; leave empty to keep it" : "Not set";
+  field("label").value = data.label || "";
+  field("scopes").value = data.scopes || "";
+  field("linkByEmail").checked = data.linkByEmail;
+  field("autoCreate").checked = data.autoCreate;
+  field("defaultRole").value = data.defaultRole || "user";
+  field("allowedDomains").value = data.allowedDomains || "";
+  document.querySelector("#sso-redirect").value = data.redirectUri;
+}
+
+function ssoBody() {
+  const field = (name) => ssoForm.elements[name];
+  return {
+    enabled: field("enabled").checked, publicUrl: field("publicUrl").value, issuer: field("issuer").value, clientId: field("clientId").value,
+    clientSecret: field("clientSecret").value, label: field("label").value, scopes: field("scopes").value, linkByEmail: field("linkByEmail").checked,
+    autoCreate: field("autoCreate").checked, defaultRole: field("defaultRole").value, allowedDomains: field("allowedDomains").value,
+  };
+}
+
+async function loadSso() {
+  try {
+    renderSso(await api("/api/admin/sso"));
+  } catch (error) {
+    ssoStatus.textContent = error.message;
+  }
+}
+
+ssoForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    renderSso(await api("/api/admin/sso", { method: "PUT", body: JSON.stringify(ssoBody()) }));
+    ssoStatus.textContent = "";
+    showAdminSuccess("Single sign-on settings saved.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+document.querySelector("#sso-test").addEventListener("click", async () => {
+  ssoStatus.textContent = "Contacting the identity provider…";
+  try {
+    const result = await api("/api/admin/sso/test", { method: "POST", body: JSON.stringify(ssoBody()) });
+    ssoStatus.textContent = `Discovery works. Sign-in page: ${result.authorization}`;
+  } catch (error) {
+    ssoStatus.textContent = error.message;
+  }
+});
+
+loadSso();

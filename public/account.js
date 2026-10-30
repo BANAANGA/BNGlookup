@@ -121,5 +121,42 @@ function startTwoFactor(challenge) {
   };
 }
 
-if (loginForm) submitAccountForm(loginForm, "/api/auth/login");
+if (loginForm) {
+  submitAccountForm(loginForm, "/api/auth/login");
+  const ssoError = new URLSearchParams(window.location.search).get("sso_error");
+  if (ssoError) showAuthError(ssoError);
+  const altLogins = document.querySelector("#alt-logins");
+  const passkeyButton = document.querySelector("#passkey-login");
+  const ssoLink = document.querySelector("#sso-login");
+  if (window.bngPasskeys?.passkeysSupported()) {
+    passkeyButton.hidden = false;
+    altLogins.hidden = false;
+    passkeyButton.addEventListener("click", async () => {
+      errorMessage.hidden = true;
+      passkeyButton.disabled = true;
+      try {
+        const result = await window.bngPasskeys.signInWithPasskey();
+        if (result.twoFactorRequired) {
+          startTwoFactor(result.challenge);
+          return;
+        }
+        window.location.assign(result.mustChangePassword ? "/change-password.html" : safeNextPath());
+      } catch (error) {
+        showAuthError(error.message);
+      } finally {
+        passkeyButton.disabled = false;
+      }
+    });
+  }
+  fetch("/api/auth/status", { credentials: "same-origin" })
+    .then((response) => response.json())
+    .then((status) => {
+      if (!status.sso) return;
+      ssoLink.textContent = `Sign in with ${status.sso.label}`;
+      ssoLink.href = `/api/auth/oidc/start?${new URLSearchParams({ next: safeNextPath() })}`;
+      ssoLink.hidden = false;
+      altLogins.hidden = false;
+    })
+    .catch(() => {});
+}
 if (changeForm) submitAccountForm(changeForm, "/api/auth/change-password", true);

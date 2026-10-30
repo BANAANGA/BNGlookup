@@ -8,6 +8,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="stylesheet" href="/styles.css">
     <script src="/branding.js" defer></script>
+    <script src="/passkeys.js" defer></script>
     <script src="/account.js" defer></script>
   </head>
   <body>
@@ -37,6 +38,11 @@
           <p class="error-message" id="twofactor-error" role="alert" hidden></p>
           <button class="submit-button" type="submit"><span>Verify</span><span aria-hidden="true">→</span></button>
         </form>
+        <div class="alt-logins" id="alt-logins" hidden>
+          <p class="alt-divider"><span>or</span></p>
+          <button class="alt-login" id="passkey-login" type="button" hidden><span aria-hidden="true">🔑</span> Sign in with a passkey</button>
+          <a class="alt-login" id="sso-login" href="/api/auth/oidc/start" hidden></a>
+        </div>
       </section>
     </main>
   </body>

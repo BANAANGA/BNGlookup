@@ -20,6 +20,8 @@ const { domainToASCII } = require("node:url");
 const { createAcmeManager } = require("./acme");
 const { sendMail, validAddress } = require("./mail");
 const { analyzeEmailHeaders, organizationalDomain } = require("./email-headers");
+const webauthn = require("./webauthn");
+const oidc = require("./oidc");
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
@@ -90,6 +92,7 @@ const staticFiles = new Set([
   "/tools.js",
   "/qr.js",
   "/landing.html",
+  "/passkeys.js",
   "/landing.js",
   "/landing.css",
   "/styles.css",
@@ -4811,6 +4814,340 @@ function zlibDecodeBuffer(body, encoding) {
   return body;
 }
 
+// ---------------------------------------------------------------- Passkeys (WebAuthn)
+
+database.exec(`
+  CREATE TABLE IF NOT EXISTS passkeys (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    credential_id TEXT NOT NULL UNIQUE,
+    public_key TEXT NOT NULL,
+    algorithm INTEGER NOT NULL,
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
+  CREATE TABLE IF NOT EXISTS oidc_identities (
+    issuer TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (issuer, subject)
+  );
+`);
+const passkeyLimits = { perUser: 10, challengeMs: 5 * 60_000 };
+const passkeyChallenges = new Map();
+
+function newPasskeyChallenge(entry) {
+  const now = Date.now();
+  for (const [id, challenge] of passkeyChallenges) if (challenge.expiresAt < now) passkeyChallenges.delete(id);
+  if (passkeyChallenges.size > 5000) passkeyChallenges.clear();
+  const id = crypto.randomBytes(18).toString("base64url");
+  const challenge = crypto.randomBytes(32).toString("base64url");
+  passkeyChallenges.set(id, { ...entry, challenge, expiresAt: now + passkeyLimits.challengeMs });
+  return { id, challenge };
+}
+
+function takePasskeyChallenge(id, type) {
+  const entry = typeof id === "string" ? passkeyChallenges.get(id) : null;
+  if (entry) passkeyChallenges.delete(id);
+  if (!entry || entry.type !== type || entry.expiresAt < Date.now()) throw new Error("This passkey request has expired; try again.");
+  return entry;
+}
+
+// The site a passkey belongs to is the origin the browser is on, which sameOrigin()
+// has already matched against the Host header.
+const passkeySite = (request) => {
+  const origin = request.headers.origin;
+  return { origin, rpId: new URL(origin).hostname };
+};
+
+const passkeyUserHandle = (userId) => crypto.createHmac("sha256", publicLookupHashKey).update(`passkey-user:${userId}`).digest().subarray(0, 16).toString("base64url");
+
+function describePasskey(row) {
+  return { id: row.id, name: row.name, createdAt: new Date(row.created_at).toISOString(), lastUsedAt: row.last_used_at ? new Date(row.last_used_at).toISOString() : null };
+}
+
+async function handlePasskeys(request, response, url) {
+  const path = url.pathname;
+  if (path === "/api/auth/passkeys/login/options" || path === "/api/auth/passkeys/login") {
+    if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed." });
+    if (!enforceSameOrigin(request, response)) return;
+    if (!allowAuthAttempt(request)) return sendJson(response, 429, { error: "Too many login attempts. Try again in 15 minutes." });
+    const body = await readAuthBody(request, response, 16384);
+    if (!body) return;
+    const { origin, rpId } = passkeySite(request);
+    if (path.endsWith("/options")) {
+      const { id, challenge } = newPasskeyChallenge({ type: "login", origin });
+      return sendJson(response, 200, { challengeId: id, publicKey: { challenge, rpId, timeout: 120000, userVerification: "preferred", allowCredentials: [] } });
+    }
+    try {
+      const pending = takePasskeyChallenge(body.challengeId, "login");
+      if (pending.origin !== origin) throw new Error("The passkey request came from a different site.");
+      const row = typeof body.id === "string" && body.id.length <= 1400
+        ? database.prepare("SELECT passkeys.*, users.username, users.role, users.must_change_password FROM passkeys JOIN users ON users.id = passkeys.user_id WHERE credential_id = ? AND users.active = 1").get(body.id)
+        : null;
+      if (!row) throw new Error("This passkey is not registered here. Log in with your password and add it on the My account page.");
+      if (body.userHandle && body.userHandle !== passkeyUserHandle(row.user_id)) throw new Error("This passkey belongs to a different account.");
+      const result = webauthn.verifyAuthentication({
+        clientDataJSON: body.clientDataJSON, authenticatorData: body.authenticatorData, signature: body.signature,
+        challenge: pending.challenge, origin, rpId, credential: { publicKey: row.public_key, algorithm: row.algorithm, signCount: row.sign_count },
+      });
+      database.prepare("UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?").run(result.signCount, Date.now(), row.id);
+      resetAuthAttempts(request);
+      const user = { id: row.user_id, username: row.username, role: row.role, must_change_password: row.must_change_password };
+      // A passkey that verified the user (PIN, fingerprint or face) counts as two factors.
+      if (!result.userVerified && twoFactorStatus(user.id).enabled) {
+        recordAdminLog("login", request, "Passkey accepted, two-factor code requested", "", 200, user.username);
+        return sendJson(response, 200, { twoFactorRequired: true, challenge: createTwoFactorChallenge(user) });
+      }
+      await establishSession(user.id, response);
+      if (!user.must_change_password) recordNmapLoginIp(request, user.username);
+      recordAdminLog("login", request, "Login successful (passkey)", row.name, 200, user.username);
+      return sendJson(response, 200, { user: { username: user.username, role: user.role }, mustChangePassword: Boolean(user.must_change_password), featureAccess: getFeatureAccess() });
+    } catch (error) {
+      recordAdminLog("login", request, "Passkey login failed", error.message.slice(0, 120), 401, null);
+      return sendJson(response, 401, { error: error.message });
+    }
+  }
+
+  const user = currentUser(request);
+  if (!user || request.apiUser) return sendJson(response, 401, { error: "Log in to manage passkeys.", loginRequired: true });
+  if (path === "/api/auth/passkeys" && request.method === "GET") {
+    const rows = database.prepare("SELECT * FROM passkeys WHERE user_id = ? ORDER BY created_at").all(user.id);
+    return sendJson(response, 200, { passkeys: rows.map(describePasskey) });
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  const deleteMatch = path.match(/^\/api\/auth\/passkeys\/(\d+)$/);
+  if (deleteMatch && request.method === "DELETE") {
+    const row = database.prepare("SELECT * FROM passkeys WHERE id = ? AND user_id = ?").get(Number(deleteMatch[1]), user.id);
+    if (!row) return sendJson(response, 404, { error: "Passkey not found." });
+    database.prepare("DELETE FROM passkeys WHERE id = ?").run(row.id);
+    recordAdminLog("audit", request, "Passkey removed", row.name, 200, user.username);
+    return sendJson(response, 200, { deleted: true });
+  }
+  if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed." });
+  const body = await readAuthBody(request, response, 65536);
+  if (!body) return;
+  const { origin, rpId } = passkeySite(request);
+  if (path === "/api/auth/passkeys/register/options") {
+    const existing = database.prepare("SELECT credential_id FROM passkeys WHERE user_id = ?").all(user.id);
+    if (existing.length >= passkeyLimits.perUser) return sendJson(response, 400, { error: `You can have at most ${passkeyLimits.perUser} passkeys.` });
+    const { id, challenge } = newPasskeyChallenge({ type: "register", userId: user.id, origin });
+    return sendJson(response, 200, {
+      challengeId: id,
+      publicKey: {
+        challenge,
+        rp: { name: getSiteTitle(), id: rpId },
+        user: { id: passkeyUserHandle(user.id), name: user.username, displayName: user.username },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -8 }, { type: "public-key", alg: -257 }],
+        timeout: 120000,
+        attestation: "none",
+        authenticatorSelection: { residentKey: "required", requireResidentKey: true, userVerification: "preferred" },
+        excludeCredentials: existing.map((row) => ({ type: "public-key", id: row.credential_id })),
+      },
+    });
+  }
+  if (path === "/api/auth/passkeys/register") {
+    try {
+      const pending = takePasskeyChallenge(body.challengeId, "register");
+      if (pending.userId !== user.id || pending.origin !== origin) throw new Error("The passkey request does not match this session.");
+      const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 60) : "Passkey";
+      const credential = webauthn.verifyRegistration({ clientDataJSON: body.clientDataJSON, attestationObject: body.attestationObject, challenge: pending.challenge, origin, rpId });
+      if (database.prepare("SELECT 1 FROM passkeys WHERE credential_id = ?").get(credential.credentialId)) throw new Error("This passkey is already registered.");
+      if (database.prepare("SELECT COUNT(*) AS count FROM passkeys WHERE user_id = ?").get(user.id).count >= passkeyLimits.perUser) throw new Error(`You can have at most ${passkeyLimits.perUser} passkeys.`);
+      database.prepare("INSERT INTO passkeys (user_id, credential_id, public_key, algorithm, sign_count, name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(user.id, credential.credentialId, credential.publicKey, credential.algorithm, credential.signCount, name, Date.now());
+      recordAdminLog("audit", request, "Passkey added", name, 201, user.username);
+      const rows = database.prepare("SELECT * FROM passkeys WHERE user_id = ? ORDER BY created_at").all(user.id);
+      return sendJson(response, 201, { passkeys: rows.map(describePasskey) });
+    } catch (error) {
+      return sendJson(response, 400, { error: error.message });
+    }
+  }
+  sendJson(response, 404, { error: "Not found." });
+}
+
+// ---------------------------------------------------------------- Single sign-on (OpenID Connect)
+
+const ssoDefaults = { enabled: false, issuer: "", clientId: "", clientSecret: "", label: "Single sign-on", scopes: "openid email profile",
+  publicUrl: "", autoCreate: false, defaultRole: "user", allowedDomains: "", linkByEmail: false };
+const ssoStates = new Map();
+
+function readSsoConfig() {
+  let saved = {};
+  try {
+    saved = JSON.parse(database.prepare("SELECT value FROM app_settings WHERE key = 'sso_config'").get()?.value || "{}");
+  } catch {
+    saved = {};
+  }
+  return { ...ssoDefaults, ...saved };
+}
+
+function ssoPublicUrl(request, config = readSsoConfig()) {
+  if (config.publicUrl) return config.publicUrl;
+  const remote = normalizeIpAddress(request.socket.remoteAddress);
+  const forwarded = String(request.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  const secure = request.socket.encrypted || process.env.COOKIE_SECURE === "true" || (remote && isTrustedProxy(remote) && forwarded === "https");
+  return `${secure ? "https" : "http"}://${request.headers.host}`;
+}
+
+const ssoRedirectUri = (request, config) => `${ssoPublicUrl(request, config)}/api/auth/oidc/callback`;
+
+function ssoLoginError(response, message) {
+  sendRedirect(response, `/login.html?${new URLSearchParams({ sso_error: message.slice(0, 200) })}`);
+}
+
+function ssoUsernameFrom(claims) {
+  const base = String(claims.preferred_username || (claims.email || "").split("@")[0] || claims.name || "user")
+    .normalize("NFKD").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 28) || "user";
+  const padded = base.length >= 3 ? base : `${base}user`.slice(0, 28);
+  for (let suffix = 0; suffix < 1000; suffix += 1) {
+    const name = suffix ? `${padded}${suffix}` : padded;
+    if (!database.prepare("SELECT 1 FROM users WHERE username = ?").get(name)) return name;
+  }
+  return `user${crypto.randomBytes(4).toString("hex")}`;
+}
+
+async function handleOidc(request, response, url) {
+  const config = readSsoConfig();
+  if (!config.enabled || !config.issuer || !config.clientId) return ssoLoginError(response, "Single sign-on is not set up.");
+  if (url.pathname === "/api/auth/oidc/start") {
+    try {
+      const next = String(url.searchParams.get("next") || "/");
+      const redirectUri = ssoRedirectUri(request, config);
+      const login = await oidc.startLogin({ issuer: config.issuer, clientId: config.clientId, redirectUri, scopes: config.scopes });
+      const now = Date.now();
+      for (const [state, entry] of ssoStates) if (entry.expiresAt < now) ssoStates.delete(state);
+      if (ssoStates.size > 5000) ssoStates.clear();
+      const browser = crypto.randomBytes(24).toString("base64url");
+      ssoStates.set(login.state, { nonce: login.nonce, verifier: login.verifier, redirectUri, browser, next: /^\/(?!\/)[^\s\\]*$/.test(next) ? next : "/", expiresAt: now + 10 * 60_000 });
+      // The cookie ties the callback to the browser that started the sign-in.
+      response.setHeader("set-cookie", `bnglookup_sso=${browser}; Path=/api/auth/oidc; HttpOnly; SameSite=Lax; Max-Age=600${cookieSecureAttribute(response)}`);
+      response.writeHead(302, { location: login.url, "cache-control": "no-store" });
+      return response.end();
+    } catch (error) {
+      return ssoLoginError(response, `Single sign-on failed: ${error.message}`);
+    }
+  }
+  // Callback from the identity provider.
+  const state = url.searchParams.get("state") || "";
+  const pending = ssoStates.get(state);
+  ssoStates.delete(state);
+  response.setHeader("set-cookie", `bnglookup_sso=; Path=/api/auth/oidc; HttpOnly; SameSite=Lax; Max-Age=0${cookieSecureAttribute(response)}`);
+  if (!pending || pending.expiresAt < Date.now() || readCookie(request, "bnglookup_sso") !== pending.browser) {
+    return ssoLoginError(response, "The sign-in took too long or was started in another browser. Try again.");
+  }
+  if (url.searchParams.get("error")) return ssoLoginError(response, `The identity provider refused the sign-in: ${url.searchParams.get("error_description") || url.searchParams.get("error")}`);
+  let claims;
+  try {
+    claims = await oidc.finishLogin({ issuer: config.issuer, clientId: config.clientId, clientSecret: config.clientSecret, redirectUri: pending.redirectUri, code: url.searchParams.get("code") || "", verifier: pending.verifier, nonce: pending.nonce });
+  } catch (error) {
+    recordAdminLog("login", request, "Single sign-on failed", error.message.slice(0, 120), 401, null);
+    return ssoLoginError(response, `Single sign-on failed: ${error.message}`);
+  }
+  const email = typeof claims.email === "string" && claims.email_verified !== false ? claims.email.trim().toLowerCase() : "";
+  let row = database.prepare("SELECT users.* FROM oidc_identities JOIN users ON users.id = oidc_identities.user_id WHERE issuer = ? AND subject = ?").get(config.issuer, claims.sub);
+  // Users enter their own email address, so linking by email trusts those addresses; it is
+  // off by default and never links when more than one account uses the address.
+  if (!row && config.linkByEmail && email && claims.email_verified === true) {
+    const matches = database.prepare("SELECT * FROM users WHERE lower(email) = ? LIMIT 2").all(email);
+    row = matches.length === 1 ? matches[0] : null;
+    if (matches.length > 1) return ssoLoginError(response, "More than one account uses your email address. Ask an administrator to link your sign-in.");
+    if (row) database.prepare("INSERT OR IGNORE INTO oidc_identities (issuer, subject, user_id, created_at) VALUES (?, ?, ?, ?)").run(config.issuer, claims.sub, row.id, Date.now());
+  }
+  if (!row && config.autoCreate) {
+    const domains = config.allowedDomains.split(/[\s,]+/).map((domain) => domain.trim().toLowerCase()).filter(Boolean);
+    if (domains.length && !domains.includes(email.split("@")[1] || "")) {
+      return ssoLoginError(response, "Your account is not from an allowed email domain. Ask an administrator for access.");
+    }
+    const username = ssoUsernameFrom(claims);
+    const salt = crypto.randomBytes(16).toString("hex");
+    const unusable = crypto.randomBytes(64).toString("hex");
+    const created = database.prepare("INSERT INTO users (username, password_hash, password_salt, role, email) VALUES (?, ?, ?, ?, ?)")
+      .run(username, unusable, salt, config.defaultRole === "admin" ? "admin" : "user", email || null);
+    database.prepare("INSERT INTO oidc_identities (issuer, subject, user_id, created_at) VALUES (?, ?, ?, ?)").run(config.issuer, claims.sub, created.lastInsertRowid, Date.now());
+    row = database.prepare("SELECT * FROM users WHERE id = ?").get(created.lastInsertRowid);
+    recordAdminLog("audit", request, "User created by single sign-on", `${username}${email ? ` (${email})` : ""}`, 201, username);
+  }
+  if (!row) {
+    recordAdminLog("login", request, "Single sign-on: no matching account", email || claims.sub, 403, null);
+    return ssoLoginError(response, "There is no account for this sign-in. Ask an administrator to create one or to link it to your email address.");
+  }
+  if (!row.active) return ssoLoginError(response, "This account is disabled.");
+  await establishSession(row.id, response);
+  recordNmapLoginIp(request, row.username);
+  recordAdminLog("login", request, "Login successful (single sign-on)", email || claims.sub, 200, row.username);
+  // The session cookie is SameSite=Strict, so it is not sent on a redirect chain that began
+  // at the identity provider. A same-site page that moves on by itself starts a fresh navigation.
+  const next = pending.next.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+  response.end(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${next}"><title>Signing in</title><p>Signing you in… <a href="${next}">Continue</a></p>`);
+}
+
+function ssoAdminResponse(request) {
+  const config = readSsoConfig();
+  return { ...config, clientSecret: "", clientSecretSet: Boolean(config.clientSecret), redirectUri: ssoRedirectUri(request, config) };
+}
+
+function handleAdminSso(request, response, url) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") return sendJson(response, 200, ssoAdminResponse(request));
+  if (!["PUT", "POST"].includes(request.method)) return sendJson(response, 405, { error: "Method not allowed." });
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response, 16384).then(async (body) => {
+    if (!body) return;
+    const current = readSsoConfig();
+    let issuer = "";
+    try {
+      issuer = body.issuer ? oidc.issuerUrl(body.issuer) : "";
+    } catch (error) {
+      return sendJson(response, 400, { error: error.message });
+    }
+    if (url.pathname === "/api/admin/sso/test") {
+      if (!issuer) return sendJson(response, 400, { error: "Enter the issuer URL first." });
+      try {
+        const config = await oidc.discover(issuer);
+        return sendJson(response, 200, { ok: true, authorization: config.authorization_endpoint, token: config.token_endpoint, jwks: config.jwks_uri });
+      } catch (error) {
+        return sendJson(response, 400, { error: `Discovery failed: ${error.message}` });
+      }
+    }
+    const text = (value, max) => (typeof value === "string" ? value.trim().replace(/[\u0000-\u001f\u007f]/g, "").slice(0, max) : "");
+    let publicUrl = text(body.publicUrl, 200).replace(/\/$/, "");
+    if (publicUrl) {
+      try {
+        const parsed = new URL(publicUrl);
+        if (!["http:", "https:"].includes(parsed.protocol) || parsed.pathname !== "/" || parsed.search) throw new Error();
+        publicUrl = parsed.origin;
+      } catch {
+        return sendJson(response, 400, { error: "The public address must look like https://lookup.example.com." });
+      }
+    }
+    const next = {
+      enabled: body.enabled === true,
+      issuer,
+      clientId: text(body.clientId, 200),
+      clientSecret: typeof body.clientSecret === "string" && body.clientSecret ? body.clientSecret.slice(0, 500) : current.clientSecret,
+      label: text(body.label, 40) || ssoDefaults.label,
+      scopes: /^[\w :./-]{6,200}$/.test(body.scopes || "") && /\bopenid\b/.test(body.scopes) ? body.scopes.trim() : ssoDefaults.scopes,
+      publicUrl,
+      autoCreate: body.autoCreate === true,
+      defaultRole: body.defaultRole === "admin" ? "admin" : "user",
+      allowedDomains: text(body.allowedDomains, 500),
+      linkByEmail: body.linkByEmail === true,
+    };
+    if (body.clearSecret === true) next.clientSecret = "";
+    if (next.enabled && (!next.issuer || !next.clientId)) return sendJson(response, 400, { error: "Enter the issuer and client ID before turning single sign-on on." });
+    database.prepare("INSERT INTO app_settings (key, value) VALUES ('sso_config', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(next));
+    recordAdminLog("audit", request, "Single sign-on settings saved", `${next.enabled ? "on" : "off"} ${next.issuer}`, 200, admin.username);
+    sendJson(response, 200, ssoAdminResponse(request));
+  });
+}
+
 // ---------------------------------------------------------------- Backup and restore
 
 const backupLimits = { uploadBytes: 256 * 1024 * 1024, fileBytes: 2 * 1024 * 1024 * 1024 };
@@ -7559,6 +7896,7 @@ function handleAuthStatus(request, response) {
     features: featureNames,
     previewAvailable: previewsAvailable(),
     publicLookupLimit: getPublicAccess().dailyLimit,
+    sso: readSsoConfig().enabled ? { label: readSsoConfig().label } : null,
   });
 }
 
@@ -11537,6 +11875,28 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       console.error("API token request failed:", error);
       if (!response.headersSent) sendJson(response, 500, { error: "Unable to manage API tokens." });
     });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/passkeys" || url.pathname.startsWith("/api/auth/passkeys/")) {
+    void handlePasskeys(request, response, url).catch((error) => {
+      console.error("Passkey request failed:", error);
+      if (!response.headersSent) sendJson(response, 500, { error: "The passkey request could not be completed." });
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/oidc/start" || url.pathname === "/api/auth/oidc/callback") {
+    if (request.method !== "GET") return sendJson(response, 405, { error: "Method not allowed." });
+    void handleOidc(request, response, url).catch((error) => {
+      console.error("Single sign-on failed:", error);
+      if (!response.headersSent) ssoLoginError(response, "Single sign-on failed.");
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/admin/sso" || url.pathname === "/api/admin/sso/test") {
+    handleAdminSso(request, response, url);
     return;
   }
 
