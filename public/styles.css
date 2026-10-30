@@ -1600,3 +1600,8 @@ footer a:hover { color: #e4ffef; }
 .security-builder input, .site-file textarea { min-width: 0; height: 36px; padding: 0 10px; border: 1px solid #333; border-radius: 6px; color: #e9e9e9; background: #080808; font: inherit; font-size: 14px; color-scheme: dark; }
 .site-file textarea { height: auto; padding: 9px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .security-builder label { color: #c8c8c8; font-size: 13px; }
+
+.public-access { display: grid; gap: 8px; margin-top: 8px; }
+.public-access input[type="number"] { max-width: 160px; }
+.public-access textarea { min-height: 70px; padding: 9px 10px; border: 1px solid #333; border-radius: 6px; color: #e9e9e9; background: #080808; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; resize: vertical; }
+.public-access label:not(.form-checkbox) { color: #c8c8c8; font-size: 13px; margin-top: 6px; }

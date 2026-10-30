@@ -572,6 +572,9 @@ async function initializeAccount() {
     lookupForm.hidden = !initialTab;
     loginRequiredNotice.hidden = Boolean(initialTab);
     guestUsageNotice.hidden = !initialTab || Boolean(authState.user);
+    if (authState.publicLookupLimit) {
+      guestUsageNotice.textContent = `Public lookups are limited to ${authState.publicLookupLimit.toLocaleString()} per IP address each day (reset at 00:00 UTC).`;
+    }
     if (!initialTab && authState.user) {
       loginRequiredMessage.textContent = "No lookup tools are available to your account. Contact an administrator.";
       toolsLoginLink.hidden = true;

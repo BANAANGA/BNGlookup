@@ -129,6 +129,19 @@
             </label>
             <p class="form-hint" id="cloudflare-proxy-status">When enabled, official Cloudflare IPv4 and IPv6 ranges are refreshed automatically. Cloudflare Tunnel users must also trust the local cloudflared connector address.</p>
             <button class="submit-button" type="submit"><span>Save access settings</span><span aria-hidden="true">→</span></button>
+            <div class="public-access" id="public-access">
+              <h2 class="policy-heading">Public lookup limits</h2>
+              <p class="form-hint">Visitors who are not logged in may use the public tools this many times per IP address each day (reset at 00:00 UTC). A whole landing page scan counts as one.</p>
+              <label for="public-daily-limit">Lookups per IP per day</label>
+              <input id="public-daily-limit" type="number" min="1" max="100000" step="1">
+              <label for="public-unlimited">No limit for these networks</label>
+              <textarea id="public-unlimited" rows="3" maxlength="12288" spellcheck="false" placeholder="One address or CIDR per line, for example&#10;192.0.2.0/24&#10;2001:db8::/48"></textarea>
+              <label for="public-blocked">Blocked networks</label>
+              <textarea id="public-blocked" rows="3" maxlength="12288" spellcheck="false" placeholder="One address or CIDR per line (IPv4 /8 or smaller, IPv6 /16 or smaller)"></textarea>
+              <label class="form-checkbox" for="public-block-site"><input id="public-block-site" type="checkbox"> Block the whole site for these networks, not only public lookups</label>
+              <p class="form-hint" id="public-access-status"></p>
+              <button class="submit-button" id="public-access-save" type="button"><span>Save public limits</span><span aria-hidden="true">→</span></button>
+            </div>
           </section>
           <section class="settings-panel" id="port-scan-panel" role="tabpanel" aria-labelledby="port-scan-tab" hidden>
             <h2>Port scan policy</h2>

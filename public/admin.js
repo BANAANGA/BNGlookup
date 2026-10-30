@@ -981,3 +981,46 @@ siteChangePassword.addEventListener("change", async () => {
 });
 
 loadSiteFiles();
+
+const publicAccessFields = {
+  dailyLimit: document.querySelector("#public-daily-limit"),
+  unlimited: document.querySelector("#public-unlimited"),
+  blocked: document.querySelector("#public-blocked"),
+  blockSite: document.querySelector("#public-block-site"),
+};
+const publicAccessStatus = document.querySelector("#public-access-status");
+
+function renderPublicAccess(data) {
+  publicAccessFields.dailyLimit.value = data.dailyLimit;
+  publicAccessFields.unlimited.value = data.unlimited;
+  publicAccessFields.blocked.value = data.blocked;
+  publicAccessFields.blockSite.checked = data.blockSite;
+  publicAccessStatus.textContent = data.yourAddress ? `Your address as seen by the server: ${data.yourAddress}` : "";
+}
+
+async function loadPublicAccess() {
+  try {
+    renderPublicAccess(await api("/api/admin/public-access"));
+  } catch (error) {
+    publicAccessStatus.textContent = error.message;
+  }
+}
+
+document.querySelector("#public-access-save").addEventListener("click", async () => {
+  try {
+    renderPublicAccess(await api("/api/admin/public-access", {
+      method: "PUT",
+      body: JSON.stringify({
+        dailyLimit: Number(publicAccessFields.dailyLimit.value),
+        unlimited: publicAccessFields.unlimited.value,
+        blocked: publicAccessFields.blocked.value,
+        blockSite: publicAccessFields.blockSite.checked,
+      }),
+    }));
+    showAdminSuccess("Public lookup limits saved.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+loadPublicAccess();

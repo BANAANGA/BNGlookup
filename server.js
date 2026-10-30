@@ -209,7 +209,6 @@ const portScanPolicyDefaults = {
 const zmapEnabled = process.env.ZMAP_ENABLED === "true";
 const zmapRateLimits = { min: 1000, max: 100000 };
 const bulkScanLimits = { tcpConnect: 256, zmapIpv4: 65536 };
-const publicLookupDailyLimit = 15;
 database.exec(`
   PRAGMA foreign_keys = ON;
   PRAGMA journal_mode = WAL;
@@ -4630,6 +4629,114 @@ function zlibDecodeBuffer(body, encoding) {
   return body;
 }
 
+// ---------------------------------------------------------------- Public lookup limits and IP lists
+
+const publicAccessDefaults = { dailyLimit: 15, unlimited: [], blocked: [], blockSite: false };
+let publicAccessCache = null;
+
+// Parses one CIDR or address per line; minPrefix stops a block list from covering everyone.
+function parseAccessRanges(value, label, minPrefix) {
+  if (typeof value !== "string" || value.length > 12288) throw new Error(`The ${label} list is too long.`);
+  const entries = [...new Set(value.split(/[,\s]+/).map((entry) => entry.trim()).filter(Boolean))];
+  if (entries.length > 500) throw new Error(`The ${label} list may contain at most 500 entries.`);
+  const ranges = new net.BlockList();
+  for (const entry of entries) {
+    const [address, prefixText, ...extra] = entry.split("/");
+    const family = isIP(address);
+    const maxPrefix = family === 4 ? 32 : 128;
+    const prefix = prefixText === undefined ? maxPrefix : Number(prefixText);
+    const lowest = family === 4 ? minPrefix.ipv4 : minPrefix.ipv6;
+    if (!family || extra.length || (prefixText !== undefined && !/^\d+$/.test(prefixText)) || prefix < lowest || prefix > maxPrefix) {
+      throw new Error(`Invalid ${label} entry: ${entry}. Use an address or CIDR (IPv4 /${minPrefix.ipv4}–/32, IPv6 /${minPrefix.ipv6}–/128).`);
+    }
+    ranges.addSubnet(address, prefix, family === 4 ? "ipv4" : "ipv6");
+  }
+  return { entries, ranges };
+}
+
+function getPublicAccess() {
+  if (publicAccessCache) return publicAccessCache;
+  let saved = {};
+  try {
+    saved = JSON.parse(database.prepare("SELECT value FROM app_settings WHERE key = 'public_access'").get()?.value || "{}");
+  } catch {
+    saved = {};
+  }
+  const safe = (list, label, minPrefix) => {
+    try {
+      return parseAccessRanges((Array.isArray(list) ? list : []).join("\n"), label, minPrefix);
+    } catch {
+      return { entries: [], ranges: new net.BlockList() };
+    }
+  };
+  publicAccessCache = {
+    dailyLimit: Number.isInteger(saved.dailyLimit) ? saved.dailyLimit : publicAccessDefaults.dailyLimit,
+    unlimited: safe(saved.unlimited, "unlimited", { ipv4: 0, ipv6: 0 }),
+    blocked: safe(saved.blocked, "blocked", { ipv4: 8, ipv6: 16 }),
+    blockSite: saved.blockSite === true,
+  };
+  return publicAccessCache;
+}
+
+function addressInRanges(ranges, address) {
+  const plain = String(address || "").replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/i, "");
+  const family = isIP(plain);
+  return Boolean(family) && ranges.check(plain, family === 4 ? "ipv4" : "ipv6");
+}
+
+function publicAccessResponse(request) {
+  const access = getPublicAccess();
+  return {
+    dailyLimit: access.dailyLimit,
+    unlimited: access.unlimited.entries.join("\n"),
+    blocked: access.blocked.entries.join("\n"),
+    blockSite: access.blockSite,
+    yourAddress: getClientAddress(request) || null,
+  };
+}
+
+function handleAdminPublicAccess(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") {
+    sendJson(response, 200, publicAccessResponse(request));
+    return;
+  }
+  if (request.method !== "PUT") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response, 65536).then((body) => {
+    if (!body) return;
+    const dailyLimit = Number(body.dailyLimit);
+    if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 100000) {
+      return sendJson(response, 400, { error: "The daily limit must be a whole number from 1 to 100,000." });
+    }
+    if (typeof body.blockSite !== "boolean") return sendJson(response, 400, { error: "Choose what blocked networks may do." });
+    let unlimited;
+    let blocked;
+    try {
+      unlimited = parseAccessRanges(body.unlimited ?? "", "unlimited", { ipv4: 0, ipv6: 0 });
+      blocked = parseAccessRanges(body.blocked ?? "", "blocked", { ipv4: 8, ipv6: 16 });
+    } catch (error) {
+      return sendJson(response, 400, { error: error.message });
+    }
+    const own = getClientAddress(request);
+    if (body.blockSite && own && addressInRanges(blocked.ranges, own)) {
+      return sendJson(response, 400, { error: `Your own address (${own}) is in the blocked list, so this would lock you out. Remove it or only block public lookups.` });
+    }
+    database.prepare(`
+      INSERT INTO app_settings (key, value) VALUES ('public_access', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(JSON.stringify({ dailyLimit, unlimited: unlimited.entries, blocked: blocked.entries, blockSite: body.blockSite }));
+    publicAccessCache = null;
+    recordAdminLog("audit", request, "Public access limits updated",
+      `${dailyLimit}/day, ${unlimited.entries.length} unlimited, ${blocked.entries.length} blocked${body.blockSite ? " (whole site)" : ""}`, 200, admin.username);
+    sendJson(response, 200, publicAccessResponse(request));
+  });
+}
+
 // ---------------------------------------------------------------- Site files (robots.txt, security.txt, …)
 
 const siteFiles = {
@@ -4880,7 +4987,7 @@ function publicLandingConfig(config = readLandingConfig()) {
     content: config.content,
     background: config.background ? { url: `/landing/background?v=${encodeURIComponent(config.background.updatedAt)}` } : null,
     publicFeatures: Object.entries(access).filter(([, level]) => level === "public").map(([feature]) => feature),
-    dailyLimit: publicLookupDailyLimit,
+    dailyLimit: getPublicAccess().dailyLimit,
   };
 }
 
@@ -7000,6 +7107,7 @@ function handleAuthStatus(request, response) {
     featureAccess: getFeatureAccess(),
     features: featureNames,
     previewAvailable: previewsAvailable(),
+    publicLookupLimit: getPublicAccess().dailyLimit,
   });
 }
 
@@ -9060,6 +9168,13 @@ function consumePublicLookup(request, response) {
     lastPublicQuotaCleanupDate = utcDate;
   }
   const clientAddress = getClientAddress(request) || "unknown";
+  const access = getPublicAccess();
+  const publicLookupDailyLimit = access.dailyLimit;
+  if (addressInRanges(access.blocked.ranges, clientAddress)) {
+    sendJson(response, 403, { error: "Public lookups from your network are blocked by the administrator. Log in to continue." });
+    return false;
+  }
+  if (addressInRanges(access.unlimited.ranges, clientAddress)) return true;
   const clientHash = crypto
     .createHmac("sha256", publicLookupHashKey)
     .update(clientAddress)
@@ -9085,7 +9200,7 @@ function consumePublicLookup(request, response) {
 
   response.setHeader("retry-after", String(Math.ceil((resetAt - now.getTime()) / 1000)));
   sendJson(response, 429, {
-    error: "Daily public lookup limit reached (15 lookups per IP). Try again after 00:00 UTC.",
+    error: `Daily public lookup limit reached (${publicLookupDailyLimit} lookups per IP). Try again after 00:00 UTC.`,
     limit: publicLookupDailyLimit,
     remaining: 0,
     resetAt: new Date(resetAt).toISOString(),
@@ -10775,6 +10890,12 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     response.end(request.method === "HEAD" ? undefined : "ok\n");
     return;
   }
+  const publicAccess = getPublicAccess();
+  if (publicAccess.blockSite && publicAccess.blocked.entries.length && addressInRanges(publicAccess.blocked.ranges, getClientAddress(request))) {
+    response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+    response.end("Access from your network is blocked.\n");
+    return;
+  }
   const challengePrefix = "/.well-known/acme-challenge/";
   if (url.pathname.startsWith(challengePrefix)) {
     const keyAuthorization = request.method === "GET"
@@ -11065,6 +11186,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     handleLandingStart(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/public-access") {
+    handleAdminPublicAccess(request, response);
     return;
   }
 
