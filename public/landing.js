@@ -811,6 +811,23 @@ function animateNumber(element, to) {
   requestAnimationFrame(step);
 }
 
+// A card's status always follows from its findings: "Problem" means at least one serious
+// finding and "Attention" at least one warning. The tab badges, the summary and the cards
+// then all count the same findings.
+function alignStatus(job) {
+  const view = job.view;
+  view.issues = view.issues || [];
+  const has = (severity) => view.issues.some((issue) => issue.severity === severity);
+  const promote = (from, to) => {
+    const issue = view.issues.find((item) => from.includes(item.severity));
+    if (issue) issue.severity = to;
+    else view.issues.unshift({ severity: to, message: view.summary || `${job.title} needs attention.` });
+  };
+  if (view.status === "bad" && !has("high")) promote(["medium", "low"], "high");
+  if (view.status === "warn" && !has("high") && !has("medium")) promote(["low"], "medium");
+  view.status = has("high") ? "bad" : has("medium") ? "warn" : view.status === "info" ? "info" : "good";
+}
+
 function categoryState(id) {
   const jobs = page.jobs.filter((job) => id === "overview" || job.category === id);
   const busy = jobs.some((job) => !job.done);
@@ -835,10 +852,10 @@ function updateSummary() {
   byId("summary-text").textContent = done
     ? `${plural(page.jobs.length, "check")} finished${all.issues.length ? ` · ${plural(all.issues.length, "point")} to look at` : " · no problems found"}.`
     : `Running ${plural(page.jobs.length, "check")}… ${finished.length} done.`;
-  const counts = { good: 0, warn: 0, bad: 0 };
-  for (const job of scored) counts[job.view.status] += 1;
+  const passed = scored.filter((job) => job.view.status === "good").length;
+  const counts = { warn: all.issues.filter((issue) => issue.severity === "medium").length, bad: all.issues.filter((issue) => issue.severity === "high").length };
   byId("summary-counts").innerHTML = [
-    counts.good && `<span class="pill good">${counts.good} good</span>`,
+    passed && `<span class="pill good">${plural(passed, "check")} passed</span>`,
     counts.warn && `<span class="pill warn">${counts.warn} attention</span>`,
     counts.bad && `<span class="pill bad">${counts.bad} ${counts.bad === 1 ? "problem" : "problems"}</span>`,
   ].filter(Boolean).join("");
@@ -951,7 +968,7 @@ async function startScan() {
       if (run !== page.run) return;
       job.data = data;
       job.view = job.render(data);
-      job.view.issues = job.view.issues || [];
+      alignStatus(job);
     } catch (error) {
       if (run !== page.run) return;
       job.error = error.message;
