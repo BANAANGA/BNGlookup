@@ -820,6 +820,18 @@ async function startScan() {
 
 // ------------------------------------------------------------------ Start
 
+// Logged-in users switch between the simple and the full interface; the choice is kept
+// in a cookie for this browser and "/" serves the chosen one.
+function setupInterfaceSwitch(button, target) {
+  button.hidden = false;
+  button.addEventListener("click", () => {
+    button.setAttribute("aria-checked", String(target === "full"));
+    const secure = window.location.protocol === "https:" ? "; secure" : "";
+    document.cookie = `bng_ui=${target}; path=/; max-age=31536000; samesite=lax${secure}`;
+    window.setTimeout(() => window.location.assign("/"), 280);
+  });
+}
+
 async function init() {
   byId("scan-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -837,8 +849,8 @@ async function init() {
     page.config = { theme: {}, content: { headline: "DNS lookup", button: "Scan" }, publicFeatures: [] };
   }
   if (page.auth?.user) {
-    byId("login-label").textContent = "Open app";
-    byId("login-chip").href = "/";
+    byId("login-chip").hidden = true;
+    if (!page.preview) setupInterfaceSwitch(byId("ui-switch"), "full");
   }
   applyConfig(page.config);
   document.body.classList.remove("is-loading");
