@@ -167,8 +167,8 @@ function classify(raw) {
   return { kind: "domain", value };
 }
 
-async function api(url) {
-  const response = await fetch(url, { credentials: "same-origin", headers: { "x-landing-scan": page.token } });
+async function api(url, token = page.token) {
+  const response = await fetch(url, { credentials: "same-origin", headers: { "x-landing-scan": token } });
   let data = null;
   try {
     data = await response.json();
@@ -181,14 +181,16 @@ async function api(url) {
 
 const query = (path, params) => `${path}?${new URLSearchParams(params)}`;
 
-async function pingTarget(name) {
-  const icmp = await api(query("/api/ping", { name }));
+async function pingTarget(name, call = api) {
+  const icmp = await call(query("/api/ping", { name }));
   if (icmp.up || !/not available/i.test(icmp.error || "")) return icmp;
-  return api(query("/api/ping", { name, method: "https" }));
+  return call(query("/api/ping", { name, method: "https" }));
 }
 
-function planJobs(target, allowed) {
+// token is the landing scan token the tool calls use (each compared scan has its own).
+function planJobs(target, allowed, token) {
   const name = target.value;
+  const call = (url) => api(url, token ?? page.token);
   const jobs = [];
   const add = (feature, job) => {
     if (allowed.has(feature)) jobs.push({ feature, ...job });
@@ -197,27 +199,27 @@ function planJobs(target, allowed) {
     add("forward", {
       id: "records", category: "dns", title: "DNS records", render: renderRecords,
       load: async () => Object.fromEntries(await Promise.all(["A", "AAAA", "MX", "NS", "TXT", "CAA"]
-        .map(async (type) => [type, await api(query("/api/lookup", { name, type }))]))),
+        .map(async (type) => [type, await call(query("/api/lookup", { name, type }))]))),
     });
-    add("forward", { id: "dnssec", category: "dns", title: "DNSSEC", render: renderDnssec, load: () => api(query("/api/lookup", { name, type: "DNSSEC" })) });
-    add("whois", { id: "whois", category: "dns", title: "Registration", render: renderWhois, load: () => api(query("/api/domain-info", { name })) });
-    add("propagation", { id: "propagation", category: "dns", title: "Propagation", render: renderPropagation, load: () => api(query("/api/propagation", { name, type: "A" })) });
-    add("dns-health", { id: "dns-health", category: "dns", title: "Name server health", render: renderDnsHealth, load: () => api(query("/api/dns-health", { name })) });
-    add("email", { id: "email", category: "email", title: "Email security", render: renderEmail, load: () => api(query("/api/email-check", { name })) });
-    add("web", { id: "web", category: "web", title: "Website", render: renderWeb, load: () => api(query("/api/web-check", { name })) });
-    add("sslscan", { id: "tls", category: "web", title: "TLS certificate", render: renderTls, load: () => api(query("/api/sslscan", { name, port: "443" })) });
-    add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => api(query("/api/reputation", { name })) });
-    add("lookalike", { id: "lookalike", category: "security", title: "Look-alike domains", render: renderLookalike, load: () => api(query("/api/lookalike", { name })) });
-    add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name) });
-    add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => api(query("/api/asn", { name })) });
+    add("forward", { id: "dnssec", category: "dns", title: "DNSSEC", render: renderDnssec, load: () => call(query("/api/lookup", { name, type: "DNSSEC" })) });
+    add("whois", { id: "whois", category: "dns", title: "Registration", render: renderWhois, load: () => call(query("/api/domain-info", { name })) });
+    add("propagation", { id: "propagation", category: "dns", title: "Propagation", render: renderPropagation, load: () => call(query("/api/propagation", { name, type: "A" })) });
+    add("dns-health", { id: "dns-health", category: "dns", title: "Name server health", render: renderDnsHealth, load: () => call(query("/api/dns-health", { name })) });
+    add("email", { id: "email", category: "email", title: "Email security", render: renderEmail, load: () => call(query("/api/email-check", { name })) });
+    add("web", { id: "web", category: "web", title: "Website", render: renderWeb, load: () => call(query("/api/web-check", { name })) });
+    add("sslscan", { id: "tls", category: "web", title: "TLS certificate", render: renderTls, load: () => call(query("/api/sslscan", { name, port: "443" })) });
+    add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => call(query("/api/reputation", { name })) });
+    add("lookalike", { id: "lookalike", category: "security", title: "Look-alike domains", render: renderLookalike, load: () => call(query("/api/lookalike", { name })) });
+    add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name, call) });
+    add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => call(query("/api/asn", { name })) });
   } else if (target.kind === "ip") {
-    add("reverse", { id: "reverse", category: "dns", title: "Reverse DNS", render: renderReverse, load: () => api(query("/api/lookup", { name, reverse: "true" })) });
-    add("whois", { id: "whois", category: "dns", title: "IP registration", render: renderIpWhois, load: () => api(query("/api/domain-info", { name })) });
-    add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => api(query("/api/reputation", { name })) });
-    add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name) });
-    add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => api(query("/api/asn", { name })) });
+    add("reverse", { id: "reverse", category: "dns", title: "Reverse DNS", render: renderReverse, load: () => call(query("/api/lookup", { name, reverse: "true" })) });
+    add("whois", { id: "whois", category: "dns", title: "IP registration", render: renderIpWhois, load: () => call(query("/api/domain-info", { name })) });
+    add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => call(query("/api/reputation", { name })) });
+    add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name, call) });
+    add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => call(query("/api/asn", { name })) });
   } else {
-    add("mac", { id: "mac", category: "network", title: "MAC address vendor", render: renderMac, load: () => api(query("/api/mac-lookup", { name })) });
+    add("mac", { id: "mac", category: "network", title: "MAC address vendor", render: renderMac, load: () => call(query("/api/mac-lookup", { name })) });
   }
   return jobs;
 }
@@ -1048,6 +1050,8 @@ async function startScan() {
   page.jobs = jobs;
   page.target = target;
   page.shared = null;
+  page.compare = null;
+  byId("compare").hidden = true;
   page.scannedAt = new Date();
   document.body.classList.add("has-results");
   byId("results").hidden = false;
@@ -1080,6 +1084,203 @@ async function startScan() {
   if (run !== page.run) return;
   document.body.classList.remove("is-scanning");
   byId("scan-button").disabled = false;
+}
+
+// ------------------------------------------------------------------ Compare two domains
+
+const statusRank = { good: 3, info: 2, warn: 1, bad: 0 };
+
+function scoreOf(jobs) {
+  const scored = jobs.filter((job) => job.done && job.view && job.view.status !== "info");
+  const points = { good: 100, warn: 60, bad: 15 };
+  const score = scored.length ? Math.round(scored.reduce((sum, job) => sum + points[job.view.status], 0) / scored.length) : 0;
+  return { score, tone: !scored.length ? "" : score >= 80 ? "good" : score >= 50 ? "warn" : "bad" };
+}
+
+function findingCount(jobs) {
+  return jobs.flatMap((job) => (job.view?.issues || []).filter((issue) => severityRank[issue.severity] >= 2)).length;
+}
+
+function compareCell(job) {
+  if (!job) return '<span class="card-summary">—</span>';
+  if (!job.done) return '<span class="skeleton short"></span>';
+  if (job.error) return '<span class="pill info">Not available</span>';
+  const count = (job.view.issues || []).filter((issue) => severityRank[issue.severity] >= 2).length;
+  return `<span class="pill ${job.view.status}">${statusWords[job.view.status]}</span>${job.view.grade ? ` <span class="compare-grade ${job.view.status}">${escapeHtml(job.view.grade)}</span>` : ""}${count ? ` <span class="compare-count">${plural(count, "finding")}</span>` : ""}`;
+}
+
+function buildCompare() {
+  const [left, right] = page.compare;
+  const section = byId("compare");
+  const ring = (side) => `<div class="ring" id="compare-ring-${side}"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="ring-track" cx="50" cy="50" r="42"/><circle class="ring-value" cx="50" cy="50" r="42"/></svg>
+    <div class="ring-label"><span><span class="compare-number">0</span><small>Score</small></span></div></div>`;
+  const used = new Set(left.jobs.concat(right.jobs).map((job) => job.category));
+  const rows = categories.filter((category) => category.id !== "overview" && used.has(category.id)).map((category) => {
+    const ids = [...new Set(left.jobs.concat(right.jobs).filter((job) => job.category === category.id).map((job) => job.id))];
+    return `<tr class="compare-category"><th scope="rowgroup" colspan="3">${escapeHtml(page.content[category.label] || category.id)}</th></tr>
+      ${ids.map((id) => `<tr data-job="${id}"><th scope="row">${escapeHtml((left.jobs.concat(right.jobs)).find((job) => job.id === id).title)}</th><td data-side="0"></td><td data-side="1"></td></tr>`).join("")}`;
+  }).join("");
+  section.innerHTML = `
+    <div class="compare-head">
+      ${[left, right].map((side, index) => `<div class="compare-side" id="compare-side-${index}">${ring(index)}
+        <p class="summary-target">${escapeHtml(side.target.value)}</p><p class="summary-text" id="compare-text-${index}"></p>
+        <button class="detail-action" type="button" data-open="${index}">Open full result</button></div>`).join('<div class="compare-vs-big" aria-hidden="true">vs</div>')}
+    </div>
+    <div class="compare-table-wrap"><table class="compare-table">
+      <thead><tr><th scope="col">Check</th><th scope="col">${escapeHtml(left.target.value)}</th><th scope="col">${escapeHtml(right.target.value)}</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+  section.querySelectorAll("[data-open]").forEach((button) => button.addEventListener("click", () => openCompareSide(Number(button.dataset.open))));
+  section.querySelectorAll(".ring-value").forEach((circle) => {
+    const length = 2 * Math.PI * 42;
+    circle.style.strokeDasharray = String(length);
+    circle.style.strokeDashoffset = String(length);
+  });
+}
+
+function updateCompare() {
+  if (!page.compare) return;
+  const sides = page.compare;
+  const length = 2 * Math.PI * 42;
+  const scores = sides.map((side) => scoreOf(side.jobs));
+  const done = sides.every((side) => side.jobs.every((job) => job.done));
+  sides.forEach((side, index) => {
+    const ring = byId(`compare-ring-${index}`);
+    ring.className = `ring ${scores[index].tone}`;
+    ring.querySelector(".ring-value").style.strokeDashoffset = String(length - (length * scores[index].score) / 100);
+    animateNumber(ring.querySelector(".compare-number"), scores[index].score);
+    const finished = side.jobs.filter((job) => job.done).length;
+    byId(`compare-text-${index}`).textContent = finished < side.jobs.length
+      ? `Running… ${finished} of ${side.jobs.length} done.`
+      : `${plural(findingCount(side.jobs), "point")} to look at.`;
+    byId(`compare-side-${index}`).classList.toggle("winner", done && scores[index].score > scores[1 - index].score);
+  });
+  byId("compare").querySelectorAll("tr[data-job]").forEach((row) => {
+    const jobs = sides.map((side) => side.jobs.find((job) => job.id === row.dataset.job));
+    row.querySelectorAll("td").forEach((cell, index) => {
+      cell.innerHTML = compareCell(jobs[index]);
+      cell.classList.remove("better");
+    });
+    if (jobs.every((job) => job?.done && job.view)) {
+      const rank = jobs.map((job) => statusRank[job.view.status] * 100 - findingCount([job]));
+      if (rank[0] !== rank[1]) row.querySelectorAll("td")[rank[0] > rank[1] ? 0 : 1].classList.add("better");
+    }
+  });
+}
+
+function openCompareSide(index) {
+  const side = page.compare[index];
+  page.jobs = side.jobs;
+  page.target = side.target;
+  page.shared = null;
+  page.scannedAt = side.scannedAt;
+  byId("compare").hidden = true;
+  byId("results").hidden = false;
+  buildLayout(side.target);
+  page.jobs.forEach(drawCard);
+  updateSummary();
+  const notice = byId("notice");
+  notice.hidden = false;
+  notice.classList.add("shared-notice");
+  notice.innerHTML = `Full result for ${escapeHtml(side.target.value)}. <button class="example" type="button" id="back-to-compare">Back to the comparison</button>`;
+  byId("back-to-compare").addEventListener("click", () => {
+    notice.hidden = true;
+    notice.classList.remove("shared-notice");
+    byId("results").hidden = true;
+    byId("compare").hidden = false;
+  });
+  byId("results").scrollIntoView({ behavior: motionAllowed() ? "smooth" : "auto", block: "start" });
+}
+
+async function startCompare() {
+  const targets = [classify(byId("query").value), classify(byId("query2").value)];
+  if (!targets[0] || !targets[1]) {
+    showNotice("Enter two domain names (or two IP addresses) to compare.");
+    return;
+  }
+  if (targets[0].kind !== targets[1].kind || targets[0].kind === "mac") {
+    showNotice("Compare two domain names or two IP addresses.");
+    return;
+  }
+  if (targets[0].value === targets[1].value) {
+    showNotice("Enter two different names to compare.");
+    return;
+  }
+  const allowed = allowedFeatures();
+  if (!planJobs(targets[0], allowed).length) {
+    showNotice(page.content.empty);
+    return;
+  }
+  showNotice("");
+  const run = ++page.run;
+  document.body.classList.add("is-scanning");
+  byId("scan-button").disabled = true;
+  let tokens;
+  try {
+    tokens = await Promise.all(targets.map(async () => {
+      const response = await fetch("/api/landing/start", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: "{}" });
+      const started = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(started.error || "The comparison could not be started.");
+      return started.token;
+    }));
+  } catch (error) {
+    if (run === page.run) {
+      showNotice(error.message);
+      document.body.classList.remove("is-scanning");
+      byId("scan-button").disabled = false;
+    }
+    return;
+  }
+  if (run !== page.run) return;
+  page.compare = targets.map((target, index) => ({ target, jobs: planJobs(target, allowed, tokens[index]), scannedAt: new Date() }));
+  page.jobs = [];
+  document.body.classList.add("has-results");
+  byId("results").hidden = true;
+  byId("compare").hidden = false;
+  buildCompare();
+  updateCompare();
+  if (!page.preview) {
+    try {
+      window.history.replaceState(null, "", `/#compare:${encodeURIComponent(targets[0].value)},${encodeURIComponent(targets[1].value)}`);
+    } catch {
+      // Not important if the address cannot be updated.
+    }
+  }
+  let pending = false;
+  const redraw = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      if (run === page.run) updateCompare();
+    });
+  };
+  await Promise.all(page.compare.flatMap((side) => side.jobs).map(async (job) => {
+    try {
+      const data = await job.load();
+      if (run !== page.run) return;
+      job.data = data;
+      job.view = job.render(data);
+      alignStatus(job);
+    } catch (error) {
+      if (run !== page.run) return;
+      job.error = error.message;
+    }
+    job.done = true;
+    redraw();
+  }));
+  if (run !== page.run) return;
+  updateCompare();
+  document.body.classList.remove("is-scanning");
+  byId("scan-button").disabled = false;
+}
+
+function setCompareMode(on) {
+  const field = byId("compare-field");
+  field.hidden = !on;
+  byId("compare-toggle").setAttribute("aria-expanded", String(on));
+  byId("compare-toggle").textContent = on ? "Scan one domain" : "Compare with another domain";
+  if (on) byId("query2").focus();
 }
 
 // ------------------------------------------------------------------ Share and PDF
@@ -1220,8 +1421,16 @@ function setupInterfaceSwitch(button, target) {
 async function init() {
   byId("scan-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    startScan();
+    if (!byId("compare-field").hidden && byId("query2").value.trim()) startCompare();
+    else startScan();
   });
+  byId("query2").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      startCompare();
+    }
+  });
+  byId("compare-toggle").addEventListener("click", () => setCompareMode(byId("compare-field").hidden));
   window.addEventListener("resize", positionIndicator);
   try {
     const [configResponse, authResponse] = await Promise.all([
@@ -1249,8 +1458,15 @@ async function init() {
   if (sharedId) {
     await openSharedScan(sharedId);
   } else if (allowedFeatures().size) {
+    byId("compare-toggle").hidden = page.preview;
     const fromHash = decodeURIComponent(window.location.hash.slice(1));
-    if (fromHash && !page.preview) {
+    const compareHash = fromHash.match(/^compare:([^,]+),(.+)$/);
+    if (compareHash && !page.preview) {
+      byId("query").value = compareHash[1];
+      byId("query2").value = compareHash[2];
+      setCompareMode(true);
+      startCompare();
+    } else if (fromHash && !page.preview) {
       byId("query").value = fromHash;
       startScan();
     } else if (!page.preview && window.matchMedia("(min-width: 641px)").matches) {

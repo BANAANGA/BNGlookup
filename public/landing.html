@@ -44,6 +44,12 @@
             <span class="search-spinner" aria-hidden="true"></span>
           </button>
         </form>
+        <div class="compare-field" id="compare-field" hidden>
+          <span class="compare-vs" aria-hidden="true">vs</span>
+          <label class="visually-hidden" for="query2">Second domain or IP address to compare with</label>
+          <input id="query2" type="text" inputmode="url" maxlength="253" spellcheck="false" autocapitalize="none" autocorrect="off" placeholder="Second domain to compare with">
+        </div>
+        <button class="compare-toggle" id="compare-toggle" type="button" aria-expanded="false" aria-controls="compare-field" hidden>Compare with another domain</button>
         <div class="examples" id="examples"></div>
         <p class="notice" id="notice" role="status" hidden></p>
       </header>
@@ -55,6 +61,8 @@
         </nav>
         <div class="panels" id="panels"></div>
       </section>
+
+      <section class="compare" id="compare" aria-live="polite" hidden></section>
 
       <footer class="footer" id="footer"></footer>
     </main>
