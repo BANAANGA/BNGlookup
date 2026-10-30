@@ -28,9 +28,11 @@ For an IP address it runs reverse DNS, IP registration, reputation, reachability
 and ASN. Tabs without public tools are hidden. The score counts good results as
 100, warnings as 60 and problems as 15, and leaves informational results out.
 
-The small *Log in* button in the corner opens the login page; after logging in you
-get the full interface with all tabs. Links into the full interface (`/?mode=…`,
-share links) keep working for everyone.
+The small *Log in* button in the corner opens the login page. After logging in,
+a *Simple / Full* switch at the top right moves between this page and the full
+interface with all tabs. The choice is remembered in the browser; until a user
+picks one, they start in the interface the administrator chose. Links into the
+full interface (`/?mode=…`, share links) keep working for everyone.
 
 ## Limits
 
@@ -48,7 +50,8 @@ goes live until you click *Save landing page*.
 
 | Setting | Options |
 | --- | --- |
-| Show at `/` | Turn off to show the full interface (with its login prompt) at `/` again |
+| Show at `/` | Turn off to show the full interface (with its login prompt) at `/` again to visitors who are not logged in |
+| Logged-in users | Start in the full or the simple interface (users can switch at any time) |
 | Theme presets | Midnight, Daylight, Ocean, Sunset, Forest, Mono |
 | Colors | Background, second background, cards, text, muted text, two accents, good, warning and problem |
 | Font and rounding | System, rounded, serif, mono or geometric; corner rounding 0–32 px |

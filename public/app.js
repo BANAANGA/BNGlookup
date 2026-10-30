@@ -517,6 +517,18 @@ function setMode(nextMode) {
   input.focus();
 }
 
+// Logged-in users switch between the simple and the full interface; the choice is kept
+// in a cookie for this browser and "/" serves the chosen one.
+function setupInterfaceSwitch(button, target) {
+  button.hidden = false;
+  button.addEventListener("click", () => {
+    button.setAttribute("aria-checked", String(target === "full"));
+    const secure = window.location.protocol === "https:" ? "; secure" : "";
+    document.cookie = `bng_ui=${target}; path=/; max-age=31536000; samesite=lax${secure}`;
+    window.setTimeout(() => window.location.assign("/"), 280);
+  });
+}
+
 async function initializeAccount() {
   const sharedId = new URLSearchParams(window.location.search).get("share");
   const historyId = new URLSearchParams(window.location.search).get("history");
@@ -533,6 +545,7 @@ async function initializeAccount() {
     historyLink.hidden = !historyEnabled();
     monitorsLink.hidden = !(authState.user && featureAllowed("monitors"));
     logoutButton.hidden = !authState.user;
+    if (authState.user) setupInterfaceSwitch(document.querySelector("#ui-switch"), "simple");
     adminTabs.hidden = authState.user?.role !== "admin";
     accountName.textContent = authState.user
       ? `${authState.user.username} (${authState.user.role})`

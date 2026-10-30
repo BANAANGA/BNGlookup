@@ -4620,6 +4620,7 @@ const landingFonts = {
 };
 const landingDefaults = {
   enabled: true,
+  userInterface: "full",
   theme: {
     background: "#06080f", background2: "#11203d", surface: "#0f1524", text: "#eef2ff", muted: "#8b96b2",
     accent: "#7c5cff", accent2: "#22d3ee", success: "#34d399", warning: "#fbbf24", danger: "#f87171",
@@ -4653,6 +4654,7 @@ function readLandingConfig() {
   }
   return {
     enabled: typeof saved.enabled === "boolean" ? saved.enabled : landingDefaults.enabled,
+    userInterface: saved.userInterface === "simple" ? "simple" : "full",
     theme: { ...landingDefaults.theme, ...(saved.theme || {}) },
     content: { ...landingDefaults.content, ...(saved.content || {}) },
     background: saved.background || null,
@@ -4692,13 +4694,15 @@ function validateLandingConfig(body) {
   for (const key of ["headline", "button", "placeholder", "tabOverview", "tabDns", "tabEmail", "tabWeb", "tabSecurity", "tabNetwork"]) {
     if (!content[key]) return { error: `The text for "${key}" cannot be empty.` };
   }
-  return { value: { enabled: source.enabled !== false, theme, content } };
+  if (!["full", "simple"].includes(source.userInterface)) return { error: "Choose the interface logged-in users start in." };
+  return { value: { enabled: source.enabled !== false, userInterface: source.userInterface, theme, content } };
 }
 
 function publicLandingConfig(config = readLandingConfig()) {
   const access = getFeatureAccess();
   return {
     enabled: config.enabled,
+    userInterface: config.userInterface,
     siteTitle: getSiteTitle(),
     iconUrl: getSiteIconUrl(),
     theme: { ...config.theme, fontStack: landingFonts[config.theme.font] || landingFonts.system },
@@ -11313,7 +11317,18 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   }
   // Visitors who are not logged in get the simple landing page at "/", unless they follow a
   // link into the full interface (?mode=, ?share=, ?q=, …) or the landing page is turned off.
-  const landingRoot = url.pathname === "/" && !url.search && !currentUser(request) && readLandingConfig().enabled;
+  // Logged-in users choose with the switch at the top right (a cookie per browser); the
+  // administrator decides which interface they start in.
+  let landingRoot = false;
+  if (url.pathname === "/" && !url.search) {
+    const config = readLandingConfig();
+    if (!currentUser(request)) {
+      landingRoot = config.enabled;
+    } else {
+      const choice = readCookie(request, "bng_ui");
+      landingRoot = (choice === "simple" || choice === "full" ? choice : config.userInterface) === "simple";
+    }
+  }
   if (url.pathname === "/landing") {
     // The admin settings page shows a live preview of the landing page in a frame.
     response.setHeader("content-security-policy", response.getHeader("content-security-policy").replace("frame-ancestors 'none'", "frame-ancestors 'self'"));

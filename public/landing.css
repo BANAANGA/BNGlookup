@@ -153,6 +153,20 @@ body.is-loading .shell { opacity: 0; }
   transform: translateY(-1px);
 }
 
+
+/* Simple / full interface switch for logged-in users */
+.ui-switch { display: inline-flex; align-items: center; gap: 7px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: color-mix(in srgb, var(--surface) 45%, transparent); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.ui-switch[hidden] { display: none; }
+.ui-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ui-switch-track { position: relative; width: 30px; height: 17px; border-radius: 999px; background: var(--soft); transition: background 0.25s; }
+.ui-switch-thumb { position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px #0006; transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1); }
+.ui-switch[aria-checked="true"] .ui-switch-track { background: var(--accent); }
+.ui-switch[aria-checked="true"] .ui-switch-thumb { transform: translateX(13px); }
+.ui-switch[aria-checked="false"] .ui-switch-label:first-child, .ui-switch[aria-checked="true"] .ui-switch-label:last-child { color: var(--text); }
+
+.ui-switch { position: absolute; top: 14px; right: 16px; z-index: 5; backdrop-filter: blur(10px); }
+.login-chip[hidden] { display: none; }
+
 /* ------------------------------------------------------------ Layout */
 
 .shell {

@@ -1562,3 +1562,18 @@ footer a:hover { color: #e4ffef; }
 @media (max-width: 640px) {
   .landing-form, .landing-texts { grid-template-columns: 1fr; }
 }
+
+/* Simple / full interface switch for logged-in users */
+.ui-switch { display: inline-flex; align-items: center; gap: 7px; padding: 4px 9px; border: 1px solid #333; border-radius: 999px; color: #888; background: transparent; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.ui-switch[hidden] { display: none; }
+.ui-switch:focus-visible { outline: 2px solid #54d88f; outline-offset: 2px; }
+.ui-switch-track { position: relative; width: 30px; height: 17px; border-radius: 999px; background: #444; transition: background 0.25s; }
+.ui-switch-thumb { position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px #0006; transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1); }
+.ui-switch[aria-checked="true"] .ui-switch-track { background: #54d88f; }
+.ui-switch[aria-checked="true"] .ui-switch-thumb { transform: translateX(13px); }
+.ui-switch[aria-checked="false"] .ui-switch-label:first-child, .ui-switch[aria-checked="true"] .ui-switch-label:last-child { color: #f2f2f2; }
+@media (max-width: 680px) {
+  .topbar-actions:has(.ui-switch:not([hidden])) .online { display: none; }
+  .ui-switch { padding: 5px 6px; }
+  .ui-switch .ui-switch-label { display: none; }
+}

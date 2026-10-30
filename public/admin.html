@@ -235,6 +235,12 @@
           <div class="landing-editor">
             <form id="landing-form" class="admin-create-form landing-form">
               <label class="branding-reset landing-wide" for="landing-enabled"><input id="landing-enabled" name="enabled" type="checkbox"> Show the landing page at <code>/</code> to visitors who are not logged in</label>
+              <label for="landing-user-interface">Logged-in users</label>
+              <select id="landing-user-interface" name="userInterface">
+                <option value="full">Start in the full interface</option>
+                <option value="simple">Start in the simple interface</option>
+              </select>
+              <p class="form-hint">Logged-in users can always switch with the Simple / Full switch at the top right; their choice is remembered in their browser.</p>
               <h3 class="landing-wide">Theme</h3>
               <div class="landing-presets landing-wide" id="landing-presets"></div>
               <div class="landing-colors landing-wide" id="landing-colors"></div>
