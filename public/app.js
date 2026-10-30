@@ -1291,7 +1291,7 @@ function renderScanResult(data) {
       <div><p class="eyebrow">MAGIC SCAN</p><h2>${copyableResult(data.domain)}</h2></div>
       <span class="status-badge success">${copyableResult(`${data.hostsWithRecords} hosts found`)}</span>
     </div>
-    ${data.hosts.some((host) => host.name === data.domain && host.records.some((record) => ["A", "AAAA"].includes(record.type))) ? sitePreviewHtml(`http://${data.domain}/`, { caption: `Preview of ${data.domain} (rendered on the server${authState?.previewScripts ? "" : ", scripts disabled"})`, size: "medium" }) : ""}
+    ${data.hosts.some((host) => host.name === data.domain && host.records.some((record) => ["A", "AAAA"].includes(record.type))) ? sitePreviewHtml(`http://${data.domain}/`, { caption: `Live view of ${data.domain} through this server (scripts and links disabled)`, size: "medium" }) : ""}
     <div class="scan-summary">
       ${copyableResult(`${data.subdomainsChecked} subdomains checked`)}
       ${copyableResult(`${data.certificateTransparencySubdomains} additional names from ${data.certificateTransparencySource || "certificate logs"}`)}
@@ -2504,7 +2504,7 @@ function renderDomainInfo(data) {
     ${dnsNameservers?.status && dnsNameservers.status !== "NOERROR" ? `<p class="detail-notice">Nameserver query status: ${escapeHtml(dnsNameservers.status)}</p>` : ""}
     ${dnsNameservers?.addressesIncomplete ? '<p class="detail-notice">Some nameserver IP address lookups could not be completed.</p>' : ""}
     ${(registration?.nameservers?.length || dnsNameservers?.records?.length) ? `<section class="record-section">
-      <h3>Nameservers <span>${nameservers.length}</span></h3>
+      <h3>Nameservers <span>${nameserverNames.size}</span></h3>
       <div class="nameserver-list">${nameservers}</div>
     </section>` : ""}
     ${!registration && !dnsNameservers ? '<p class="empty-result">No domain details could be retrieved.</p>' : ""}`;

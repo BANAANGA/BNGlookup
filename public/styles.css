@@ -1513,24 +1513,24 @@ footer a:hover { color: #e4ffef; }
   #result .dns-results-table-wrap { overflow: visible !important; }
 }
 
-/* Website previews */
+/* Website previews (proxied live view in a sandboxed frame) */
 .site-preview { margin: 14px 0; }
-.site-preview a { display: block; overflow: hidden; border: 1px solid #2a2a2a; border-radius: 9px; background: #fff; aspect-ratio: 16 / 10; }
-.site-preview img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
-.site-preview.large { max-width: 640px; }
-.site-preview.medium { max-width: 460px; }
+.site-preview-frame { position: relative; overflow: hidden; border: 1px solid #2a2a2a; border-radius: 9px; background: #fff; }
+.site-preview.large .site-preview-frame { height: 460px; max-width: 900px; }
+.site-preview.medium .site-preview-frame { height: 360px; max-width: 640px; }
+.site-preview-iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+/* Thumbnails render the page at four times the size and scale it down. */
 .site-preview.small { margin: 0; }
+.site-preview.small .site-preview-frame { aspect-ratio: 16 / 10; }
+.site-preview.small .site-preview-iframe { position: absolute; top: 0; left: 0; width: 400%; height: 400%; transform: scale(.25); transform-origin: 0 0; pointer-events: none; }
 .site-preview figcaption { margin-top: 6px; color: #8a8a8a; font-size: 12px; overflow-wrap: anywhere; }
-.site-preview.loading a { position: relative; background: #111; }
-.site-preview.loading a::after {
-  position: absolute; inset: 0; display: grid; place-items: center; color: #888; font-size: 13px;
+.site-preview figcaption a { color: #9ce9b9; }
+.site-preview.loading .site-preview-frame::after {
+  position: absolute; inset: 0; display: grid; place-items: center; color: #888; font-size: 13px; pointer-events: none;
   background: linear-gradient(100deg, #111 20%, #1a1a1a 40%, #111 60%) 0 0 / 200% 100%; animation: preview-shimmer 1.4s linear infinite;
-  content: "Rendering preview…";
+  content: "Loading preview…";
 }
-.site-preview.loading img { opacity: 0; }
 @keyframes preview-shimmer { to { background-position: -200% 0; } }
-@media (prefers-reduced-motion: reduce) { .site-preview.loading a::after { animation: none; } }
-.site-preview-error { display: grid; place-items: center; padding: 14px; aspect-ratio: 16 / 10; border: 1px dashed #333; border-radius: 9px; color: #888; font-size: 12px; text-align: center; }
-.site-preview.large .site-preview-error, .site-preview.medium .site-preview-error { aspect-ratio: auto; min-height: 70px; }
+@media (prefers-reduced-motion: reduce) { .site-preview.loading .site-preview-frame::after { animation: none; } }
 .site-preview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; }
-@media print { .site-preview a { border-color: #bbb !important; } }
+@media print { .site-preview-frame { border-color: #bbb !important; } }
