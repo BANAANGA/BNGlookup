@@ -524,6 +524,8 @@ body.is-loading .shell { opacity: 0; }
 .tab-badge.warn { color: #1b1300; background: var(--warn); }
 .tab-badge.good { color: #04130c; background: var(--ok); }
 
+.tab-badge.dot { width: 10px; min-width: 10px; height: 10px; padding: 0; }
+
 .tab-badge.busy {
   width: 14px;
   min-width: 14px;
