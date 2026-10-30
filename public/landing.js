@@ -660,7 +660,8 @@ function cardSkeleton(job, index) {
 
 function listHtml(items, className, render) {
   if (!items.length) return "";
-  const limit = 6;
+  // Hiding a single item behind a "Show 1 more" button saves nothing, so show it instead.
+  const limit = items.length <= 7 ? items.length : 6;
   return `<ul class="${className}">${items.map((item, index) => `<li${index >= limit ? " hidden" : ""}>${render(item)}</li>`).join("")}</ul>${items.length > limit
     ? `<button class="card-more" type="button">Show ${items.length - limit} more</button>`
     : ""}`;
