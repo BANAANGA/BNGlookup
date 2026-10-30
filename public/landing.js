@@ -508,6 +508,143 @@ function renderMac(data) {
   };
 }
 
+// ------------------------------------------------------------------ Full details
+// Every card can expand to show everything the tool returned, laid out as readable
+// tables, plus the raw JSON and a link to the same tool in the full interface.
+
+const fullModes = {
+  records: "forward", dnssec: "forward", whois: "details", propagation: "propagation", "dns-health": "dns-health", email: "email",
+  web: "web", tls: "sslscan", reputation: "reputation", lookalike: "lookalike", ping: "ping", asn: "asn", reverse: "reverse", mac: "mac",
+};
+const acronyms = new Set(["dns", "mx", "spf", "dmarc", "dkim", "tls", "rpt", "sts", "bimi", "url", "ttl", "asn", "as", "http", "https", "ip", "ns",
+  "soa", "ds", "rpki", "roa", "roas", "smtp", "ehlo", "mta", "ptr", "caa", "id", "oui", "rdap", "csp", "hsts", "cidr", "sha", "vmc", "axfr", "rua", "ruf", "nx"]);
+
+const keyLabels = { mtaSts: "MTA-STS", tlsRpt: "TLS-RPT", subjectAltName: "Subject alternative names", fingerprint256: "SHA-256 fingerprint", altSvc: "Alt-Svc" };
+
+function humanizeKey(key) {
+  if (keyLabels[key]) return keyLabels[key];
+  if (/^[A-Z0-9]+$/.test(key)) return key;
+  const words = String(key).replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim().split(/\s+/);
+  return words.map((word, index) => {
+    const lower = word.toLowerCase();
+    if (lower === "ms") return "(ms)";
+    if (/^ipv[46]$/.test(lower)) return `IPv${lower.slice(3)}`;
+    if (/^http[23]$/.test(lower)) return `HTTP/${lower.slice(4)}`;
+    if (acronyms.has(lower)) return lower.toUpperCase();
+    return index === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+  }).join(" ");
+}
+
+const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const isPrimitive = (value) => value === null || ["string", "number", "boolean"].includes(typeof value);
+
+function isEmptyValue(value) {
+  return value === null || value === undefined || value === "" ||
+    (Array.isArray(value) && !value.length) || (isPlainObject(value) && !Object.keys(value).length);
+}
+
+function primitiveHtml(value) {
+  if (typeof value === "boolean") return `<span class="pill ${value ? "good" : "info"}">${value ? "Yes" : "No"}</span>`;
+  if (typeof value === "number") return escapeHtml(Number.isInteger(value) ? value.toLocaleString() : String(Math.round(value * 100) / 100));
+  const text = String(value ?? "");
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text) && !Number.isNaN(Date.parse(text))) {
+    return escapeHtml(new Date(text).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }));
+  }
+  if (text.length > 90 || text.includes("\n")) return `<pre class="detail-pre">${escapeHtml(text)}</pre>`;
+  return `<span class="detail-text">${escapeHtml(text)}</span>`;
+}
+
+function arrayHtml(list, depth) {
+  const items = list.filter((item) => !isEmptyValue(item));
+  if (!items.length) return "";
+  if (items.every(isPrimitive)) {
+    return items.every((item) => String(item).length <= 60)
+      ? `<div class="chips">${items.slice(0, 300).map((item) => `<span class="chip">${escapeHtml(item)}</span>`).join("")}${items.length > 300 ? `<span class="chip">+${items.length - 300}</span>` : ""}</div>`
+      : `<ol class="detail-list">${items.slice(0, 300).map((item) => `<li>${primitiveHtml(item)}</li>`).join("")}</ol>`;
+  }
+  // Name/value pairs, such as response headers.
+  if (items.every((item) => Array.isArray(item) && item.length === 2 && item.every(isPrimitive))) {
+    return `<div class="detail-table-wrap"><table class="detail-table pairs"><tbody>${items.slice(0, 500).map(([name, value]) => `<tr><th scope="row">${escapeHtml(name)}</th><td data-label="${escapeHtml(name)}">${primitiveHtml(value)}</td></tr>`).join("")}</tbody></table></div>`;
+  }
+  if (items.every(isPlainObject)) {
+    const columns = [...new Set(items.flatMap((item) => Object.keys(item)))]
+      .filter((key) => items.some((item) => !isEmptyValue(item[key])));
+    const flat = columns.every((key) => items.every((item) => isPrimitive(item[key]) || item[key] === undefined ||
+      (Array.isArray(item[key]) && item[key].every(isPrimitive))));
+    if (flat && columns.length <= 9) {
+      const rows = items.slice(0, 500);
+      return `<div class="detail-table-wrap"><table class="detail-table"><thead><tr>${columns.map((key) => `<th>${escapeHtml(humanizeKey(key))}</th>`).join("")}</tr></thead>
+        <tbody>${rows.map((item) => `<tr>${columns.map((key) => `<td data-label="${escapeHtml(humanizeKey(key))}">${isEmptyValue(item[key]) ? "" : Array.isArray(item[key])
+          ? escapeHtml(item[key].join(", "))
+          : primitiveHtml(item[key])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>${items.length > rows.length ? `<p class="card-summary">${items.length - rows.length} more rows in the raw JSON.</p>` : ""}`;
+    }
+    return items.slice(0, 100).map((item, index) => `<div class="detail-item"><span class="detail-index">${index + 1}</span>${treeHtml(item, depth + 1)}</div>`).join("");
+  }
+  return items.slice(0, 100).map((item) => `<div class="detail-item">${valueHtml(item, depth + 1)}</div>`).join("");
+}
+
+function valueHtml(value, depth) {
+  if (isPrimitive(value)) return primitiveHtml(value);
+  if (depth > 6) return `<pre class="detail-pre">${escapeHtml(JSON.stringify(value, null, 2))}</pre>`;
+  if (Array.isArray(value)) return arrayHtml(value, depth);
+  return treeHtml(value, depth + 1);
+}
+
+function treeHtml(object, depth = 0) {
+  const entries = Object.entries(object).filter(([, value]) => !isEmptyValue(value));
+  const simple = entries.filter(([, value]) => isPrimitive(value) || (Array.isArray(value) && value.every(isPrimitive)));
+  const complex = entries.filter((entry) => !simple.includes(entry));
+  const rows = simple.length ? `<dl class="detail-rows">${simple.map(([key, value]) => `<dt>${escapeHtml(humanizeKey(key))}</dt><dd>${valueHtml(value, depth)}</dd>`).join("")}</dl>` : "";
+  const sections = complex.map(([key, value]) => `<section class="detail-section depth-${Math.min(depth, 3)}">
+      <h4>${escapeHtml(humanizeKey(key))}${Array.isArray(value) ? ` <span class="detail-count">${value.length}</span>` : ""}</h4>
+      ${valueHtml(value, depth)}</section>`).join("");
+  return rows + sections;
+}
+
+function fullDetailsHtml(job) {
+  const mode = fullModes[job.id];
+  const link = mode && page.target ? `/?${new URLSearchParams({ mode, q: page.target.value })}` : "";
+  return `<div class="detail-toolbar">
+      <button class="detail-action" type="button" data-action="copy">Copy JSON</button>
+      ${link ? `<a class="detail-action" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open in full interface ↗</a>` : ""}
+    </div>
+    <div class="detail-body">${treeHtml(job.data) || '<p class="card-summary">The tool returned no further details.</p>'}</div>
+    <details class="detail-raw"><summary>Raw JSON</summary><pre class="detail-pre">${escapeHtml(JSON.stringify(job.data, null, 2))}</pre></details>`;
+}
+
+function toggleDetails(job, card, button) {
+  const expand = !card.classList.contains("expanded");
+  const body = card.querySelector(".card-details-inner");
+  if (expand && !body.dataset.ready) {
+    body.innerHTML = fullDetailsHtml(job);
+    body.dataset.ready = "true";
+    body.querySelector('[data-action="copy"]').addEventListener("click", async (event) => {
+      const copyButton = event.currentTarget;
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(job.data, null, 2));
+        copyButton.textContent = "Copied ✓";
+      } catch {
+        copyButton.textContent = "Copy failed";
+      }
+      window.setTimeout(() => { copyButton.textContent = "Copy JSON"; }, 1600);
+    });
+  }
+  const apply = () => {
+    card.classList.toggle("expanded", expand);
+    button.setAttribute("aria-expanded", String(expand));
+    button.querySelector(".card-expand-label").textContent = expand ? "Hide details" : "Full details";
+  };
+  // Let the card grow to full width smoothly where the browser supports view transitions.
+  if (motionAllowed() && document.startViewTransition) {
+    card.style.viewTransitionName = "expanding-card";
+    const transition = document.startViewTransition(apply);
+    transition.finished.finally(() => { card.style.viewTransitionName = ""; });
+  } else {
+    apply();
+  }
+  if (expand) window.setTimeout(() => card.scrollIntoView({ block: "nearest", behavior: motionAllowed() ? "smooth" : "auto" }), 350);
+}
+
 // ------------------------------------------------------------------ Drawing
 
 function cardSkeleton(job, index) {
@@ -557,6 +694,13 @@ function drawCard(job) {
     button.previousElementSibling.querySelectorAll("li[hidden]").forEach((item) => { item.hidden = false; });
     button.remove();
   }));
+  card.insertAdjacentHTML("beforeend", `
+    <button class="card-expand" type="button" aria-expanded="false" aria-controls="details-${job.id}">
+      <span class="card-expand-label">Full details</span><span class="card-expand-icon" aria-hidden="true"></span>
+    </button>
+    <div class="card-details" id="details-${job.id}"><div class="card-details-inner"></div></div>`);
+  const expandButton = card.querySelector(".card-expand");
+  expandButton.addEventListener("click", () => toggleDetails(job, card, expandButton));
 }
 
 function buildLayout(target) {
@@ -786,6 +930,7 @@ async function startScan() {
   }
 
   page.jobs = jobs;
+  page.target = target;
   document.body.classList.add("has-results");
   byId("results").hidden = false;
   buildLayout(target);
@@ -803,6 +948,7 @@ async function startScan() {
     try {
       const data = await job.load();
       if (run !== page.run) return;
+      job.data = data;
       job.view = job.render(data);
       job.view.issues = job.view.issues || [];
     } catch (error) {

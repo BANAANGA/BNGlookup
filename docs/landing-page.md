@@ -24,6 +24,16 @@ The page recognizes the input and runs every tool that fits and that is set to
 | Security | Reputation, look-alike domains |
 | Network | Reachability, ASN and RPKI; MAC vendor for MAC addresses |
 
+Each result card has a **Full details** button. It widens the card and shows
+everything the tool returned, laid out as tables: every DNS answer, all SMTP and
+SPF details, redirect hops, response headers, certificate data, each reputation
+source, and so on. The expanded card also has *Copy JSON*, the raw JSON, and
+*Open in full interface*, which opens the same tool with the full result view.
+Expanding uses the results that were already fetched, so it costs no extra
+lookups.
+
+![Full details](images/landing-details.jpg)
+
 For an IP address it runs reverse DNS, IP registration, reputation, reachability
 and ASN. Tabs without public tools are hidden. The score counts good results as
 100, warnings as 60 and problems as 15, and leaves informational results out.
