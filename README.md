@@ -802,10 +802,10 @@ published, and is checked when you save.
 
 | File | Served at | Notes |
 | --- | --- | --- |
-| robots.txt |  | Templates to keep private pages out, allow everything or block all crawlers; unknown lines are flagged. |
-| security.txt |  and  | A form builds an RFC 9116 file. Publishing needs a valid Contact (,  or ) and one future Expires; you are warned when it expires within 30 days or is set more than a year ahead. |
-| humans.txt |  | Free text. |
-| Change-password link |  | Redirects to the account page so password managers can open it (on by default). |
+| robots.txt | `/robots.txt` | Templates to keep private pages out, allow everything or block all crawlers; unknown lines are flagged. |
+| security.txt | `/.well-known/security.txt` and `/security.txt` | A form builds an RFC 9116 file. Publishing needs a valid Contact (`mailto:`, `https://` or `tel:`) and one future Expires; you are warned when it expires within 30 days or is set more than a year ahead. |
+| humans.txt | `/humans.txt` | Free text. |
+| Change-password link | `/.well-known/change-password` | Redirects to the account page so password managers can open it (on by default). |
 
 The [hosted MTA-STS policy](#hosted-mta-sts-policy) is managed in the record
 builder. See the [wiki page](docs/site-files.md).
