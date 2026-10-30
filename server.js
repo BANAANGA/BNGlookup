@@ -3848,7 +3848,15 @@ const threatFeeds = [
   },
   {
     id: "urlhaus-hosts", label: "abuse.ch URLhaus (malware hosts)", kind: "host",
-    urls: ["https://urlhaus.abuse.ch/downloads/hostfile/"],
+    // abuse.ch retired its keyless downloads on 21 October 2026 (they answer 410 Gone).
+    // With URLHAUS_AUTH_KEY the official export is used; otherwise, or when that fails,
+    // the free malware-filter mirror of URLhaus's online malware hosts.
+    sources: () => [
+      ...(process.env.URLHAUS_AUTH_KEY
+        ? [[`https://urlhaus-api.abuse.ch/v2/files/exports/${encodeURIComponent(process.env.URLHAUS_AUTH_KEY)}/hostfile.txt`]]
+        : []),
+      ["https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-hosts-online.txt"],
+    ],
     parse: (text) => text.split(/\r?\n/).filter((line) => line && !line.startsWith("#"))
       .map((line) => line.trim().split(/\s+/).pop().toLowerCase()).filter(Boolean).map((host) => [host, "hosts malware downloads"]),
   },
@@ -3867,9 +3875,22 @@ const threatFeeds = [
 const threatFeedLimits = { maxAgeMs: 6 * 3600000, retryMs: 15 * 60000, bytes: 32 * 1024 * 1024, timeoutMs: 20000 };
 const threatFeedCache = new Map();
 
+// A feed either combines all of its urls, or offers alternative sources tried in order.
 async function downloadThreatFeed(feed) {
+  let lastError = null;
+  for (const urls of feed.sources ? feed.sources() : [feed.urls]) {
+    try {
+      return await downloadThreatFeedFrom(feed, urls);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+async function downloadThreatFeedFrom(feed, urls) {
   const entries = [];
-  for (const url of feed.urls) {
+  for (const url of urls) {
     const response = await fetch(url, { headers: { "user-agent": `BNGlookup/${appBuild.version} (+https://github.com/${appRepository})` }, signal: AbortSignal.timeout(threatFeedLimits.timeoutMs) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const length = Number(response.headers.get("content-length") || 0);

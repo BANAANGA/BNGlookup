@@ -226,7 +226,7 @@ Set these in `.env` next to the compose file, or in front of the command.
 
 | Variable | Purpose |
 | --- | --- |
-| `URLHAUS_AUTH_KEY` | abuse.ch URLhaus API key. |
+| `URLHAUS_AUTH_KEY` | Free abuse.ch Auth-Key ([auth.abuse.ch](https://auth.abuse.ch/), non-commercial use). Enables the URLhaus API lookup and downloads the official URLhaus host list; without it a public mirror of the list is used. |
 | `VIRUSTOTAL_API_KEY` | VirusTotal API key. |
 | `GOOGLE_SAFE_BROWSING_KEY` | Google Safe Browsing API key. |
 
@@ -520,7 +520,9 @@ it is malicious:
   means the service considers the domain malicious.
 - **Threat lists**: Spamhaus DROP (hijacked and criminal networks), abuse.ch Feodo
   Tracker (botnet command-and-control servers), abuse.ch URLhaus (hosts serving
-  malware) and OpenPhish (phishing sites). The lists are downloaded by the server
+  malware; the official list with `URLHAUS_AUTH_KEY`, otherwise the
+  [malware-filter](https://gitlab.com/malware-filter/urlhaus-filter) mirror) and
+  OpenPhish (phishing sites). The lists are downloaded by the server
   on first use, refreshed every six hours and checked locally; the queried name is
   not sent to them. Parent domains are matched too.
 - **Spam blocklists**, as in [Blocklists](#blocklists).
