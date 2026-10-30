@@ -855,3 +855,129 @@ landingBackgroundRemove.addEventListener("click", async () => {
 });
 
 loadLandingEditor();
+
+const siteFilesList = document.querySelector("#site-files");
+const siteChangePassword = document.querySelector("#site-change-password");
+const siteFileHelp = {
+  robots: "Tells search engines and other crawlers what they may index.",
+  security: "Tells security researchers how to report vulnerabilities (RFC 9116). Contact and Expires are required.",
+  humans: "Credits the people behind the site.",
+};
+const robotsTemplates = {
+  "Keep private pages out": "User-agent: *\nDisallow: /api/\nDisallow: /admin\nDisallow: /login.html\nDisallow: /my-account.html\nDisallow: /history.html\nDisallow: /monitors.html\nAllow: /\n",
+  "Allow everything": "User-agent: *\nAllow: /\n",
+  "Block all crawlers": "User-agent: *\nDisallow: /\n",
+};
+
+function siteFileMessages(element, data) {
+  element.innerHTML = [
+    ...(data.errors || []).map((message) => `<li class="error">${escapeHtml(message)}</li>`),
+    ...(data.warnings || []).map((message) => `<li class="warning">${escapeHtml(message)}</li>`),
+  ].join("");
+  element.hidden = !element.children.length;
+}
+
+function securityBuilderHtml() {
+  const nextYear = new Date(Date.now() + 364 * 86400000).toISOString().slice(0, 10);
+  return `<div class="security-builder">
+    <p class="form-hint">Fill in the fields and click <strong>Build file</strong>, or edit the text directly.</p>
+    <label for="sec-contact">Contact</label><input id="sec-contact" type="text" placeholder="mailto:security@example.com, https://example.com/report">
+    <label for="sec-expires">Expires</label><input id="sec-expires" type="date" value="${nextYear}">
+    <label for="sec-encryption">Encryption key URL</label><input id="sec-encryption" type="url" placeholder="https://example.com/pgp-key.txt">
+    <label for="sec-policy">Policy URL</label><input id="sec-policy" type="url" placeholder="https://example.com/security-policy">
+    <label for="sec-ack">Acknowledgments URL</label><input id="sec-ack" type="url" placeholder="https://example.com/hall-of-fame">
+    <label for="sec-languages">Preferred languages</label><input id="sec-languages" type="text" placeholder="en, nl">
+    <div class="site-file-actions"><button class="dash-version-check" id="sec-build" type="button">Build file</button></div>
+  </div>`;
+}
+
+function buildSecurityTxt() {
+  const value = (id) => document.querySelector(id).value.trim();
+  const contacts = value("#sec-contact").split(/[,\s]+/).filter(Boolean)
+    .map((contact) => (/^[^:\s]+@[^\s]+$/.test(contact) ? `mailto:${contact}` : contact));
+  const lines = contacts.map((contact) => `Contact: ${contact}`);
+  if (value("#sec-expires")) lines.push(`Expires: ${value("#sec-expires")}T00:00:00Z`);
+  if (value("#sec-encryption")) lines.push(`Encryption: ${value("#sec-encryption")}`);
+  if (value("#sec-policy")) lines.push(`Policy: ${value("#sec-policy")}`);
+  if (value("#sec-ack")) lines.push(`Acknowledgments: ${value("#sec-ack")}`);
+  if (value("#sec-languages")) lines.push(`Preferred-Languages: ${value("#sec-languages")}`);
+  lines.push(`Canonical: ${window.location.origin}/.well-known/security.txt`);
+  return `${lines.join("\n")}\n`;
+}
+
+function renderSiteFiles(data) {
+  siteChangePassword.checked = data.changePassword;
+  siteFilesList.innerHTML = Object.entries(data.files).map(([id, file]) => `
+    <section class="site-file" data-file="${id}">
+      <div class="site-file-head">
+        <h3>${escapeHtml(file.label)}</h3>
+        <span class="site-file-state${file.enabled ? " on" : ""}">${file.enabled ? "Published" : "Off"}</span>
+      </div>
+      <p class="form-hint">${escapeHtml(siteFileHelp[id] || "")} Served at
+        ${file.paths.map((path) => `<a href="${escapeHtml(path)}" target="_blank" rel="noopener"><code>${escapeHtml(path)}</code></a>`).join(" and ")}.</p>
+      ${id === "robots" ? `<div class="site-file-templates">Templates: ${Object.keys(robotsTemplates).map((name) => `<button class="dash-version-check" type="button" data-template="${escapeHtml(name)}">${escapeHtml(name)}</button>`).join("")}</div>` : ""}
+      ${id === "security" ? securityBuilderHtml() : ""}
+      <label class="visually-hidden" for="site-file-${id}">${escapeHtml(file.label)} content</label>
+      <textarea id="site-file-${id}" maxlength="${data.limit}" spellcheck="false"></textarea>
+      <label class="branding-reset site-file-toggle" for="site-file-enabled-${id}"><input id="site-file-enabled-${id}" type="checkbox"${file.enabled ? " checked" : ""}> Publish this file</label>
+      <ul class="site-file-messages" hidden></ul>
+      <div class="site-file-actions">
+        <button class="submit-button" type="button" data-save><span>Save ${escapeHtml(file.label)}</span><span aria-hidden="true">→</span></button>
+        <span class="form-hint">${file.updatedAt ? `Last saved ${escapeHtml(new Date(file.updatedAt).toLocaleString())}` : "Not saved yet"}</span>
+      </div>
+    </section>`).join("");
+  for (const section of siteFilesList.querySelectorAll(".site-file")) {
+    const id = section.dataset.file;
+    const textarea = section.querySelector("textarea");
+    textarea.value = data.files[id].content;
+    siteFileMessages(section.querySelector(".site-file-messages"), data.files[id].enabled ? data.files[id] : {});
+    section.querySelectorAll("[data-template]").forEach((button) => button.addEventListener("click", () => {
+      if (textarea.value.trim() && !window.confirm("Replace the current content with this template?")) return;
+      textarea.value = robotsTemplates[button.dataset.template];
+    }));
+    section.querySelector("#sec-build")?.addEventListener("click", () => {
+      if (textarea.value.trim() && !window.confirm("Replace the current content with the built file?")) return;
+      textarea.value = buildSecurityTxt();
+    });
+    section.querySelector("[data-save]").addEventListener("click", async () => {
+      const messages = section.querySelector(".site-file-messages");
+      try {
+        const response = await fetch("/api/admin/site-files", {
+          method: "PUT",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id, enabled: section.querySelector('input[type="checkbox"]').checked, content: textarea.value }),
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          siteFileMessages(messages, result.errors ? result : { errors: [result.error] });
+          throw new Error(result.error || "The file could not be saved.");
+        }
+        renderSiteFiles(result);
+        showAdminSuccess(`${data.files[id].label} saved.`);
+      } catch (error) {
+        showAdminError(error.message);
+      }
+    });
+  }
+}
+
+async function loadSiteFiles() {
+  try {
+    renderSiteFiles(await api("/api/admin/site-files"));
+  } catch (error) {
+    siteFilesList.textContent = error.message;
+  }
+}
+
+siteChangePassword.addEventListener("change", async () => {
+  try {
+    renderSiteFiles(await api("/api/admin/site-files", { method: "PUT", body: JSON.stringify({ id: "change-password", enabled: siteChangePassword.checked }) }));
+    showAdminSuccess("Change-password link saved.");
+  } catch (error) {
+    siteChangePassword.checked = !siteChangePassword.checked;
+    showAdminError(error.message);
+  }
+});
+
+loadSiteFiles();

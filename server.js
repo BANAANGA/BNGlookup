@@ -4630,6 +4630,156 @@ function zlibDecodeBuffer(body, encoding) {
   return body;
 }
 
+// ---------------------------------------------------------------- Site files (robots.txt, security.txt, …)
+
+const siteFiles = {
+  robots: { label: "robots.txt", paths: ["/robots.txt"] },
+  security: { label: "security.txt", paths: ["/.well-known/security.txt", "/security.txt"] },
+  humans: { label: "humans.txt", paths: ["/humans.txt"] },
+};
+const siteFileLimit = 16384;
+const robotsDirectives = /^(user-agent|allow|disallow|sitemap|crawl-delay|host|clean-param|request-rate|visit-time|noindex)$/i;
+
+function readSiteFileSettings() {
+  let saved = {};
+  try {
+    saved = JSON.parse(database.prepare("SELECT value FROM app_settings WHERE key = 'site_files'").get()?.value || "{}");
+  } catch {
+    saved = {};
+  }
+  const files = Object.fromEntries(Object.keys(siteFiles).map((id) => {
+    const file = saved.files?.[id] || {};
+    return [id, { enabled: file.enabled === true, content: typeof file.content === "string" ? file.content : "", updatedAt: file.updatedAt || null }];
+  }));
+  return { files, changePassword: saved.changePassword !== false };
+}
+
+function saveSiteFileSettings(settings) {
+  database.prepare(`
+    INSERT INTO app_settings (key, value) VALUES ('site_files', ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(JSON.stringify(settings));
+}
+
+// Returns { errors, warnings } for a file's content; errors block publishing it.
+function checkSiteFile(id, content) {
+  const errors = [];
+  const warnings = [];
+  const lines = content.split("\n");
+  if (id === "robots") {
+    lines.forEach((line, index) => {
+      const text = line.replace(/#.*/, "").trim();
+      if (!text) return;
+      const directive = text.match(/^([A-Za-z-]+)\s*:/)?.[1];
+      if (!directive || !robotsDirectives.test(directive)) warnings.push(`Line ${index + 1} is not a robots.txt rule: "${text.slice(0, 60)}".`);
+    });
+    if (/user-agent\s*:\s*\*\s*\n(?:\s*(?:allow|disallow)\s*:.*\n)*?\s*disallow\s*:\s*\/\s*(\n|$)/im.test(`${content}\n`)) {
+      warnings.push("All crawlers are blocked from the whole site (Disallow: /).");
+    }
+  }
+  if (id === "security") {
+    const field = (name) => lines.map((line) => line.match(new RegExp(`^\\s*${name}\\s*:\\s*(.+?)\\s*$`, "i"))?.[1]).filter(Boolean);
+    const contacts = field("contact");
+    const expires = field("expires");
+    if (!contacts.length) errors.push("Add at least one Contact field (an email as mailto:, an https: URL or a tel: number).");
+    for (const contact of contacts) {
+      if (!/^(mailto:\S+@\S+|https:\/\/\S+|tel:\+?[\d\s()-]+)$/i.test(contact)) errors.push(`Contact "${contact.slice(0, 60)}" must start with mailto:, https:// or tel:.`);
+    }
+    if (expires.length !== 1) {
+      errors.push("Add exactly one Expires field, such as Expires: 2027-10-30T00:00:00Z (required by RFC 9116).");
+    } else {
+      const time = Date.parse(expires[0]);
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(expires[0]) || Number.isNaN(time)) {
+        errors.push("Expires must be a date and time such as 2027-10-30T00:00:00Z.");
+      } else if (time < Date.now()) {
+        errors.push("The Expires date is in the past.");
+      } else if (time - Date.now() > 366 * 86400000) {
+        warnings.push("Expires is more than a year away; RFC 9116 recommends less than a year.");
+      } else if (time - Date.now() < 30 * 86400000) {
+        warnings.push(`security.txt expires in ${Math.ceil((time - Date.now()) / 86400000)} days.`);
+      }
+    }
+    for (const url of [...field("policy"), ...field("encryption"), ...field("acknowledgments"), ...field("canonical"), ...field("hiring")]) {
+      if (/^http:\/\//i.test(url)) warnings.push(`${url.slice(0, 60)} should use https://.`);
+    }
+    if (!field("canonical").length) warnings.push("No Canonical field with the address where this file is published.");
+  }
+  return { errors, warnings };
+}
+
+function siteFilesResponse(request) {
+  const settings = readSiteFileSettings();
+  return {
+    changePassword: settings.changePassword,
+    files: Object.fromEntries(Object.entries(siteFiles).map(([id, definition]) => [id, {
+      ...settings.files[id],
+      label: definition.label,
+      paths: definition.paths,
+      ...checkSiteFile(id, settings.files[id].content),
+    }])),
+    limit: siteFileLimit,
+  };
+}
+
+function handleAdminSiteFiles(request, response) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method === "GET") {
+    sendJson(response, 200, siteFilesResponse(request));
+    return;
+  }
+  if (request.method !== "PUT") {
+    sendJson(response, 405, { error: "Method not allowed." });
+    return;
+  }
+  if (!enforceSameOrigin(request, response)) return;
+  void readAuthBody(request, response, 65536).then((body) => {
+    if (!body) return;
+    const settings = readSiteFileSettings();
+    if (body.id === "change-password") {
+      if (typeof body.enabled !== "boolean") return sendJson(response, 400, { error: "Choose whether to publish the redirect." });
+      settings.changePassword = body.enabled;
+      saveSiteFileSettings(settings);
+      recordAdminLog("audit", request, "Site file updated", `change-password redirect ${body.enabled ? "on" : "off"}`, 200, admin.username);
+      return sendJson(response, 200, siteFilesResponse(request));
+    }
+    if (!Object.hasOwn(siteFiles, body.id)) return sendJson(response, 400, { error: "Unknown site file." });
+    if (typeof body.enabled !== "boolean" || typeof body.content !== "string") return sendJson(response, 400, { error: "Send the file content and whether it is published." });
+    const content = body.content.replace(/\r\n?/g, "\n");
+    if (Buffer.byteLength(content) > siteFileLimit) return sendJson(response, 400, { error: `The file must be ${siteFileLimit / 1024} KB or smaller.` });
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(content)) return sendJson(response, 400, { error: "The file contains control characters." });
+    if (body.enabled && !content.trim()) return sendJson(response, 400, { error: "Add content before publishing the file." });
+    const check = checkSiteFile(body.id, content);
+    if (body.enabled && check.errors.length) return sendJson(response, 400, { error: check.errors[0], errors: check.errors, warnings: check.warnings });
+    settings.files[body.id] = { enabled: body.enabled, content, updatedAt: new Date().toISOString() };
+    saveSiteFileSettings(settings);
+    recordAdminLog("audit", request, "Site file updated", `${siteFiles[body.id].label} ${body.enabled ? "published" : "off"}`, 200, admin.username);
+    sendJson(response, 200, siteFilesResponse(request));
+  });
+}
+
+// Serves a published site file or the change-password redirect; returns false otherwise.
+function serveSiteFile(request, response, pathname) {
+  const settings = readSiteFileSettings();
+  if (pathname === "/.well-known/change-password" && settings.changePassword) {
+    sendRedirect(response, "/my-account.html");
+    return true;
+  }
+  const id = Object.keys(siteFiles).find((key) => siteFiles[key].paths.includes(pathname));
+  const file = id && settings.files[id];
+  if (!file?.enabled || !file.content.trim()) return false;
+  const body = file.content.endsWith("\n") ? file.content : `${file.content}\n`;
+  response.writeHead(200, {
+    "content-type": "text/plain; charset=utf-8",
+    "content-length": Buffer.byteLength(body),
+    "cache-control": "public, max-age=3600",
+    "cross-origin-resource-policy": "cross-origin",
+    "access-control-allow-origin": "*",
+  });
+  response.end(request.method === "HEAD" ? undefined : body);
+  return true;
+}
+
 // ---------------------------------------------------------------- Simple landing page
 
 const landingFonts = {
@@ -10918,6 +11068,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/admin/site-files") {
+    handleAdminSiteFiles(request, response);
+    return;
+  }
+
   if (url.pathname === "/api/admin/landing" || url.pathname === "/api/admin/landing/background") {
     handleAdminLanding(request, response, url);
     return;
@@ -11330,6 +11485,10 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
   if (url.pathname === "/.well-known/mta-sts.txt" && (request.method === "GET" || request.method === "HEAD") && serveMtaStsPolicy(request, response)) {
+    return;
+  }
+  if (["/robots.txt", "/humans.txt", "/security.txt", "/.well-known/security.txt", "/.well-known/change-password"].includes(url.pathname) &&
+    (request.method === "GET" || request.method === "HEAD") && serveSiteFile(request, response, url.pathname)) {
     return;
   }
   if (url.pathname === "/landing/background" && (request.method === "GET" || request.method === "HEAD")) {

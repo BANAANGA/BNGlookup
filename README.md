@@ -764,6 +764,7 @@ Settings are grouped in tabs under **Admin**:
 | Email | The SMTP server for emailed results and monitor alerts, with a test message. |
 | About page | Content of the public [About page](#about-page). |
 | Landing page | Theme, texts and background of the public [landing page](#landing-page), with a live preview. |
+| Site files | [robots.txt, security.txt, humans.txt](#site-files) and the change-password link. |
 
 #### Reverse proxies and Cloudflare
 
@@ -792,6 +793,22 @@ gradient, solid or an uploaded PNG/JPEG/WebP/GIF up to 5 MB, with dimming and
 blur), all texts and tab names, and the interface logged-in users start in. It
 can also be turned off for visitors who are not logged in. See the
 [wiki page](docs/landing-page.md).
+
+#### Site files
+
+**Admin → Site files** publishes the standard files that crawlers, security
+researchers and password managers look for. Each file is only served while it is
+published, and is checked when you save.
+
+| File | Served at | Notes |
+| --- | --- | --- |
+| robots.txt | `/robots.txt` | Templates to keep private pages out, allow everything or block all crawlers; unknown lines are flagged. |
+| security.txt | `/.well-known/security.txt` and `/security.txt` | A form builds an RFC 9116 file. Publishing needs a valid Contact (`mailto:`, `https://` or `tel:`) and one future Expires; you are warned when it expires within 30 days or is set more than a year ahead. |
+| humans.txt | `/humans.txt` | Free text. |
+| Change-password link | `/.well-known/change-password` | Redirects to the account page so password managers can open it (on by default). |
+
+The [hosted MTA-STS policy](#hosted-mta-sts-policy) is managed in the record
+builder. See the [wiki page](docs/site-files.md).
 
 #### About page
 
