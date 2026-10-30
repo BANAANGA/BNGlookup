@@ -1024,3 +1024,74 @@ document.querySelector("#public-access-save").addEventListener("click", async ()
 });
 
 loadPublicAccess();
+
+const backupStatus = document.querySelector("#backup-status");
+
+document.querySelector("#backup-download").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  backupStatus.textContent = "Preparing the backup…";
+  try {
+    const response = await fetch("/api/admin/backup", { method: "POST", credentials: "same-origin" });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "The backup failed.");
+    const blob = await response.blob();
+    const name = (response.headers.get("content-disposition") || "").match(/filename="([^"]+)"/)?.[1] || "bnglookup-backup.tar.gz";
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    backupStatus.textContent = `Downloaded ${name} (${(blob.size / 1048576).toFixed(1)} MB).`;
+  } catch (error) {
+    backupStatus.textContent = "";
+    showAdminError(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+async function waitForRestart() {
+  const started = Date.now();
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  while (Date.now() - started < 120000) {
+    try {
+      const response = await fetch("/healthz", { cache: "no-store" });
+      if (response.ok) {
+        window.location.assign("/login.html?next=%2Fadmin.html");
+        return;
+      }
+    } catch {
+      // Still restarting.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  backupStatus.textContent = "BNGlookup has not come back yet. If it does not run under Docker or a process manager, start it again.";
+}
+
+document.querySelector("#restore-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = document.querySelector("#restore-file").files[0];
+  if (!file) return;
+  if (!window.confirm(`Replace ALL current data with "${file.name}" and restart BNGlookup? Everyone will be logged out.`)) return;
+  const button = event.currentTarget.querySelector("button");
+  button.disabled = true;
+  backupStatus.textContent = "Uploading and checking the backup…";
+  try {
+    const response = await fetch("/api/admin/restore", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/gzip" },
+      body: file,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "The restore failed.");
+    backupStatus.textContent = `Backup${result.createdAt ? ` from ${new Date(result.createdAt).toLocaleString()}` : ""} accepted. Restarting BNGlookup…`;
+    await waitForRestart();
+  } catch (error) {
+    backupStatus.textContent = "";
+    showAdminError(error.message);
+    button.disabled = false;
+  }
+});

@@ -11,6 +11,8 @@ const net = require("node:net");
 const http2 = require("node:http2");
 const crypto = require("node:crypto");
 const zlib = require("node:zlib");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const { promisify } = require("node:util");
 const { DatabaseSync } = require("node:sqlite");
 const { lookup: resolveHost, Resolver: DnsResolver } = require("node:dns/promises");
@@ -105,6 +107,29 @@ const staticFiles = new Set([
 const dataDir = path.resolve(process.env.DATA_DIR || "/data");
 fs.mkdirSync(dataDir, { recursive: true });
 process.umask(0o077);
+// A restore uploaded in Admin -> Backup is staged in restore-pending/ and swapped in here,
+// before the database is opened. The replaced files are kept in pre-restore-<time>/.
+const restorePendingDir = path.join(dataDir, "restore-pending");
+const restorableNames = ["bnglookup.sqlite", "bnglookup.sqlite-wal", "bnglookup.sqlite-shm", "landing-background", "acme"];
+const restoreApplied = (function applyPendingRestore() {
+  if (!fs.existsSync(path.join(restorePendingDir, "ready"))) {
+    fs.rmSync(restorePendingDir, { recursive: true, force: true });
+    return false;
+  }
+  const keep = path.join(dataDir, `pre-restore-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+  fs.mkdirSync(keep, { mode: 0o700 });
+  for (const name of restorableNames) {
+    if (fs.existsSync(path.join(dataDir, name))) fs.renameSync(path.join(dataDir, name), path.join(keep, name));
+  }
+  for (const name of fs.readdirSync(restorePendingDir)) {
+    if (name !== "ready" && restorableNames.includes(name)) fs.renameSync(path.join(restorePendingDir, name), path.join(dataDir, name));
+  }
+  fs.rmSync(restorePendingDir, { recursive: true, force: true });
+  const previous = fs.readdirSync(dataDir).filter((name) => name.startsWith("pre-restore-")).sort();
+  for (const old of previous.slice(0, -3)) fs.rmSync(path.join(dataDir, old), { recursive: true, force: true });
+  console.log(`Restored a backup; the previous data is kept in ${keep}.`);
+  return true;
+}());
 const database = new DatabaseSync(path.join(dataDir, "bnglookup.sqlite"));
 fs.chmodSync(path.join(dataDir, "bnglookup.sqlite"), 0o600);
 const scrypt = promisify(crypto.scrypt);
@@ -401,6 +426,8 @@ database.prepare(`
   INSERT OR IGNORE INTO app_settings (key, value)
   VALUES ('public_lookup_hash_key', ?)
 `).run(crypto.randomBytes(32).toString("hex"));
+// Sessions saved in a restored backup are not carried over: everyone logs in again.
+if (restoreApplied) database.exec("DELETE FROM user_sessions");
 const publicLookupHashKey = database.prepare(
   "SELECT value FROM app_settings WHERE key = 'public_lookup_hash_key'",
 ).get().value;
@@ -4627,6 +4654,194 @@ function zlibDecodeBuffer(body, encoding) {
     return Buffer.alloc(0);
   }
   return body;
+}
+
+// ---------------------------------------------------------------- Backup and restore
+
+const backupLimits = { uploadBytes: 256 * 1024 * 1024, fileBytes: 2 * 1024 * 1024 * 1024 };
+let backupBusy = false;
+
+function tarHeader(name, size, mtime = Date.now()) {
+  const header = Buffer.alloc(512);
+  const write = (value, offset, length) => header.write(value, offset, length, "utf8");
+  const octal = (value, length) => `${value.toString(8).padStart(length - 1, "0")}\0`;
+  write(name, 0, 100);
+  write(octal(0o600, 8), 100, 8);
+  write(octal(0, 8), 108, 8);
+  write(octal(0, 8), 116, 8);
+  write(octal(size, 12), 124, 12);
+  write(octal(Math.floor(mtime / 1000), 12), 136, 12);
+  write("        ", 148, 8);
+  write("0", 156, 1);
+  write("ustar\0", 257, 6);
+  write("00", 263, 2);
+  let sum = 0;
+  for (const byte of header) sum += byte;
+  write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8);
+  return header;
+}
+
+async function* tarStream(entries) {
+  for (const entry of entries) {
+    yield tarHeader(entry.name, entry.size);
+    if (entry.data) yield entry.data;
+    else for await (const chunk of fs.createReadStream(entry.file)) yield chunk;
+    if (entry.size % 512) yield Buffer.alloc(512 - (entry.size % 512));
+  }
+  yield Buffer.alloc(1024);
+}
+
+async function handleAdminBackup(request, response, admin) {
+  if (backupBusy) return sendJson(response, 409, { error: "A backup or restore is already running." });
+  backupBusy = true;
+  const snapshot = path.join(dataDir, `.backup-${crypto.randomBytes(6).toString("hex")}.sqlite`);
+  try {
+    database.exec(`VACUUM INTO '${snapshot.replace(/'/g, "''")}'`);
+    const entries = [];
+    const addFile = (name, file) => entries.push({ name, file, size: fs.statSync(file).size });
+    addFile("bnglookup.sqlite", snapshot);
+    if (fs.existsSync(landingBackgroundFile)) addFile("landing-background", landingBackgroundFile);
+    const acmeDir = path.join(dataDir, "acme");
+    if (fs.existsSync(acmeDir)) {
+      for (const name of fs.readdirSync(acmeDir)) {
+        if (/^[\w.-]+$/.test(name) && fs.statSync(path.join(acmeDir, name)).isFile()) addFile(`acme/${name}`, path.join(acmeDir, name));
+      }
+    }
+    const manifest = Buffer.from(JSON.stringify({
+      app: "BNGlookup", version: appBuild.version, createdAt: new Date().toISOString(), createdBy: admin.username,
+      files: entries.map(({ name, size }) => ({ name, size })),
+    }, null, 2));
+    entries.unshift({ name: "manifest.json", data: manifest, size: manifest.length });
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+    response.writeHead(200, {
+      "content-type": "application/gzip",
+      "content-disposition": `attachment; filename="bnglookup-backup-${stamp}.tar.gz"`,
+    });
+    await pipeline(Readable.from(tarStream(entries)), zlib.createGzip(), response);
+    recordAdminLog("audit", request, "Backup downloaded", `${entries.length} files`, 200, admin.username);
+  } catch (error) {
+    if (!response.headersSent) sendJson(response, 500, { error: `The backup failed: ${error.message}` });
+    else response.destroy(error);
+  } finally {
+    fs.rmSync(snapshot, { force: true });
+    backupBusy = false;
+  }
+}
+
+// Unpacks a .tar.gz into dir, accepting only the files a backup contains.
+async function extractBackup(archiveFile, dir) {
+  const found = new Set();
+  let buffer = Buffer.alloc(0);
+  let current = null;
+  let ended = false;
+  const allowedName = (name) => ["manifest.json", "bnglookup.sqlite", "landing-background"].includes(name) || /^acme\/[\w.-]+$/.test(name);
+  for await (const chunk of fs.createReadStream(archiveFile).pipe(zlib.createGunzip())) {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (!ended) {
+      if (current) {
+        const take = Math.min(current.remaining, buffer.length);
+        if (take) {
+          fs.writeSync(current.fd, buffer.subarray(0, take));
+          buffer = buffer.subarray(take);
+          current.remaining -= take;
+        }
+        if (current.remaining) break;
+        if (buffer.length < current.padding) break;
+        buffer = buffer.subarray(current.padding);
+        fs.closeSync(current.fd);
+        current = null;
+        continue;
+      }
+      if (buffer.length < 512) break;
+      const header = buffer.subarray(0, 512);
+      buffer = buffer.subarray(512);
+      if (header.every((byte) => byte === 0)) {
+        ended = true;
+        break;
+      }
+      const field = (offset, length) => header.subarray(offset, offset + length).toString("utf8").replace(/\0.*$/s, "");
+      const prefix = field(345, 155);
+      const name = (prefix ? `${prefix}/` : "") + field(0, 100);
+      const size = parseInt(field(124, 12).trim() || "0", 8);
+      const type = field(156, 1) || "0";
+      if (type !== "0" || !allowedName(name) || name.includes("..") || !Number.isSafeInteger(size) || size > backupLimits.fileBytes) {
+        throw new Error(`This is not a BNGlookup backup (unexpected entry "${name.slice(0, 60)}").`);
+      }
+      if (found.has(name)) throw new Error(`The backup contains "${name}" twice.`);
+      found.add(name);
+      const target = path.join(dir, name);
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      current = { fd: fs.openSync(target, "wx", 0o600), remaining: size, padding: (512 - (size % 512)) % 512 };
+      if (!size && !current.padding) {
+        fs.closeSync(current.fd);
+        current = null;
+      }
+    }
+  }
+  if (current) throw new Error("The backup file is incomplete.");
+  return found;
+}
+
+function handleAdminRestore(request, response, admin) {
+  if (backupBusy) return sendJson(response, 409, { error: "A backup or restore is already running." });
+  backupBusy = true;
+  const upload = path.join(dataDir, `.restore-upload-${crypto.randomBytes(6).toString("hex")}`);
+  const staging = path.join(dataDir, `.restore-staging-${crypto.randomBytes(6).toString("hex")}`);
+  const finish = (status, body) => {
+    fs.rmSync(upload, { force: true });
+    fs.rmSync(staging, { recursive: true, force: true });
+    backupBusy = false;
+    sendJson(response, status, body);
+  };
+  if (Number(request.headers["content-length"] || 0) > backupLimits.uploadBytes) {
+    request.resume();
+    return finish(413, { error: "The backup file is larger than 256 MB." });
+  }
+  let received = 0;
+  const output = fs.createWriteStream(upload, { mode: 0o600 });
+  request.on("data", (chunk) => {
+    received += chunk.length;
+    if (received > backupLimits.uploadBytes) request.destroy(new Error("too large"));
+  });
+  pipeline(request, output).then(async () => {
+    fs.mkdirSync(staging, { mode: 0o700 });
+    const found = await extractBackup(upload, staging);
+    if (!found.has("manifest.json") || !found.has("bnglookup.sqlite")) throw new Error("This is not a BNGlookup backup (the manifest or database is missing).");
+    const manifest = JSON.parse(fs.readFileSync(path.join(staging, "manifest.json"), "utf8"));
+    if (manifest.app !== "BNGlookup") throw new Error("This is not a BNGlookup backup.");
+    const check = new DatabaseSync(path.join(staging, "bnglookup.sqlite"), { readOnly: true });
+    try {
+      if (check.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok") throw new Error("The database in the backup is damaged.");
+      const admins = check.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin'").get().count;
+      if (!admins) throw new Error("The backup has no administrator account, so nobody could log in after restoring it.");
+    } catch (error) {
+      throw new Error(/no such table/i.test(error.message) ? "The database in the backup is not a BNGlookup database." : error.message);
+    } finally {
+      check.close();
+    }
+    fs.rmSync(path.join(staging, "manifest.json"));
+    fs.rmSync(restorePendingDir, { recursive: true, force: true });
+    fs.renameSync(staging, restorePendingDir);
+    fs.writeFileSync(path.join(restorePendingDir, "ready"), new Date().toISOString(), { mode: 0o600 });
+    recordAdminLog("audit", request, "Backup restore scheduled", `backup from ${String(manifest.createdAt || "unknown").slice(0, 19)}`, 200, admin.username);
+    finish(200, { restarting: true, createdAt: manifest.createdAt || null, version: manifest.version || null });
+    console.log("A backup restore was uploaded; restarting to apply it.");
+    setTimeout(() => shutdown("restore"), 500);
+  }).catch((error) => {
+    const message = error.code === "Z_DATA_ERROR" || /incorrect header check/i.test(error.message)
+      ? "The file is not a .tar.gz backup."
+      : error.message === "too large" ? "The backup file is larger than 256 MB." : error.message;
+    finish(400, { error: message });
+  });
+}
+
+function handleAdminBackupRoutes(request, response, url) {
+  const admin = requireAdmin(request, response);
+  if (!admin) return;
+  if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed." });
+  if (!enforceSameOrigin(request, response)) return;
+  if (url.pathname === "/api/admin/backup") return void handleAdminBackup(request, response, admin);
+  return handleAdminRestore(request, response, admin);
 }
 
 // ---------------------------------------------------------------- Public lookup limits and IP lists
@@ -11186,6 +11401,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
       return;
     }
     handleLandingStart(request, response);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/backup" || url.pathname === "/api/admin/restore") {
+    handleAdminBackupRoutes(request, response, url);
     return;
   }
 

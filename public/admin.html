@@ -75,6 +75,7 @@
           <button class="settings-tab" id="mail-tab" type="button" role="tab" aria-selected="false" aria-controls="mail-panel" tabindex="-1">Email</button>
           <button class="settings-tab" id="about-tab" type="button" role="tab" aria-selected="false" aria-controls="about-panel" tabindex="-1">About page</button>
           <button class="settings-tab" id="landing-tab" type="button" role="tab" aria-selected="false" aria-controls="landing-panel" tabindex="-1">Landing page</button>
+          <button class="settings-tab" id="backup-tab" type="button" role="tab" aria-selected="false" aria-controls="backup-panel" tabindex="-1">Backup</button>
           <button class="settings-tab" id="site-files-tab" type="button" role="tab" aria-selected="false" aria-controls="site-files-panel" tabindex="-1">Site files</button>
         </div>
         <form id="settings-form">
@@ -242,6 +243,19 @@
           </form>
           <h2 class="policy-heading">Preview</h2>
           <div class="about-content about-preview" id="about-preview"></div>
+        </section>
+        <section class="settings-panel" id="backup-panel" role="tabpanel" aria-labelledby="backup-tab" hidden>
+          <h2>Download a backup</h2>
+          <p class="form-hint">One <code>.tar.gz</code> file with the database (users, settings, monitors, history, logs and statistics), the SSL certificate and the landing page background. Keep it somewhere safe: it contains password hashes, two-factor secrets and certificate keys.</p>
+          <button class="submit-button" id="backup-download" type="button"><span>Download backup</span><span aria-hidden="true">↓</span></button>
+          <h2 class="policy-heading">Restore a backup</h2>
+          <p class="form-hint">Replaces <strong>all</strong> current data with the backup and restarts BNGlookup; everyone is logged out. The current data is kept in a <code>pre-restore-…</code> folder in the data volume (the last three are kept). With Docker the container restarts by itself (<code>restart: unless-stopped</code>); without a process manager, start BNGlookup again yourself.</p>
+          <form id="restore-form" class="admin-create-form">
+            <label for="restore-file">Backup file</label>
+            <input id="restore-file" type="file" accept=".tar.gz,.tgz,application/gzip" required>
+            <button class="submit-button" type="submit"><span>Restore backup</span><span aria-hidden="true">→</span></button>
+          </form>
+          <p class="form-hint" id="backup-status" role="status"></p>
         </section>
         <section class="settings-panel" id="site-files-panel" role="tabpanel" aria-labelledby="site-files-tab" hidden>
           <h2>Site files</h2>
