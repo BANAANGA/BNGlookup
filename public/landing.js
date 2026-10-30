@@ -359,7 +359,8 @@ function renderEmail(data) {
     });
   }
   const issues = [
-    ...normalizeIssues(data.spf?.issues), ...normalizeIssues(data.dmarc?.issues), ...normalizeIssues(data.mtaSts?.issues),
+    // A missing record is reported once below, not also by the tool's own findings.
+    ...(data.spf?.found ? normalizeIssues(data.spf.issues) : []), ...(data.dmarc?.found ? normalizeIssues(data.dmarc.issues) : []), ...normalizeIssues(data.mtaSts?.issues),
     ...normalizeIssues(data.tlsRpt?.issues), ...normalizeIssues(data.bimi?.issues), ...smtp.flatMap((server) => normalizeIssues(server.issues)),
   ];
   if (!data.spf?.found) issues.push({ severity: "high", message: "No SPF record, so anyone can send mail that claims to come from this domain." });
@@ -831,7 +832,14 @@ function buildLayout(target) {
     <div class="ring" id="ring"><svg viewBox="0 0 100 100" aria-hidden="true"><circle class="ring-track" cx="50" cy="50" r="42"/><circle class="ring-value" id="ring-value" cx="50" cy="50" r="42"/></svg>
       <div class="ring-label"><span><span id="ring-number">0</span><small>Score</small></span></div></div>
     <div><p class="summary-target" id="summary-target"></p><p class="summary-text" id="summary-text"></p>
-      <div class="summary-counts" id="summary-counts"></div><div class="progress" id="progress"><div class="progress-bar" id="progress-bar"></div></div></div>`;
+      <div class="summary-counts" id="summary-counts"></div><div class="progress" id="progress"><div class="progress-bar" id="progress-bar"></div></div>
+      <div class="summary-actions" id="summary-actions" hidden>
+        <button class="detail-action" type="button" id="share-button">Share link</button>
+        <button class="detail-action" type="button" id="pdf-button">Save as PDF</button>
+      </div>
+      <div class="share-box" id="share-box" hidden></div></div>`;
+  byId("share-button").addEventListener("click", shareScan);
+  byId("pdf-button").addEventListener("click", () => window.print());
   byId("summary-target").textContent = target.value;
   const circle = byId("ring-value");
   const length = 2 * Math.PI * 42;
@@ -950,6 +958,7 @@ function updateSummary() {
   ].filter(Boolean).join("");
   byId("progress-bar").style.width = `${page.jobs.length ? (finished.length / page.jobs.length) * 100 : 100}%`;
   byId("progress").classList.toggle("done", done);
+  byId("summary-actions").hidden = !done || page.preview;
 
   document.querySelectorAll(".tab").forEach((tab) => {
     const state = categoryState(tab.dataset.category);
@@ -1038,13 +1047,15 @@ async function startScan() {
 
   page.jobs = jobs;
   page.target = target;
+  page.shared = null;
+  page.scannedAt = new Date();
   document.body.classList.add("has-results");
   byId("results").hidden = false;
   buildLayout(target);
   updateSummary();
   if (!page.preview) {
     try {
-      window.history.replaceState(null, "", `#${encodeURIComponent(target.value)}`);
+      window.history.replaceState(null, "", `${window.location.pathname.startsWith("/s/") ? "/" : ""}#${encodeURIComponent(target.value)}`);
     } catch {
       // Not important if the address cannot be updated.
     }
@@ -1070,6 +1081,127 @@ async function startScan() {
   document.body.classList.remove("is-scanning");
   byId("scan-button").disabled = false;
 }
+
+// ------------------------------------------------------------------ Share and PDF
+
+const allLandingFeatures = new Set(["forward", "whois", "propagation", "dns-health", "email", "web", "sslscan", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+
+async function shareScan() {
+  const box = byId("share-box");
+  let link = page.shared ? window.location.href.split("#")[0] : "";
+  let expires = page.shared?.expiresAt;
+  if (!link) {
+    byId("share-button").disabled = true;
+    try {
+      const response = await fetch("/api/landing/share", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          target: page.target,
+          jobs: page.jobs.map((job) => (job.error ? { id: job.id, error: job.error } : { id: job.id, data: job.data })),
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "The result could not be shared.");
+      link = `${window.location.origin}${result.url}`;
+      expires = result.expiresAt;
+      page.shared = { url: result.url, expiresAt: result.expiresAt, own: true };
+    } catch (error) {
+      box.hidden = false;
+      box.innerHTML = `<p class="card-error">${escapeHtml(error.message)}</p>`;
+      return;
+    } finally {
+      byId("share-button").disabled = false;
+    }
+  }
+  box.hidden = false;
+  box.innerHTML = `<div class="share-row"><input class="share-link" type="text" readonly value="${escapeHtml(link)}" aria-label="Share link"><button class="fix-copy share-copy" type="button" data-copy="${escapeHtml(link)}">Copy</button></div>
+    <p class="card-summary">Anyone with this link can see this result${expires ? ` until ${escapeHtml(formatDate(expires))}` : ""}.</p>`;
+  box.querySelector(".share-link").select();
+}
+
+async function openSharedScan(id) {
+  let shared;
+  try {
+    const response = await fetch(`/api/landing/shares/${encodeURIComponent(id)}`, { credentials: "same-origin" });
+    shared = await response.json();
+    if (!response.ok) throw new Error(shared.error || "This shared result could not be loaded.");
+  } catch (error) {
+    showNotice(error.message);
+    return;
+  }
+  const stored = new Map(shared.jobs.map((job) => [job.id, job]));
+  page.target = shared.target;
+  page.jobs = planJobs(shared.target, allLandingFeatures).filter((job) => stored.has(job.id));
+  page.shared = { url: `/s/${shared.id}`, expiresAt: shared.expiresAt };
+  page.scannedAt = new Date(shared.createdAt);
+  for (const job of page.jobs) {
+    const entry = stored.get(job.id);
+    job.done = true;
+    if (entry.error !== undefined) {
+      job.error = entry.error;
+      continue;
+    }
+    job.data = entry.data;
+    try {
+      job.view = job.render(entry.data);
+      alignStatus(job);
+    } catch {
+      job.error = "This part of the shared result could not be shown.";
+    }
+  }
+  byId("query").value = shared.target.value;
+  document.body.classList.add("has-results");
+  byId("results").hidden = false;
+  buildLayout(shared.target);
+  page.jobs.forEach(drawCard);
+  updateSummary();
+  const notice = byId("notice");
+  notice.hidden = false;
+  notice.classList.add("shared-notice");
+  notice.innerHTML = `Shared result, scanned ${escapeHtml(page.scannedAt.toLocaleString())}. <button class="example" type="button" id="rescan">Run a new scan</button>`;
+  byId("rescan").addEventListener("click", () => {
+    notice.classList.remove("shared-notice");
+    startScan();
+  });
+}
+
+// Printing (Save as PDF) shows every category, open lists and the "How to fix" advice.
+let printState = null;
+window.addEventListener("beforeprint", () => {
+  if (!page.jobs.length || printState) return;
+  printState = {
+    // The theme's colors are set inline; printing uses its own light colors.
+    themeStyle: document.documentElement.getAttribute("style") || "",
+    panels: [...document.querySelectorAll(".panel")].map((panel) => [panel, panel.hidden]),
+    items: [...document.querySelectorAll("li[hidden]")],
+    fixes: [...document.querySelectorAll(".fix:not([open])")],
+  };
+  document.querySelectorAll(".panel").forEach((panel) => {
+    panel.hidden = false;
+    panel.dataset.title = byId(panel.getAttribute("aria-labelledby"))?.querySelector(".tab-name")?.textContent || "";
+  });
+  printState.items.forEach((item) => { item.hidden = false; });
+  printState.fixes.forEach((fix) => { fix.open = true; });
+  document.documentElement.removeAttribute("style");
+  let meta = byId("print-meta");
+  if (!meta) {
+    meta = document.createElement("p");
+    meta.id = "print-meta";
+    meta.className = "print-meta";
+    byId("results").prepend(meta);
+  }
+  meta.textContent = `${page.config?.siteTitle || "BNGlookup"} scan report · ${(page.scannedAt || new Date()).toLocaleString()}${page.shared ? ` · ${window.location.origin}${page.shared.url}` : ""}`;
+});
+window.addEventListener("afterprint", () => {
+  if (!printState) return;
+  printState.panels.forEach(([panel, hidden]) => { panel.hidden = hidden; });
+  printState.items.forEach((item) => { item.hidden = true; });
+  printState.fixes.forEach((fix) => { fix.open = false; });
+  document.documentElement.setAttribute("style", printState.themeStyle);
+  printState = null;
+});
 
 // ------------------------------------------------------------------ Start
 
@@ -1112,7 +1244,11 @@ async function init() {
     byId("query").disabled = true;
     byId("scan-button").disabled = true;
     byId("examples").hidden = true;
-  } else {
+  }
+  const sharedId = window.location.pathname.match(/^\/s\/([A-Za-z0-9_-]{22})$/)?.[1];
+  if (sharedId) {
+    await openSharedScan(sharedId);
+  } else if (allowedFeatures().size) {
     const fromHash = decodeURIComponent(window.location.hash.slice(1));
     if (fromHash && !page.preview) {
       byId("query").value = fromHash;

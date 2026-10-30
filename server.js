@@ -5278,6 +5278,87 @@ function serveLandingBackground(request, response) {
   response.end(request.method === "HEAD" ? undefined : data);
 }
 
+// Shared landing page scans: stored results anyone with the link can open at /s/<id>.
+// Anonymous visitors may share too, with a per-IP daily limit and a shorter lifetime.
+database.exec(`
+  CREATE TABLE IF NOT EXISTS landing_shares (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    client_hash TEXT,
+    title TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS landing_shares_client ON landing_shares(client_hash, created_at);
+`);
+const landingShareLimits = { payloadBytes: 768 * 1024, anonymousPerDay: 10, anonymousTotal: 5000, userLifetimeMs: 30 * 86400000, anonymousLifetimeMs: 7 * 86400000 };
+const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+
+function validLandingSharePayload(body) {
+  const target = body?.target;
+  if (!target || !["domain", "ip", "mac"].includes(target.kind) || typeof target.value !== "string" || !target.value || target.value.length > 253 ||
+    /[\s\u0000-\u001f<>"]/.test(target.value)) return null;
+  if (!Array.isArray(body.jobs) || !body.jobs.length || body.jobs.length > 20) return null;
+  const jobs = [];
+  for (const job of body.jobs) {
+    if (!job || !landingJobIds.has(job.id) || jobs.some((item) => item.id === job.id)) return null;
+    if (job.error !== undefined) {
+      if (typeof job.error !== "string") return null;
+      jobs.push({ id: job.id, error: job.error.slice(0, 300) });
+    } else if (job.data && typeof job.data === "object") {
+      jobs.push({ id: job.id, data: job.data });
+    } else {
+      return null;
+    }
+  }
+  return { target: { kind: target.kind, value: target.value }, jobs, createdAt: new Date().toISOString() };
+}
+
+async function handleLandingShares(request, url, response) {
+  const now = Date.now();
+  database.prepare("DELETE FROM landing_shares WHERE expires_at <= ?").run(now);
+  if (url.pathname.startsWith("/api/landing/shares/")) {
+    const id = url.pathname.slice("/api/landing/shares/".length);
+    const row = /^[A-Za-z0-9_-]{22}$/.test(id) && request.method === "GET" ? database.prepare("SELECT * FROM landing_shares WHERE id = ?").get(id) : null;
+    if (!row) return sendJson(response, request.method === "GET" ? 404 : 405, { error: "This shared result does not exist or has expired." });
+    response.setHeader("x-robots-tag", "noindex");
+    return sendJson(response, 200, { id: row.id, title: row.title, expiresAt: new Date(row.expires_at).toISOString(), ...JSON.parse(row.payload) });
+  }
+  if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed." });
+  if (!enforceSameOrigin(request, response)) return;
+  const user = currentUser(request);
+  if (!user && !readLandingConfig().enabled) return sendJson(response, 404, { error: "The landing page is turned off." });
+  let body;
+  try {
+    body = await readJsonRequest(request, landingShareLimits.payloadBytes + 4096);
+  } catch (error) {
+    return sendJson(response, error.statusCode || 400, { error: error.message });
+  }
+  const payload = validLandingSharePayload(body);
+  if (!payload) return sendJson(response, 400, { error: "This result cannot be shared." });
+  const text = JSON.stringify(payload);
+  if (Buffer.byteLength(text) > landingShareLimits.payloadBytes) return sendJson(response, 413, { error: "This result is too large to share." });
+  let clientHash = null;
+  if (!user) {
+    clientHash = crypto.createHmac("sha256", publicLookupHashKey).update(getClientAddress(request) || "unknown").digest("hex");
+    const today = database.prepare("SELECT COUNT(*) AS count FROM landing_shares WHERE client_hash = ? AND created_at > ?").get(clientHash, now - 86400000).count;
+    if (today >= landingShareLimits.anonymousPerDay) {
+      return sendJson(response, 429, { error: `You can share ${landingShareLimits.anonymousPerDay} results per day without an account.` });
+    }
+    const total = database.prepare("SELECT COUNT(*) AS count FROM landing_shares WHERE user_id IS NULL").get().count;
+    if (total >= landingShareLimits.anonymousTotal) {
+      database.prepare("DELETE FROM landing_shares WHERE id IN (SELECT id FROM landing_shares WHERE user_id IS NULL ORDER BY created_at LIMIT ?)").run(total - landingShareLimits.anonymousTotal + 1);
+    }
+  }
+  const id = crypto.randomBytes(16).toString("base64url").slice(0, 22);
+  const expiresAt = now + (user ? landingShareLimits.userLifetimeMs : landingShareLimits.anonymousLifetimeMs);
+  database.prepare("INSERT INTO landing_shares (id, user_id, client_hash, title, payload, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(id, user?.id ?? null, clientHash, payload.target.value, text, now, expiresAt);
+  recordAdminLog("audit", request, "Landing scan shared", payload.target.value, 201, user?.username ?? null);
+  sendJson(response, 201, { id, url: `/s/${id}`, expiresAt: new Date(expiresAt).toISOString() });
+}
+
 // A combined landing scan counts as one public lookup: the token it returns lets the
 // browser call the public tools for a few minutes without using more of the daily quota.
 function handleLandingStart(request, response) {
@@ -11395,6 +11476,11 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
 
+  if (url.pathname === "/api/landing/share" || url.pathname.startsWith("/api/landing/shares/")) {
+    void handleLandingShares(request, url, response);
+    return;
+  }
+
   if (url.pathname === "/api/landing/start") {
     if (request.method !== "POST") {
       sendJson(response, 405, { error: "Method not allowed." });
@@ -11860,7 +11946,8 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     response.setHeader("content-security-policy", response.getHeader("content-security-policy").replace("frame-ancestors 'none'", "frame-ancestors 'self'"));
     response.setHeader("x-frame-options", "SAMEORIGIN");
   }
-  const requestedPath = url.pathname === "/landing" || landingRoot ? "/landing.html" : url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
+  const sharedScan = /^\/s\/[A-Za-z0-9_-]{22}$/.test(url.pathname);
+  const requestedPath = url.pathname === "/landing" || landingRoot || sharedScan ? "/landing.html" : url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
   if (!staticFiles.has(requestedPath)) {
     response.writeHead(404);
     response.end();
