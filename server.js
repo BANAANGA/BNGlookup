@@ -157,6 +157,7 @@ const featureAccessDefaults = {
   web: "user",
   "email-headers": "user",
   "dmarc-reports": "user",
+  "tlsrpt-reports": "user",
   "record-builder": "user",
   "bulk-domains": "admin",
   monitors: "user",
@@ -191,6 +192,7 @@ const featureNames = {
   web: "Web check (redirects, security headers, HTTP/2 and HTTP/3)",
   "email-headers": "Email header analyzer",
   "dmarc-reports": "DMARC aggregate report viewer",
+  "tlsrpt-reports": "TLS-RPT report viewer (SMTP TLS reports)",
   "record-builder": "SPF, DMARC, MTA-STS, TLS-RPT and BIMI record builder",
   "bulk-domains": "Bulk domain check (up to 50 domains)",
   monitors: "Monitoring and email alerts (requires login)",
@@ -9107,7 +9109,7 @@ function handleAdminAbout(request, response) {
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
   "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
-  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server",
+  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 

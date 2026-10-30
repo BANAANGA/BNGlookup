@@ -100,6 +100,11 @@ async function runToolMode(toolMode, lookupName) {
     renderHeadersResult(data);
     return { data, subject: data.summary.subject || data.summary.from || "message" };
   }
+  if (toolMode === "tlsrpt-reports") {
+    const data = await readTlsRptReports([...tlsrptFilesInput.files]);
+    renderTlsRptResult(data);
+    return { data, subject: `${data.domains.join(", ") || "reports"} (${data.reports.length} TLS reports)` };
+  }
   if (toolMode === "dmarc-reports") {
     const data = await readDmarcReports([...dmarcFilesInput.files]);
     renderDmarcReportResult(data);
@@ -422,7 +427,7 @@ async function inflate(bytes, format) {
 }
 
 // Reads the XML files inside a .zip using its central directory (stored or deflated entries).
-async function unzipXml(bytes) {
+async function unzipXml(bytes, namePattern = /\.xml$/i) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let end = -1;
   for (let index = bytes.length - 22; index >= Math.max(0, bytes.length - 65557); index -= 1) {
@@ -445,7 +450,7 @@ async function unzipXml(bytes) {
     const localOffset = view.getUint32(offset + 42, true);
     const name = new TextDecoder().decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
     offset += 46 + nameLength + extraLength + commentLength;
-    if (!/\.xml$/i.test(name)) continue;
+    if (!namePattern.test(name)) continue;
     const dataStart = localOffset + 30 + view.getUint16(localOffset + 26, true) + view.getUint16(localOffset + 28, true);
     const data = bytes.subarray(dataStart, dataStart + compressedSize);
     if (method === 0) texts.push(new TextDecoder().decode(data));
@@ -454,11 +459,11 @@ async function unzipXml(bytes) {
   return texts;
 }
 
-async function readReportFile(file) {
+async function readReportFile(file, namePattern = /\.xml$/i) {
   if (file.size > dmarcLimits.fileBytes) throw new Error(`${file.name} is larger than 20 MB.`);
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (bytes[0] === 0x1f && bytes[1] === 0x8b) return [await inflate(bytes, "gzip")];
-  if (bytes[0] === 0x50 && bytes[1] === 0x4b) return unzipXml(bytes);
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b) return unzipXml(bytes, namePattern);
   return [new TextDecoder().decode(bytes)];
 }
 
@@ -618,6 +623,168 @@ function renderDmarcReportResult(data) {
       <h3>Reporters</h3>
       ${dataTable(["Organization", "Reports", "Messages"], reportRows)}
     </section>`;
+  applyBars(resultPanel);
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- TLS-RPT reports (RFC 8460)
+
+const tlsRptResultTypes = {
+  "starttls-not-supported": "The receiving server did not offer STARTTLS.",
+  "certificate-host-mismatch": "The certificate does not cover the MX host name.",
+  "certificate-expired": "The certificate has expired.",
+  "certificate-not-trusted": "The certificate is not signed by a trusted authority.",
+  "validation-failure": "The certificate or connection could not be validated.",
+  "tlsa-invalid": "The DANE TLSA record is invalid.",
+  "dnssec-invalid": "DNSSEC validation failed for the DANE records.",
+  "dane-required": "DANE is required but no usable TLSA record was found.",
+  "sts-policy-fetch-error": "The MTA-STS policy file could not be downloaded.",
+  "sts-policy-invalid": "The MTA-STS policy file is invalid.",
+  "sts-webpki-invalid": "The MTA-STS policy host has an invalid HTTPS certificate.",
+};
+
+function parseTlsRpt(text) {
+  let report;
+  try {
+    report = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!report || !Array.isArray(report.policies) || !report["date-range"]) return null;
+  return {
+    org: String(report["organization-name"] || "Unknown reporter"),
+    contact: String(report["contact-info"] || ""),
+    reportId: String(report["report-id"] || ""),
+    begin: Date.parse(report["date-range"]["start-datetime"]) || null,
+    end: Date.parse(report["date-range"]["end-datetime"]) || null,
+    policies: report.policies.map((entry) => {
+      const policy = entry.policy || {};
+      const policyString = Array.isArray(policy["policy-string"]) ? policy["policy-string"].map(String) : [];
+      return {
+        type: String(policy["policy-type"] || "unknown"),
+        domain: String(policy["policy-domain"] || "").toLowerCase(),
+        mode: policyString.map((line) => line.match(/^\s*mode\s*:\s*(\S+)/i)?.[1]).find(Boolean) || null,
+        mxHosts: Array.isArray(policy["mx-host"]) ? policy["mx-host"].map(String) : [],
+        success: Number(entry.summary?.["total-successful-session-count"]) || 0,
+        failure: Number(entry.summary?.["total-failure-session-count"]) || 0,
+        failures: (Array.isArray(entry["failure-details"]) ? entry["failure-details"] : []).map((detail) => ({
+          type: String(detail["result-type"] || "unknown"),
+          sendingIp: String(detail["sending-mta-ip"] || ""),
+          receivingMx: String(detail["receiving-mx-hostname"] || ""),
+          receivingIp: String(detail["receiving-ip"] || ""),
+          count: Number(detail["failed-session-count"]) || 0,
+          info: String(detail["additional-information"] || detail["failure-reason-code"] || "").slice(0, 300),
+        })),
+      };
+    }),
+  };
+}
+
+async function readTlsRptReports(files) {
+  if (!files.length) throw new Error("Choose one or more report files.");
+  if (files.length > dmarcLimits.files) throw new Error(`Choose at most ${dmarcLimits.files} files.`);
+  const reports = [];
+  const skipped = [];
+  for (const file of files) {
+    try {
+      const parsed = (await readReportFile(file, /\.json$/i)).map(parseTlsRpt).filter(Boolean);
+      if (!parsed.length) skipped.push(`${file.name} (not a TLS-RPT report)`);
+      reports.push(...parsed);
+    } catch (error) {
+      skipped.push(`${file.name} (${error.message})`);
+    }
+  }
+  if (!reports.length) throw new Error(`No TLS-RPT reports could be read. ${skipped.join("; ")}`);
+  const totals = { success: 0, failure: 0 };
+  const domains = new Map();
+  const reporters = new Map();
+  const failures = new Map();
+  for (const report of reports) {
+    const reporter = reporters.get(report.org) || { org: report.org, reports: 0, success: 0, failure: 0 };
+    reporter.reports += 1;
+    for (const policy of report.policies) {
+      totals.success += policy.success;
+      totals.failure += policy.failure;
+      reporter.success += policy.success;
+      reporter.failure += policy.failure;
+      const key = `${policy.domain}|${policy.type}|${policy.mode || ""}`;
+      const domain = domains.get(key) || { domain: policy.domain, type: policy.type, mode: policy.mode, mxHosts: new Set(), success: 0, failure: 0 };
+      domain.success += policy.success;
+      domain.failure += policy.failure;
+      policy.mxHosts.forEach((host) => domain.mxHosts.add(host));
+      domains.set(key, domain);
+      for (const failure of policy.failures) {
+        const failureKey = `${failure.type}|${failure.receivingMx}|${failure.receivingIp}`;
+        const entry = failures.get(failureKey) || { ...failure, count: 0, senders: new Set(), reporters: new Set() };
+        entry.count += failure.count;
+        if (failure.sendingIp) entry.senders.add(failure.sendingIp);
+        entry.reporters.add(report.org);
+        failures.set(failureKey, entry);
+      }
+    }
+    reporters.set(report.org, reporter);
+  }
+  const times = reports.flatMap((report) => [report.begin, report.end]).filter(Boolean);
+  return {
+    domains: [...new Set([...domains.values()].map((entry) => entry.domain).filter(Boolean))],
+    policies: [...domains.values()].map((entry) => ({ ...entry, mxHosts: [...entry.mxHosts].slice(0, 10) })),
+    reports: reports.map((report) => ({ org: report.org, reportId: report.reportId, begin: report.begin, end: report.end })).slice(0, 500),
+    reporters: [...reporters.values()].sort((left, right) => (right.success + right.failure) - (left.success + left.failure)),
+    failures: [...failures.values()].sort((left, right) => right.count - left.count).slice(0, 300)
+      .map((entry) => ({ ...entry, senders: [...entry.senders].slice(0, 5), reporters: [...entry.reporters].slice(0, 5) })),
+    totals,
+    begin: times.length ? Math.min(...times) : null,
+    end: times.length ? Math.max(...times) : null,
+    skipped,
+  };
+}
+
+function renderTlsRptResult(data) {
+  const sessions = data.totals.success + data.totals.failure;
+  const rate = sessions ? Math.round(data.totals.success / sessions * 1000) / 10 : 0;
+  const tone = !data.totals.failure ? "ok" : rate >= 95 ? "warn" : "bad";
+  const policyTypes = new Set(data.policies.map((policy) => policy.type));
+  const testing = data.policies.some((policy) => policy.type === "sts" && policy.mode === "testing");
+  const verdict = !sessions
+    ? ["warn", "The reports contain no sessions."]
+    : !data.totals.failure
+      ? ["ok", `${rate}% of sessions to your mail servers were encrypted and verified.${testing ? " You can switch MTA-STS from testing to enforce." : ""}`]
+      : [tone, `${data.totals.failure.toLocaleString()} of ${sessions.toLocaleString()} session(s) failed. Fix the causes below${testing ? " before switching MTA-STS to enforce, or that mail would not be delivered" : ", or senders that enforce TLS cannot deliver to you"}.`];
+  const policyRows = data.policies.map((policy) => {
+    const total = policy.success + policy.failure;
+    const percent = total ? Math.round(policy.success / total * 100) : 0;
+    return `<tr><td>${copyableResult(policy.domain || "?")}</td><td>${escapeHtml({ sts: "MTA-STS", tlsa: "DANE", "no-policy-found": "No policy" }[policy.type] || policy.type)}</td>
+      <td>${policy.mode ? pill(policy.mode === "enforce" ? "ok" : "warn", policy.mode) : ""}</td>
+      <td>${escapeHtml(total.toLocaleString())}</td><td class="hop-delay">${escapeHtml(`${percent}%`)}${percentBar(percent, percent >= 99 ? "ok" : percent >= 90 ? "warn" : "bad")}</td>
+      <td>${escapeHtml(policy.mxHosts.join(", "))}</td></tr>`;
+  });
+  const failureRows = data.failures.map((failure) => `
+    <tr><td>${pill("fail", failure.type)}<br><span class="trace-silent">${escapeHtml(tlsRptResultTypes[failure.type] || "")}</span></td>
+      <td>${escapeHtml(failure.count.toLocaleString())}</td>
+      <td>${failure.receivingMx ? copyableResult(failure.receivingMx) : ""}${failure.receivingIp ? `<br><span class="trace-silent">${escapeHtml(failure.receivingIp)}</span>` : ""}</td>
+      <td>${escapeHtml(failure.senders.join(", "))}</td>
+      <td>${escapeHtml(failure.reporters.join(", "))}${failure.info ? `<br><span class="trace-silent">${escapeHtml(failure.info)}</span>` : ""}</td></tr>`);
+  const reporterRows = data.reporters.map((reporter) => `<tr><td>${escapeHtml(reporter.org)}</td><td>${escapeHtml(reporter.reports)}</td><td>${escapeHtml(reporter.success.toLocaleString())}</td><td>${escapeHtml(reporter.failure.toLocaleString())}</td></tr>`);
+  const range = data.begin ? `${new Date(data.begin).toLocaleDateString()} – ${new Date(data.end).toLocaleDateString()}` : "";
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">TLS REPORTS</p><h2>${escapeHtml(data.domains.join(", ") || "Unknown domain")}</h2><p class="web-title">${escapeHtml(`${data.reports.length} report(s) · ${range}`)}</p></div>
+      <span class="status-badge ${tone === "ok" ? "success" : "warning"}">${escapeHtml(`${rate}% secure`)}</span>
+    </div>
+    ${scoreTiles([
+      ["Sessions", sessions ? "ok" : "warn", sessions.toLocaleString()],
+      ["Successful", tone, `${rate}%`],
+      ["Failed sessions", data.totals.failure ? "bad" : "ok", data.totals.failure.toLocaleString()],
+      ["Policy", policyTypes.has("sts") ? (testing ? "warn" : "ok") : policyTypes.has("tlsa") ? "ok" : "warn",
+        [...policyTypes].map((type) => ({ sts: `MTA-STS${testing ? " (testing)" : ""}`, tlsa: "DANE", "no-policy-found": "None" }[type] || type)).join(", ")],
+      ["Reporters", "ok", String(data.reporters.length)],
+    ])}
+    <p class="dmarc-verdict ${verdict[0]}">${escapeHtml(verdict[1])}</p>
+    ${data.skipped.length ? `<p class="detail-notice">${escapeHtml(`Skipped: ${data.skipped.join("; ")}`)}</p>` : ""}
+    <section class="email-auth"><h3>Policies</h3>${dataTable(["Domain", "Policy", "Mode", "Sessions", "Successful", "MX hosts"], policyRows)}</section>
+    ${failureRows.length ? `<section class="email-auth"><h3>Failures ${pill("fail", String(data.failures.length))}</h3>${dataTable(["Reason", "Sessions", "Your server", "Sending servers", "Reported by"], failureRows, "dmarc-sources-table")}</section>` : ""}
+    <section class="email-auth"><h3>Reporters</h3>${dataTable(["Organization", "Reports", "Successful", "Failed"], reporterRows)}
+      <p class="scan-disclaimer">Mail providers that support TLS-RPT send one report per day to the rua= address of your _smtp._tls TXT record. "No policy" means the sender found neither MTA-STS nor DANE and delivered opportunistically.</p></section>`;
   applyBars(resultPanel);
   resultPanel.hidden = false;
 }
