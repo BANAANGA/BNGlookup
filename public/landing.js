@@ -508,6 +508,94 @@ function renderMac(data) {
   };
 }
 
+// ------------------------------------------------------------------ How to fix
+// Plain-language advice for common findings, matched on the finding's text. A snippet is
+// a ready-to-use record, header or setting for the scanned domain.
+
+const fixCatalog = [
+  { match: /more than one spf record/i, text: "Merge all SPF records into one TXT record that starts with v=spf1; receivers treat two records as an error." },
+  { match: /\+all allows every server/i, text: "Replace +all with -all (or ~all while testing) so only the listed servers may send mail.", snippet: (d) => `${d}. TXT "v=spf1 mx -all"` },
+  { match: /no spf record|spf.*no spf record/i, text: "Publish one SPF record listing the servers and services that send mail for the domain. Add include: entries for services such as your mail provider or newsletter tool.", snippet: (d) => `${d}. TXT "v=spf1 mx -all"` },
+  { match: /\?all is neutral|no all mechanism/i, text: "End the SPF record with -all (or ~all) so unlisted senders fail.", snippet: (d) => `${d}. TXT "v=spf1 mx -all"` },
+  { match: /spf needs \d+ dns lookups/i, text: "Remove unused include: entries, or flatten them into ip4:/ip6: ranges with the SPF flattener in the full interface." },
+  { match: /more than one dmarc record/i, text: "Keep exactly one TXT record at _dmarc; delete the others." },
+  { match: /no dmarc record|dmarc.*no dmarc record/i, text: "Publish a DMARC record. Start by collecting reports, then move to quarantine and reject once all your own mail passes.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@${d}"` },
+  { match: /p=none only monitors|policy: none|dmarc policy is p=none/i, text: "Check the DMARC reports; once your own mail passes SPF or DKIM, raise the policy to quarantine and later reject.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=reject; rua=mailto:dmarc-reports@${d}"` },
+  { match: /no valid p= policy/i, text: "Add a p= tag with none, quarantine or reject to the DMARC record.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@${d}"` },
+  { match: /dkim|common selectors/i, text: "Turn on DKIM signing at your mail provider and publish the public key it gives you as a TXT record at <selector>._domainkey. If you already sign, the selector may simply have an uncommon name." },
+  { match: /starttls is not offered|starttls/i, text: "Enable STARTTLS on the mail server with a valid certificate, so mail to the domain is encrypted in transit." },
+  { match: /mta-sts.*testing mode/i, text: "After a few weeks of clean TLS reports, change mode: testing to mode: enforce in the policy file and update the id in the _mta-sts record." },
+  { match: /mta-sts/i, text: "Publish an MTA-STS policy so senders require TLS. You need a TXT record plus a policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt (BNGlookup can host it).", snippet: (d) => `_mta-sts.${d}. TXT "v=STSv1; id=${new Date().toISOString().slice(0, 10).replace(/-/g, "")}"` },
+  { match: /tls-rpt/i, text: "Publish a TLS-RPT record to receive reports about failed encrypted deliveries.", snippet: (d) => `_smtp._tls.${d}. TXT "v=TLSRPTv1; rua=mailto:tls-reports@${d}"` },
+  { match: /bimi requires dmarc/i, text: "BIMI logos are only shown when DMARC is enforced: raise the DMARC policy to quarantine or reject.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@${d}"` },
+  { match: /logo could not be fetched|logo.*served as/i, text: "Serve the BIMI logo directly (no redirects) over HTTPS as image/svg+xml in the SVG Tiny Portable/Secure format. BNGlookup can host it at /logo.svg." },
+  { match: /mark certificate.*(expire|not valid)/i, text: "Renew the Verified Mark Certificate with your certificate authority and replace the file at the a= address." },
+  { match: /dnssec is not enabled|dnssec/i, text: "Turn on DNSSEC signing at your DNS host, then add the DS record it shows at your domain registrar." },
+  { match: /chain of trust is broken|no ds record matches/i, text: "The DS record at the registrar does not match the zone's keys. Replace it with the DS record your DNS host currently shows." },
+  { match: /rrsig.*(expired|expires soon)/i, text: "The zone's signatures are expiring: check that automatic re-signing at your DNS host is working." },
+  { match: /no caa record/i, text: "Add a CAA record naming the certificate authorities you use, so others cannot issue certificates for the domain.", snippet: (d) => `${d}. CAA 0 issue "letsencrypt.org"` },
+  { match: /does not exist \(nxdomain\)/i, text: "Check the spelling. If the name is yours, check that it is registered and that the name servers serve the zone." },
+  { match: /registration (has expired|expires)/i, text: "Renew the domain at your registrar and turn on automatic renewal, or it may be lost." },
+  { match: /not all resolvers return the same|resolvers return \d+ different/i, text: "A recent change is still spreading (wait for the TTL to pass), or your name servers give different answers. Make sure every name server has the same zone." },
+  { match: /glue/i, text: "Add glue records (the name servers' IP addresses) at the registrar for name servers inside your own domain." },
+  { match: /lame delegation|answer authoritatively/i, text: "Remove name servers that do not serve the zone from the delegation at the registrar, or add the zone to them." },
+  { match: /parent and zone agree|not listed in the zone/i, text: "Make the NS records in the zone and the name servers set at the registrar identical." },
+  { match: /open recursion|answers recursive queries/i, text: "Turn off recursion for outside clients on the authoritative name servers (for BIND: recursion no; or allow-recursion { localhost; };)." },
+  { match: /zone transfer|axfr/i, text: "Only allow zone transfers to your own secondary name servers (for BIND: allow-transfer { <secondary IP>; };)." },
+  { match: /soa serials|different serials/i, text: "A secondary name server is not picking up changes: check zone transfers (NOTIFY / AXFR) from the primary." },
+  { match: /network diversity|same \/24|one \/24/i, text: "Add a name server in a different network or with another DNS provider, so one outage does not take the domain down." },
+  { match: /ipv6 name servers|no name server has an ipv6/i, text: "Give at least one name server an IPv6 address (AAAA record), so IPv6-only resolvers can reach it." },
+  { match: /does not redirect http to https|not redirect/i, text: "Redirect all plain HTTP requests to HTTPS with a permanent (301) redirect.", snippet: () => "# nginx\nserver { listen 80; server_name _; return 301 https://$host$request_uri; }" },
+  { match: /hsts|strict-transport-security/i, text: "Send an HSTS header from the HTTPS site so browsers always use HTTPS.", snippet: () => "Strict-Transport-Security: max-age=31536000; includeSubDomains" },
+  { match: /content-security-policy|injected scripts/i, text: "Add a Content-Security-Policy header. Start strict and allow only the sources your site really uses.", snippet: () => "Content-Security-Policy: default-src 'self'; object-src 'none'; frame-ancestors 'self'" },
+  { match: /clickjacking|frame this page/i, text: "Stop other sites from embedding your pages in a frame.", snippet: () => "X-Frame-Options: DENY\n# or, in the Content-Security-Policy: frame-ancestors 'self'" },
+  { match: /x-content-type-options|guess content types/i, text: "Tell browsers not to guess content types.", snippet: () => "X-Content-Type-Options: nosniff" },
+  { match: /referrer-policy/i, text: "Limit what other sites learn from links on your pages.", snippet: () => "Referrer-Policy: strict-origin-when-cross-origin" },
+  { match: /permissions-policy/i, text: "Turn off browser features the site does not use.", snippet: () => "Permissions-Policy: camera=(), microphone=(), geolocation=()" },
+  { match: /software version/i, text: "Hide version numbers in the Server and X-Powered-By headers (for nginx: server_tokens off; for PHP: expose_php = Off)." },
+  { match: /cookies?/i, text: "Set the Secure, HttpOnly and SameSite attributes on cookies.", snippet: () => "Set-Cookie: session=…; Secure; HttpOnly; SameSite=Lax" },
+  { match: /mixed content/i, text: "Load every image, script and stylesheet over https:// (or use relative addresses)." },
+  { match: /security\.txt/i, text: "Publish /.well-known/security.txt with a contact for security reports (RFC 9116).", snippet: (d) => `Contact: mailto:security@${d}\nExpires: ${new Date(Date.now() + 364 * 86400000).toISOString().slice(0, 10)}T00:00:00Z\nCanonical: https://${d}/.well-known/security.txt` },
+  { match: /not compressed/i, text: "Enable gzip or Brotli compression on the web server (for nginx: gzip on;)." },
+  { match: /final page returned http/i, text: "The site's start page returns an error: check the web server and application logs." },
+  { match: /certificate (has expired|expires in)/i, text: "Renew the TLS certificate and switch to automatic renewal (ACME, for example Let's Encrypt)." },
+  { match: /certificate is not trusted|does not cover|does not match/i, text: "Install a certificate from a public certificate authority that covers this exact host name, including the intermediate certificates." },
+  { match: /tlsv1(\.1)?\b|outdated tls|tls 1\.2 or newer/i, text: "Turn off TLS 1.0 and 1.1 and allow only TLS 1.2 and 1.3.", snippet: () => "# nginx\nssl_protocols TLSv1.2 TLSv1.3;" },
+  { match: /no tls connection|handshake failed/i, text: "Make sure HTTPS is served on port 443 with a valid certificate." },
+  { match: /listed as (malicious|suspicious)|flag this/i, text: "Check the site and server for malware or phishing pages, clean them up, then ask each listing service to review the domain." },
+  { match: /look-alike/i, text: "Watch the high-risk look-alikes. Consider registering the most dangerous ones yourself, and report abuse to their registrar." },
+  { match: /did not answer|not reachable/i, text: "Check that the host is up and that a firewall allows the check (ICMP or HTTPS)." },
+  { match: /rpki-invalid/i, text: "The announcing network is not authorized by the address holder's ROA. Ask the network operator to fix the route or the ROA." },
+  { match: /no ptr record|no reverse dns/i, text: "Ask the owner of the IP address (usually your hosting provider) to set a reverse DNS (PTR) name." },
+];
+
+function fixFor(text) {
+  return fixCatalog.find((fix) => fix.match.test(text)) || null;
+}
+
+function fixHtml(text) {
+  const fix = fixFor(text);
+  if (!fix) return "";
+  const domain = page.target?.kind === "domain" ? page.target.value : "example.com";
+  const snippet = fix.snippet ? fix.snippet(domain) : "";
+  return `<details class="fix"><summary>How to fix</summary><div class="fix-body"><p>${escapeHtml(fix.text)}</p>${snippet
+    ? `<div class="fix-snippet"><pre>${escapeHtml(snippet)}</pre><button class="fix-copy" type="button" data-copy="${escapeHtml(snippet)}">Copy</button></div>`
+    : ""}</div></details>`;
+}
+
+// One listener handles the Copy buttons in every fix.
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest?.(".fix-copy");
+  if (!button) return;
+  try {
+    await navigator.clipboard.writeText(button.dataset.copy);
+    button.textContent = "Copied ✓";
+  } catch {
+    button.textContent = "Copy failed";
+  }
+  window.setTimeout(() => { button.textContent = "Copy"; }, 1500);
+});
+
 // ------------------------------------------------------------------ Full details
 // Every card can expand to show everything the tool returned, laid out as readable
 // tables, plus the raw JSON and a link to the same tool in the full interface.
@@ -686,8 +774,8 @@ function drawCard(job) {
     <div class="card-head"><h3 class="card-title">${escapeHtml(job.title)}</h3>${badge}</div>
     ${view.summary ? `<p class="card-summary">${escapeHtml(view.summary)}</p>` : ""}
     ${view.facts?.length ? `<dl class="facts">${view.facts.map(([label, value, mono]) => `<dt>${escapeHtml(label)}</dt><dd${mono ? ' class="mono"' : ""}>${escapeHtml(value)}</dd>`).join("")}</dl>` : ""}
-    ${listHtml(view.checks || [], "checks", (check) => `<span class="mark ${check.state}">${markSymbol[check.state]}</span><span><span class="check-label${check.mono ? " mono" : ""}">${escapeHtml(check.label)}</span>${check.text ? ` <span class="check-text">${escapeHtml(check.text)}</span>` : ""}</span>`)}
-    ${view.checks?.length ? "" : listHtml(view.issues.filter((issue) => severityRank[issue.severity] >= 2), "issues", (issue) => `<span class="mark ${issue.severity === "high" ? "bad" : "warn"}">!</span><span>${escapeHtml(issue.message)}</span>`)}`;
+    ${listHtml(view.checks || [], "checks", (check) => `<span class="mark ${check.state}">${markSymbol[check.state]}</span><span><span class="check-label${check.mono ? " mono" : ""}">${escapeHtml(check.label)}</span>${check.text ? ` <span class="check-text">${escapeHtml(check.text)}</span>` : ""}${check.state === "warn" || check.state === "bad" ? fixHtml(`${check.label}: ${check.text || ""}`) : ""}</span>`)}
+    ${view.checks?.length ? "" : listHtml(view.issues.filter((issue) => severityRank[issue.severity] >= 2), "issues", (issue) => `<span class="mark ${issue.severity === "high" ? "bad" : "warn"}">!</span><span>${escapeHtml(issue.message)}${fixHtml(issue.message)}</span>`)}`;
   card.querySelectorAll("li").forEach((item, index) => {
     item.style.animationDelay = `${Math.min(index, 8) * 40}ms`;
   });
@@ -894,7 +982,7 @@ function drawOverview() {
   const firstDraw = !panel.firstElementChild;
   panel.innerHTML = `<div class="overview-grid">${tiles}</div>
     ${issues.length ? `<div class="card overview-issues ${issues.some((issue) => issue.severity === "high") ? "bad" : "warn"}"><h2>Most important findings</h2>
-      ${listHtml(issues, "issues", (issue) => `<span class="mark ${issue.severity === "high" ? "bad" : "warn"}">!</span><span><span class="check-label">${escapeHtml(issue.job.title)}:</span> <span class="check-text">${escapeHtml(issue.message)}</span></span>`)}</div>`
+      ${listHtml(issues, "issues", (issue) => `<span class="mark ${issue.severity === "high" ? "bad" : "warn"}">!</span><span><span class="check-label">${escapeHtml(issue.job.title)}:</span> <span class="check-text">${escapeHtml(issue.message)}</span>${fixHtml(issue.message)}</span>`)}</div>`
     : page.jobs.every((job) => job.done) ? '<div class="card good overview-issues"><h2>No problems found</h2><p class="card-summary">Every check passed without important findings.</p></div>' : ""}`;
   // Only the first drawing animates; later updates replace the content in place.
   panel.classList.toggle("settled", !firstDraw);

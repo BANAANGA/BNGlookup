@@ -763,6 +763,20 @@ body.is-loading .shell { opacity: 0; }
 
 .footer:empty { display: none; }
 
+/* How to fix */
+
+.fix { margin-top: 4px; font-size: 13px; }
+.fix summary { width: fit-content; color: var(--accent2); font-weight: 650; cursor: pointer; list-style: none; }
+.fix summary::-webkit-details-marker { display: none; }
+.fix summary::before { content: "▸"; display: inline-block; margin-right: 5px; transition: transform 0.25s var(--ease); }
+.fix[open] summary::before { transform: rotate(90deg); }
+.fix-body { margin-top: 6px; padding: 10px 12px; border-left: 2px solid var(--accent2); border-radius: 6px; background: var(--soft); animation: rise 0.35s var(--ease) both; }
+.fix-body p { margin: 0; color: var(--text); }
+.fix-snippet { position: relative; margin-top: 8px; }
+.fix-snippet pre { margin: 0; padding: 8px 64px 8px 10px; overflow-x: auto; border-radius: 6px; background: color-mix(in srgb, var(--bg) 70%, transparent); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fix-copy { position: absolute; top: 6px; right: 6px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--text); background: var(--card); font: inherit; font-size: 12px; cursor: pointer; }
+.fix-copy:hover { border-color: var(--accent2); }
+
 /* Full details */
 
 .card.expanded { grid-column: 1 / -1; }
