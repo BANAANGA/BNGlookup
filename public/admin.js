@@ -695,3 +695,162 @@ loadAboutEditor();
 loadBimiLogo();
 
 initializeAdmin();
+
+const landingForm = document.querySelector("#landing-form");
+const landingFrame = document.querySelector("#landing-preview-frame");
+const landingBackgroundUpload = document.querySelector("#landing-background-upload");
+const landingBackgroundRemove = document.querySelector("#landing-background-remove");
+const landingBackgroundStatus = document.querySelector("#landing-background-status");
+const landingColorFields = [
+  ["background", "Background"], ["background2", "Background 2"], ["surface", "Cards"], ["text", "Text"], ["muted", "Muted text"],
+  ["accent", "Accent"], ["accent2", "Accent 2"], ["success", "Good"], ["warning", "Warning"], ["danger", "Problem"],
+];
+const landingTextFields = [
+  ["headline", "Headline"], ["subheadline", "Subheading", true], ["placeholder", "Search hint"], ["button", "Search button"],
+  ["login", "Login button"], ["examples", "Example searches"], ["empty", "No public tools", true], ["footer", "Footer", true],
+  ["tabOverview", "Tab: overview"], ["tabDns", "Tab: DNS"], ["tabEmail", "Tab: email"], ["tabWeb", "Tab: web"],
+  ["tabSecurity", "Tab: security"], ["tabNetwork", "Tab: network"],
+];
+const landingTextLimits = { headline: 120, subheadline: 240, placeholder: 80, button: 24, login: 24, footer: 300, examples: 200, empty: 240 };
+const landingPresets = {
+  Midnight: { background: "#06080f", background2: "#11203d", surface: "#0f1524", text: "#eef2ff", muted: "#8b96b2", accent: "#7c5cff", accent2: "#22d3ee", success: "#34d399", warning: "#fbbf24", danger: "#f87171" },
+  Daylight: { background: "#f5f7fb", background2: "#dbe7ff", surface: "#ffffff", text: "#111827", muted: "#5b6478", accent: "#4f46e5", accent2: "#0ea5e9", success: "#059669", warning: "#d97706", danger: "#dc2626" },
+  Ocean: { background: "#031b26", background2: "#073b4c", surface: "#08303d", text: "#e6fbff", muted: "#87b5c2", accent: "#06b6d4", accent2: "#3b82f6", success: "#2dd4bf", warning: "#facc15", danger: "#fb7185" },
+  Sunset: { background: "#1a0b16", background2: "#4a1530", surface: "#2a1022", text: "#fff1f2", muted: "#c59aae", accent: "#f97316", accent2: "#ec4899", success: "#4ade80", warning: "#fde047", danger: "#f43f5e" },
+  Forest: { background: "#07130d", background2: "#163a26", surface: "#0e2117", text: "#ecfdf5", muted: "#8fb5a0", accent: "#22c55e", accent2: "#a3e635", success: "#34d399", warning: "#fbbf24", danger: "#f87171" },
+  Mono: { background: "#0a0a0a", background2: "#262626", surface: "#141414", text: "#fafafa", muted: "#a3a3a3", accent: "#e5e5e5", accent2: "#737373", success: "#a3e635", warning: "#facc15", danger: "#f87171" },
+};
+let landingState = null;
+
+function landingDraft() {
+  const value = (name) => landingForm.elements[name].value;
+  const theme = Object.fromEntries(landingColorFields.map(([key]) => [key, value(`color-${key}`)]));
+  Object.assign(theme, {
+    font: value("font"),
+    radius: Number(value("radius")),
+    animations: landingForm.elements.animations.checked,
+    glass: landingForm.elements.glass.checked,
+    backgroundMode: value("backgroundMode"),
+    overlay: Number(value("overlay")),
+    blur: Number(value("blur")),
+  });
+  const content = Object.fromEntries(landingTextFields.map(([key]) => [key, value(`text-${key}`)]));
+  return { enabled: landingForm.elements.enabled.checked, theme, content };
+}
+
+function sendLandingPreview() {
+  if (!landingState) return;
+  const draft = landingDraft();
+  landingFrame.contentWindow?.postMessage({
+    type: "landing-preview",
+    config: { theme: { ...draft.theme, fontStack: landingState.fonts[draft.theme.font] }, content: draft.content, background: landingState.background },
+  }, window.location.origin);
+}
+
+function fillLandingForm(config) {
+  landingForm.elements.enabled.checked = config.enabled;
+  for (const [key] of landingColorFields) landingForm.elements[`color-${key}`].value = config.theme[key];
+  for (const name of ["font", "radius", "backgroundMode", "overlay", "blur"]) landingForm.elements[name].value = config.theme[name];
+  landingForm.elements.animations.checked = config.theme.animations;
+  landingForm.elements.glass.checked = config.theme.glass;
+  for (const [key] of landingTextFields) landingForm.elements[`text-${key}`].value = config.content[key] ?? "";
+  sendLandingPreview();
+}
+
+function renderLandingBackground() {
+  const background = landingState.background;
+  landingBackgroundRemove.hidden = !background;
+  landingBackgroundStatus.textContent = background
+    ? "A background image is uploaded. Choose \"Uploaded image\" as the style to show it."
+    : "PNG, JPEG, WebP or GIF up to 5 MB. Uploading saves the image straight away.";
+}
+
+async function loadLandingEditor() {
+  try {
+    landingState = await api("/api/admin/landing");
+  } catch (error) {
+    landingBackgroundStatus.textContent = error.message;
+    return;
+  }
+  document.querySelector("#landing-font").innerHTML = Object.keys(landingState.fonts)
+    .map((font) => `<option value="${escapeHtml(font)}">${escapeHtml(font[0].toUpperCase() + font.slice(1))}</option>`).join("");
+  document.querySelector("#landing-colors").innerHTML = landingColorFields.map(([key, label]) => `
+    <label class="landing-color"><input type="color" name="color-${key}"> ${escapeHtml(label)}</label>`).join("");
+  document.querySelector("#landing-texts").innerHTML = landingTextFields.map(([key, label, multiline]) => {
+    const limit = landingTextLimits[key] || 30;
+    return `<label for="landing-text-${key}">${escapeHtml(label)}</label>${multiline
+      ? `<textarea id="landing-text-${key}" name="text-${key}" maxlength="${limit}" rows="2"></textarea>`
+      : `<input id="landing-text-${key}" name="text-${key}" type="text" maxlength="${limit}">`}`;
+  }).join("");
+  const presets = document.querySelector("#landing-presets");
+  presets.innerHTML = Object.keys(landingPresets).map((name) => `
+    <button class="landing-preset" type="button" data-preset="${name}"><span class="landing-preset-swatch"></span>${name}</button>`).join("");
+  presets.querySelectorAll(".landing-preset").forEach((button) => {
+    const colors = landingPresets[button.dataset.preset];
+    button.querySelector(".landing-preset-swatch").style.background = `linear-gradient(135deg, ${colors.background} 45%, ${colors.accent} 45% 70%, ${colors.accent2} 70%)`;
+    button.addEventListener("click", () => {
+      for (const [key, color] of Object.entries(colors)) landingForm.elements[`color-${key}`].value = color;
+      sendLandingPreview();
+    });
+  });
+  fillLandingForm(landingState);
+  renderLandingBackground();
+}
+
+landingForm.addEventListener("input", sendLandingPreview);
+landingForm.addEventListener("change", sendLandingPreview);
+window.addEventListener("message", (event) => {
+  if (event.origin === window.location.origin && event.source === landingFrame.contentWindow && event.data?.type === "landing-preview-ready") sendLandingPreview();
+});
+
+landingForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const saved = await api("/api/admin/landing", { method: "PUT", body: JSON.stringify(landingDraft()) });
+    landingState = { ...landingState, ...saved };
+    showAdminSuccess("Landing page saved.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+document.querySelector("#landing-reset").addEventListener("click", () => {
+  if (!landingState || !window.confirm("Reset the theme and all texts to the defaults? Nothing is saved until you click Save.")) return;
+  fillLandingForm({ ...landingState.defaults, enabled: landingForm.elements.enabled.checked });
+});
+
+landingBackgroundUpload.addEventListener("change", async () => {
+  const file = landingBackgroundUpload.files[0];
+  if (!file) return;
+  try {
+    if (file.size > 5 * 1024 * 1024) throw new Error("The image must be 5 MB or smaller.");
+    landingBackgroundStatus.textContent = "Uploading…";
+    const saved = await api("/api/admin/landing/background", { method: "PUT", body: JSON.stringify({ image: await readFileAsDataUrl(file) }) });
+    landingState = { ...landingState, ...saved };
+    landingForm.elements.backgroundMode.value = "image";
+    renderLandingBackground();
+    sendLandingPreview();
+    showAdminSuccess("Background image uploaded.");
+  } catch (error) {
+    renderLandingBackground();
+    showAdminError(error.message);
+  } finally {
+    landingBackgroundUpload.value = "";
+  }
+});
+
+landingBackgroundRemove.addEventListener("click", async () => {
+  if (!window.confirm("Remove the background image?")) return;
+  try {
+    const saved = await api("/api/admin/landing/background", { method: "DELETE" });
+    landingState = { ...landingState, ...saved };
+    if (landingForm.elements.backgroundMode.value === "image") landingForm.elements.backgroundMode.value = "aurora";
+    renderLandingBackground();
+    sendLandingPreview();
+    showAdminSuccess("Background image removed.");
+  } catch (error) {
+    showAdminError(error.message);
+  }
+});
+
+loadLandingEditor();

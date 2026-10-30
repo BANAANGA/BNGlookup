@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#06080f">
+    <title>DNS Lookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="stylesheet" href="/landing.css">
+    <script src="/landing.js" defer></script>
+  </head>
+  <body class="landing is-loading">
+    <div class="backdrop" aria-hidden="true">
+      <div class="backdrop-image" id="backdrop-image"></div>
+      <div class="blob blob-one"></div>
+      <div class="blob blob-two"></div>
+      <div class="blob blob-three"></div>
+      <div class="backdrop-overlay"></div>
+      <div class="backdrop-grid"></div>
+    </div>
+
+    <a class="login-chip" id="login-chip" href="/login.html?next=%2F">
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <span id="login-label">Log in</span>
+    </a>
+
+    <main class="shell">
+      <header class="hero" id="hero">
+        <img class="hero-logo" id="hero-logo" src="/brand-logo.svg" alt="" width="52" height="52">
+        <h1 class="hero-title" id="headline"></h1>
+        <p class="hero-subtitle" id="subheadline"></p>
+
+        <form class="search" id="scan-form" autocomplete="off" novalidate>
+          <label class="visually-hidden" for="query">Domain, IP address or MAC address</label>
+          <span class="search-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </span>
+          <input id="query" name="q" type="text" inputmode="url" maxlength="253" spellcheck="false" autocapitalize="none" autocorrect="off">
+          <button class="search-button" id="scan-button" type="submit">
+            <span class="search-button-label" id="scan-label">Scan</span>
+            <span class="search-spinner" aria-hidden="true"></span>
+          </button>
+        </form>
+        <div class="examples" id="examples"></div>
+        <p class="notice" id="notice" role="status" hidden></p>
+      </header>
+
+      <section class="results" id="results" aria-live="polite" hidden>
+        <div class="summary" id="summary"></div>
+        <nav class="tabs" id="tabs" role="tablist" aria-label="Result categories">
+          <span class="tab-indicator" id="tab-indicator" aria-hidden="true"></span>
+        </nav>
+        <div class="panels" id="panels"></div>
+      </section>
+
+      <footer class="footer" id="footer"></footer>
+    </main>
+  </body>
+</html>

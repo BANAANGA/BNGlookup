@@ -761,6 +761,7 @@ Settings are grouped in tabs under **Admin**:
 | Users | Create, edit, disable, remove users, reset passwords and two-factor login. |
 | Email | The SMTP server for emailed results and monitor alerts, with a test message. |
 | About page | Content of the public [About page](#about-page). |
+| Landing page | Theme, texts and background of the public [landing page](#landing-page), with a live preview. |
 
 #### Reverse proxies and Cloudflare
 
@@ -771,6 +772,20 @@ IPv6 ranges are downloaded over HTTPS, cached, and refreshed at startup and ever
 12 hours (the last good list is kept if a refresh fails). With Cloudflare Tunnel,
 also add the address of the `cloudflared` connector, since connections come from
 that connector rather than from Cloudflare's edge.
+
+#### Landing page
+
+Visitors who are not logged in see a simple landing page at `/`: one search box
+that runs every tool set to **Public** at once and shows the results in animated
+tabs (Overview, DNS, Email, Web & TLS, Security, Network). A whole scan counts as a
+single public lookup. A small *Log in* button leads to the full interface, which
+logged-in users always get at `/`.
+
+**Admin → Landing page** customizes it with a live preview: theme presets, every
+color, font, rounding, animations and frosted glass, a background (aurora,
+gradient, solid or an uploaded PNG/JPEG/WebP/GIF up to 5 MB, with dimming and
+blur), and all texts and tab names. It can also be turned off. See the
+[wiki page](docs/landing-page.md).
 
 #### About page
 
