@@ -271,7 +271,7 @@ function renderInsights(data) {
   setText("#i-monitors", `${data.monitors.enabled.toLocaleString()} active`);
   setText("#i-monitors-detail", `${statuses.fail || 0} failing · ${statuses.warn || 0} warning · ${data.monitors.alerts} alert(s) sent`);
 
-  document.querySelector("#dash-ratings").innerHTML = ["web", "tls", "email", "dns"].filter((kind) => ratings[kind]).map((kind) => {
+  document.querySelector("#dash-ratings").innerHTML = ["web", "tls", "email", "dns", "privacy"].filter((kind) => ratings[kind]).map((kind) => {
     const rating = ratings[kind];
     return `
       <article class="account-card admin-card stats-panel rating-panel">

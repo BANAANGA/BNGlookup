@@ -21,6 +21,7 @@ const { createAcmeManager } = require("./acme");
 const { sendMail, validAddress } = require("./mail");
 const { analyzeEmailHeaders, organizationalDomain } = require("./email-headers");
 const webauthn = require("./webauthn");
+const { analyzePrivacy } = require("./privacy");
 const oidc = require("./oidc");
 
 const port = Number(process.env.PORT || 3000);
@@ -168,6 +169,7 @@ const featureAccessDefaults = {
   "mail-server": "user",
   subdomains: "user",
   ipv6: "user",
+  privacy: "user",
   reputation: "user",
   lookalike: "user",
   "ip-calc": "user",
@@ -205,6 +207,7 @@ const featureNames = {
   "mail-server": "Mail server check (open relay, reverse DNS, TLS on port 25)",
   subdomains: "Subdomain discovery (certificate logs, common names, takeover check)",
   ipv6: "IPv6 readiness (website, mail and name servers)",
+  privacy: "Privacy check (trackers, third parties, cookies before consent)",
   reputation: "Reputation check (protective DNS, blocklists, optional threat feeds)",
   lookalike: "Lookalike domain finder",
   "ip-calc": "IP / CIDR calculator",
@@ -2135,7 +2138,7 @@ function fetchPinnedHttps(hostname, address, requestPath, { timeoutMs = 6000, ma
 }
 
 // Latest result per domain and check type, for the admin dashboard's best/worst lists.
-const ratingKinds = { web: "Web security headers", tls: "TLS grade", email: "Email security", dns: "DNS health", takeover: "Subdomain takeover risk" };
+const ratingKinds = { web: "Web security headers", tls: "TLS grade", email: "Email security", dns: "DNS health", privacy: "Privacy", takeover: "Subdomain takeover risk" };
 const ratingRetentionMs = 180 * 86400000;
 const tlsGradeScores = { "A+": 100, A: 95, "A-": 90, B: 80, C: 70, D: 60, E: 50, F: 35, T: 25, M: 25 };
 
@@ -2287,6 +2290,8 @@ async function followWebRedirects(startUrl, allowLocal, options = {}) {
     }
     const location = response.headers.location;
     const hop = { url: current.href, address, status: response.status, timeMs: response.totalMs, location: location || null };
+    // Kept for the privacy check: cookies set by every response, redirects included.
+    Object.defineProperty(hop, "setCookies", { value: [].concat(response.headers["set-cookie"] || []), enumerable: false });
     hops.push(hop);
     final = { url: current, response };
     if (response.status >= 300 && response.status < 400 && location) {
@@ -3099,6 +3104,58 @@ async function subdomainDiscovery(request, url, response) {
     sendJson(response, 500, { error: "Unable to complete the subdomain search." });
   } finally {
     releaseHeavyJob("subdomains");
+  }
+}
+
+// ---------------------------------------------------------------- Privacy check
+
+async function privacyCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 2048, response);
+  if (rawName === null) return;
+  const input = rawName.trim();
+  let start;
+  try {
+    start = /^https?:\/\//i.test(input) ? new URL(input) : null;
+  } catch {
+    start = null;
+  }
+  const host = start ? normalizeDomain(start.hostname) : normalizeDomain(hostFromInput(input));
+  if (!host) return sendJson(response, 400, { error: "Enter a domain name or a web address." });
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("privacy")) return sendJson(response, 503, { error: "The server is busy with other privacy checks. Try again shortly." });
+  try {
+    const started = Date.now();
+    let result = null;
+    for (const candidate of start ? [start] : [new URL(`https://${host}/`), new URL(`http://${host}/`)]) {
+      result = await followWebRedirects(candidate, allowLocal, { maxBytes: 1024 * 1024 });
+      if (result.final && !result.hops.at(-1)?.error) break;
+    }
+    const { hops, final } = result;
+    if (!final || hops.at(-1)?.error) {
+      return sendJson(response, 200, { input, error: hops.at(-1)?.error || "The website could not be loaded.", hops });
+    }
+    const html = decodeBody(final.response.body, String(final.response.headers["content-encoding"] || ""));
+    const analysis = analyzePrivacy({
+      html,
+      setCookies: hops.flatMap((hop) => hop.setCookies || []),
+      pageUrl: final.url.href,
+      siteDomain: organizationalDomain(final.url.hostname),
+      organizationalDomain,
+      headers: final.response.headers,
+    });
+    recordDomainRating("privacy", organizationalDomain(final.url.hostname), gradeForScore(analysis.score), analysis.score,
+      analysis.issues.filter((issue) => issue.severity !== "low").map((issue) => issue.message).slice(0, 3).join(" ") || "No problems found");
+    sendJson(response, 200, {
+      input, finalUrl: final.url.href, status: final.response.status, https: final.url.protocol === "https:",
+      hops: hops.map(({ url: hopUrl, status }) => ({ url: hopUrl, status })),
+      ...analysis, grade: gradeForScore(analysis.score), durationMs: Date.now() - started,
+    });
+  } catch (error) {
+    console.error("Privacy check failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the privacy check." });
+  } finally {
+    releaseHeavyJob("privacy");
   }
 }
 
@@ -6092,7 +6149,7 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS landing_shares_client ON landing_shares(client_hash, created_at);
 `);
 const landingShareLimits = { payloadBytes: 768 * 1024, anonymousPerDay: 10, anonymousTotal: 5000, userLifetimeMs: 30 * 86400000, anonymousLifetimeMs: 7 * 86400000 };
-const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "subdomains", "ipv6", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "subdomains", "ipv6", "privacy", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
 
 function validLandingSharePayload(body) {
   const target = body?.target;
@@ -8510,7 +8567,7 @@ const apiTokenPaths = new Set([
   "/api/dig", "/api/blocklist", "/api/propagation", "/api/email-check", "/api/asn", "/api/web-check", "/api/email-headers",
   "/api/dmarc-sources", "/api/record-import", "/api/bulk-domain-check", "/api/dns-health", "/api/reputation",
   "/api/lookalike", "/api/spf-flatten", "/api/ping", "/api/sslscan", "/api/ping-scan", "/api/traceroute", "/api/multi-traceroute",
-  "/api/mail-server", "/api/subdomains", "/api/ipv6",
+  "/api/mail-server", "/api/subdomains", "/api/ipv6", "/api/privacy",
 ]);
 const apiTokenUsage = new Map();
 
@@ -9755,7 +9812,7 @@ function handleAdminAbout(request, response) {
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
   "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
-  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports", "subdomains", "ipv6",
+  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports", "subdomains", "ipv6", "privacy",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 
@@ -10092,7 +10149,7 @@ function handleAdminInsights(request, url, response) {
   database.prepare("DELETE FROM domain_ratings WHERE checked_at < ?").run(Date.now() - ratingRetentionMs);
   const describe = (row) => ({ domain: row.domain, grade: row.grade, score: row.score, detail: row.detail, checkedAt: new Date(row.checked_at).toISOString() });
   const ratings = {};
-  for (const kind of ["web", "tls", "email", "dns"]) {
+  for (const kind of ["web", "tls", "email", "dns", "privacy"]) {
     const summary = database.prepare("SELECT COUNT(*) AS count, AVG(score) AS average FROM domain_ratings WHERE kind = ? AND checked_at >= ?").get(kind, since);
     ratings[kind] = {
       label: ratingKinds[kind],
@@ -10855,7 +10912,7 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3, subdomains: 2, ipv6: 4 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3, subdomains: 2, ipv6: 4, privacy: 4 };
 const heavyJobsActive = Object.fromEntries(Object.keys(heavyJobLimits).map((kind) => [kind, 0]));
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
@@ -12069,6 +12126,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/mail-server": { method: "GET", action: "Mail server check", keys: ["name"] },
     "/api/subdomains": { method: "GET", action: "Subdomain discovery", keys: ["name"] },
     "/api/ipv6": { method: "GET", action: "IPv6 readiness", keys: ["name"] },
+    "/api/privacy": { method: "GET", action: "Privacy check", keys: ["name"] },
     "/api/reputation": { method: "GET", action: "Reputation check", keys: ["name"] },
     "/api/lookalike": { method: "GET", action: "Lookalike domains", keys: ["name"] },
     "/api/spf-flatten": { method: "GET", action: "SPF flattener", keys: ["name"] },
@@ -12406,6 +12464,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/mail-server": "mail-server",
     "/api/subdomains": "subdomains",
     "/api/ipv6": "ipv6",
+    "/api/privacy": "privacy",
     "/api/reputation": "reputation",
     "/api/lookalike": "lookalike",
     "/api/spf-flatten": "record-builder",
@@ -12572,6 +12631,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/mail-server": (request, url, response) => mailServerCheck(request, url, response),
     "/api/subdomains": (request, url, response) => subdomainDiscovery(request, url, response),
     "/api/ipv6": (request, url, response) => ipv6Readiness(request, url, response),
+    "/api/privacy": (request, url, response) => privacyCheck(request, url, response),
     "/api/reputation": (request, url, response) => reputationCheck(request, url, response),
     "/api/lookalike": (request, url, response) => lookalikeCheck(request, url, response),
     "/api/spf-flatten": (_request, url, response) => spfFlattenCheck(url, response),

@@ -38,6 +38,7 @@ COPY mail.js ./mail.js
 COPY email-headers.js ./email-headers.js
 COPY webauthn.js ./webauthn.js
 COPY oidc.js ./oidc.js
+COPY privacy.js ./privacy.js
 COPY public ./public
 
 RUN mkdir -p /data && chown node:node /data

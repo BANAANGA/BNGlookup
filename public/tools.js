@@ -115,6 +115,7 @@ async function runToolMode(toolMode, lookupName) {
     "mail-server": ["/api/mail-server", renderMailServerResult, (data) => data.domain],
     subdomains: ["/api/subdomains", renderSubdomainsResult, (data) => data.domain],
     ipv6: ["/api/ipv6", renderIpv6Result, (data) => data.domain],
+    privacy: ["/api/privacy", renderPrivacyResult, (data) => data.finalUrl || data.input],
     reputation: ["/api/reputation", renderReputationResult, (data) => data.target],
     lookalike: ["/api/lookalike", renderLookalikeResult, (data) => data.domain],
     "spf-flatten": ["/api/spf-flatten", renderSpfFlattenResult, (data) => data.domain],
@@ -1091,6 +1092,45 @@ function dnsHealthHtml(data) {
 
 function renderDnsHealthResult(data) {
   resultPanel.innerHTML = dnsHealthHtml(data);
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- Privacy check
+
+function renderPrivacyResult(data) {
+  if (data.error) {
+    resultPanel.innerHTML = `<div class="result-heading"><div><p class="eyebrow">PRIVACY</p><h2>${copyableResult(data.input)}</h2></div></div><p class="detail-notice">${escapeHtml(data.error)}</p>`;
+    resultPanel.hidden = false;
+    return;
+  }
+  const ungated = data.thirdParties.filter((party) => party.tracking && !party.gated);
+  const partyRows = data.thirdParties.map((party) => `
+    <tr><td><strong>${escapeHtml(party.name)}</strong><br><span class="trace-silent">${escapeHtml(party.hosts.join(", "))}</span></td>
+      <td>${pill(party.tracking ? (party.category === "advertising" || party.category === "session-replay" ? "fail" : "warn") : party.category === "consent" || party.category === "privacy-friendly-analytics" ? "ok" : "info", party.categoryLabel)}</td>
+      <td>${party.gated ? pill("ok", "After consent") : party.tracking ? pill("fail", "Immediately") : escapeHtml("Immediately")}</td>
+      <td>${escapeHtml(party.kinds.join(", "))}</td></tr>`);
+  const cookieRows = data.cookies.map((cookie) => `
+    <tr><td><code>${escapeHtml(cookie.name)}</code>${cookie.tracker ? `<br>${pill("fail", cookie.tracker)}` : ""}</td><td>${escapeHtml(cookie.domain)}</td>
+      <td>${escapeHtml(cookie.session ? "Session" : `${cookie.lifetimeDays} days`)}</td>
+      <td>${escapeHtml([cookie.secure && "Secure", cookie.httpOnly && "HttpOnly", cookie.sameSite && `SameSite=${cookie.sameSite}`].filter(Boolean).join(", ") || "none")}</td></tr>`);
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">PRIVACY</p><h2>${copyableResult(data.finalUrl)}</h2><p class="web-title">${escapeHtml(`HTTP ${data.status}`)}</p></div>
+      <span class="status-badge ${data.score >= 80 ? "success" : "warning"}">${escapeHtml(`${data.score}/100 · ${data.grade}`)}</span>
+    </div>
+    ${scoreTiles([
+      ["Trackers before consent", ungated.length ? "bad" : "ok", String(ungated.length)],
+      ["Third parties", data.thirdParties.length > 10 ? "warn" : "ok", `${data.thirdParties.length} (${data.thirdPartyDomains} hosts)`],
+      ["Cookies before consent", data.cookies.some((cookie) => cookie.tracker) ? "bad" : "ok", `${data.cookies.length}${data.cookies.some((cookie) => cookie.tracker) ? ` · ${data.cookies.filter((cookie) => cookie.tracker).length} tracking` : ""}`],
+      ["Consent banner", data.consent.length ? "ok" : ungated.length ? "bad" : "none", data.consent.length ? data.consent.join(", ") : "Not found"],
+      ["Privacy policy link", data.privacyLink ? "ok" : "warn", data.privacyLink ? "Found" : "Not found"],
+    ])}
+    ${data.issues.length ? `<section class="record-section"><h3>Findings</h3><ul class="dnssec-issues">${data.issues.map((issue) => `<li class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join("")}</ul></section>` : ""}
+    <section class="email-auth"><h3>Third parties ${pill("info", String(data.thirdParties.length))}</h3>
+      ${partyRows.length ? dataTable(["Service", "Kind", "Loads", "Through"], partyRows, "dmarc-sources-table") : '<p class="empty-result">The page loads nothing from other domains.</p>'}</section>
+    <section class="email-auth"><h3>Cookies set before consent ${pill("info", String(data.cookies.length))}</h3>
+      ${cookieRows.length ? dataTable(["Cookie", "Domain", "Lifetime", "Flags"], cookieRows) : '<p class="empty-result">The server sets no cookies when the page is opened.</p>'}</section>
+    <p class="scan-disclaimer">This check reads the page's HTML and the cookies the server sets, as a first-time visitor who has not consented. Scripts are not run, so trackers that other scripts add later (for example through a tag manager) and cookies set by JavaScript are not seen. Scripts marked to run only after consent are shown as "After consent". This is not legal advice.</p>`;
   resultPanel.hidden = false;
 }
 

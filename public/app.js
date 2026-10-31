@@ -49,11 +49,12 @@ const watchResultLink = document.querySelector("#watch-result");
 // Tabs that group several tools, shown as sub-tabs under the main tab bar.
 const modeGroups = {
   email: [["email", "Domain check"], ["mail-server", "Mail server"], ["email-headers", "Header analyzer"], ["dmarc-reports", "DMARC reports"], ["tlsrpt-reports", "TLS reports"], ["record-builder", "Record builder"], ["spf-flatten", "SPF flattener"]],
+  web: [["web", "Web check"], ["privacy", "Privacy"]],
   security: [["dns-health", "DNS health"], ["subdomains", "Subdomains"], ["reputation", "Reputation"], ["lookalike", "Lookalike domains"]],
 };
 const modeFeatures = { details: "whois", "spf-flatten": "record-builder" };
 // Tools whose requests and rendering live in tools.js.
-const toolModes = new Set(["web", "bulk-domains", "email-headers", "dmarc-reports", "tlsrpt-reports", "dns-health", "mail-server", "subdomains", "ipv6", "reputation", "lookalike", "spf-flatten", "ip-calc"]);
+const toolModes = new Set(["web", "bulk-domains", "email-headers", "dmarc-reports", "tlsrpt-reports", "dns-health", "mail-server", "subdomains", "ipv6", "privacy", "reputation", "lookalike", "spf-flatten", "ip-calc"]);
 
 function featureForMode(toolMode) {
   return modeFeatures[toolMode] || toolMode;
@@ -98,7 +99,7 @@ const shareModeLabels = {
   "multi-traceroute": "Multi traceroute", scan: "Magic scan", "custom-port": "Port scan", "bulk-port": "Bulk port scan",
   nmap: "Nmap", dnssec: "DNSSEC check", web: "Web check", "email-headers": "Header analysis",
   "dmarc-reports": "DMARC reports", "tlsrpt-reports": "TLS reports", "bulk-domains": "Bulk domain check", "dns-health": "DNS health",
-  "mail-server": "Mail server check", subdomains: "Subdomain discovery", ipv6: "IPv6 readiness", reputation: "Reputation", lookalike: "Lookalike domains", "spf-flatten": "SPF flattener", "ip-calc": "IP calculator",
+  "mail-server": "Mail server check", subdomains: "Subdomain discovery", ipv6: "IPv6 readiness", privacy: "Privacy check", reputation: "Reputation", lookalike: "Lookalike domains", "spf-flatten": "SPF flattener", "ip-calc": "IP calculator",
 };
 
 function historyEnabled() {
@@ -324,6 +325,7 @@ function submitLabel(currentMode) {
     "mail-server": "Check mail servers",
     subdomains: "Find subdomains",
     ipv6: "Check IPv6",
+    privacy: "Check privacy",
     reputation: "Check reputation",
     lookalike: "Find lookalikes",
     "spf-flatten": "Flatten SPF",
@@ -351,11 +353,11 @@ function setMode(nextMode) {
   const dmarcReports = mode === "dmarc-reports";
   const tlsrptReports = mode === "tlsrpt-reports";
   const recordBuilder = mode === "record-builder";
-  const webCheck = mode === "web";
+  const webCheck = mode === "web" || mode === "privacy";
   const bulkDomains = mode === "bulk-domains";
   const group = groupOfMode(mode);
   const toolInputMode = emailHeaders || dmarcReports || tlsrptReports || recordBuilder || bulkDomains;
-  const plainInputMode = ["web", "dns-health", "mail-server", "subdomains", "ipv6", "reputation", "lookalike", "spf-flatten", "ip-calc"].includes(mode);
+  const plainInputMode = ["web", "privacy", "dns-health", "mail-server", "subdomains", "ipv6", "reputation", "lookalike", "spf-flatten", "ip-calc"].includes(mode);
   const asnMode = mode === "asn";
   const ping = mode === "ping";
   const sslscan = mode === "sslscan";
@@ -416,7 +418,7 @@ function setMode(nextMode) {
   typeControl.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || plainInputMode;
   customType.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || plainInputMode || recordType.value !== "custom";
   modeSubtabs.hidden = !group;
-  modeSubtabs.setAttribute("aria-label", group === "security" ? "Security tools" : "Email tools");
+  modeSubtabs.setAttribute("aria-label", group === "security" ? "Security tools" : group === "web" ? "Website tools" : "Email tools");
   modeSubtabs.innerHTML = group
     ? modeGroups[group].filter(([member]) => featureAllowed(featureForMode(member))).map(([member, label]) => `
       <button class="email-subtab${member === mode ? " active" : ""}" type="button" role="tab" aria-selected="${member === mode}" data-mode="${member}">${escapeHtml(label)}</button>`).join("")
@@ -502,6 +504,8 @@ function setMode(nextMode) {
         ? "Replace include, a and mx mechanisms with the IP ranges they resolve to, to get under SPF's limit of 10 DNS lookups. Flattened records must be refreshed when your providers change their addresses."
       : mode === "ip-calc"
         ? "Work out the network, broadcast, host range and size of an IPv4 or IPv6 prefix, convert a netmask or wildcard, and split a network into smaller subnets. Calculated in your browser."
+      : mode === "privacy"
+        ? "See which third parties a page loads (analytics, advertising, session recording, social media, fonts), which cookies are set before a visitor can consent, and whether there is a consent banner and a privacy policy."
       : webCheck
         ? "Follow a site's redirects and check its HTTPS setup, security headers, cookies, compression and HTTP/2 and HTTP/3 support."
       : bulkDomains
@@ -3101,6 +3105,7 @@ function renderSharedResult(shareMode, payload) {
     case "mail-server": renderMailServerResult(data); break;
     case "subdomains": renderSubdomainsResult(data); break;
     case "ipv6": renderIpv6Result(data); break;
+    case "privacy": renderPrivacyResult(data); break;
     case "reputation": renderReputationResult(data); break;
     case "lookalike": renderLookalikeResult(data); break;
     case "spf-flatten": renderSpfFlattenResult(data); break;
