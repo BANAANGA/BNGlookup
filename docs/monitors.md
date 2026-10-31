@@ -25,6 +25,15 @@ its results, and changes are emailed to the address on your account.
 | Blocklists | Domain or public IPv4 | The domain or its address is listed or delisted |
 | New certificates (CT logs) | Domain | A new certificate for the domain or a subdomain appears in Certificate Transparency logs, which can reveal phishing sites |
 
+## DNS history
+
+For **DNS records** monitors, **DNS history** shows every distinct answer the
+monitor saw (the last 200), newest first: the records added (green) and removed
+(red) per type, and the full set of records at each point in time. Unexpected
+changes to NS or MX records can mean a hijacked domain.
+
+![DNS history](images/dns-history.jpg)
+
 ## How it works
 
 1. Add a monitor with its target and interval (every 1, 6, 12 or 24 hours). The
