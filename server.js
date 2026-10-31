@@ -3647,6 +3647,55 @@ const monitorKinds = {
 const monitorIntervals = [1, 6, 12, 24];
 const monitorLimits = { perUser: { user: 25, admin: 100 }, events: 50, concurrency: 3, checkMs: 90000, manualRunGapMs: 60000 };
 const monitorDnsTypes = ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "CAA"];
+// Every distinct DNS answer a monitor sees is kept, so its history can be shown as a timeline.
+database.exec(`
+  CREATE TABLE IF NOT EXISTS dns_history (
+    id INTEGER PRIMARY KEY,
+    monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+    taken_at INTEGER NOT NULL,
+    snapshot TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS dns_history_monitor ON dns_history(monitor_id, id DESC);
+`);
+const dnsHistoryLimit = 200;
+
+function recordDnsHistory(monitorId, snapshot) {
+  const text = JSON.stringify(snapshot);
+  const last = database.prepare("SELECT snapshot FROM dns_history WHERE monitor_id = ? ORDER BY id DESC LIMIT 1").get(monitorId);
+  if (last?.snapshot === text) return;
+  database.prepare("INSERT INTO dns_history (monitor_id, taken_at, snapshot) VALUES (?, ?, ?)").run(monitorId, Date.now(), text);
+  database.prepare(`DELETE FROM dns_history WHERE monitor_id = ? AND id NOT IN (
+    SELECT id FROM dns_history WHERE monitor_id = ? ORDER BY id DESC LIMIT ?)`).run(monitorId, monitorId, dnsHistoryLimit);
+}
+
+function dnsHistoryEntries(monitorId) {
+  const rows = database.prepare("SELECT taken_at, snapshot FROM dns_history WHERE monitor_id = ? ORDER BY id").all(monitorId);
+  let previous = null;
+  const entries = rows.map((row) => {
+    let snapshot = {};
+    try {
+      snapshot = JSON.parse(row.snapshot);
+    } catch {
+      snapshot = {};
+    }
+    const changes = [];
+    if (previous) {
+      for (const type of [...new Set([...Object.keys(previous), ...Object.keys(snapshot)])]) {
+        if (type === "exists") continue;
+        const before = new Set(Array.isArray(previous[type]) ? previous[type] : []);
+        const after = new Set(Array.isArray(snapshot[type]) ? snapshot[type] : []);
+        const added = [...after].filter((value) => !before.has(value));
+        const removed = [...before].filter((value) => !after.has(value));
+        if (added.length || removed.length) changes.push({ type, added, removed });
+      }
+      if (previous.exists === false && snapshot.exists !== false) changes.push({ type: "domain", added: ["exists again"], removed: [] });
+      if (snapshot.exists === false && previous.exists !== false) changes.push({ type: "domain", added: [], removed: ["stopped existing (NXDOMAIN)"] });
+    }
+    previous = snapshot;
+    return { at: new Date(row.taken_at).toISOString(), snapshot, changes };
+  });
+  return entries.reverse();
+}
 const monitorRuns = new Set();
 const monitorManualRuns = new Map();
 
@@ -3859,6 +3908,7 @@ async function runMonitor(row) {
       previousSnapshot = null;
     }
     const firstRun = !row.last_run_at;
+    if (row.kind === "dns" && result.snapshot) recordDnsHistory(row.id, result.snapshot);
     const changes = firstRun ? [] : describeSnapshotChanges(row.kind, previousSnapshot, result.snapshot);
     const statusChanged = !firstRun && row.last_status !== result.status;
     if (firstRun) addMonitorEvent(row.id, result.status, `First check: ${result.summary}`);
@@ -3920,7 +3970,7 @@ function describeMonitor(row, events = []) {
 async function handleMonitors(request, response, url) {
   if (!checkFeatureAccess(request, response, "monitors", true)) return;
   const user = currentUser(request);
-  const match = url.pathname.match(/^\/api\/monitors(?:\/(\d+))?(\/run)?$/);
+  const match = url.pathname.match(/^\/api\/monitors(?:\/(\d+))?(\/run|\/history)?$/);
   if (!match) {
     sendJson(response, 404, { error: "Not found." });
     return;
@@ -3964,7 +4014,16 @@ async function handleMonitors(request, response, url) {
     sendJson(response, 201, describeMonitor(fresh, database.prepare("SELECT * FROM monitor_events WHERE monitor_id = ? ORDER BY id DESC LIMIT 10").all(row.id)));
     return;
   }
-  if (id && match[2] && request.method === "POST") {
+  if (id && match[2] === "/history" && request.method === "GET") {
+    if (own.kind !== "dns") return sendJson(response, 400, { error: "History is kept for DNS monitors." });
+    // Monitors created before history existed start from their last known answer.
+    if (own.last_snapshot && !database.prepare("SELECT 1 FROM dns_history WHERE monitor_id = ?").get(own.id)) {
+      database.prepare("INSERT INTO dns_history (monitor_id, taken_at, snapshot) VALUES (?, ?, ?)").run(own.id, own.last_run_at || Date.now(), own.last_snapshot);
+    }
+    sendJson(response, 200, { target: own.target, entries: dnsHistoryEntries(own.id), limit: dnsHistoryLimit });
+    return;
+  }
+  if (id && match[2] === "/run" && request.method === "POST") {
     const last = monitorManualRuns.get(id) || 0;
     if (Date.now() - last < monitorLimits.manualRunGapMs) return sendJson(response, 429, { error: "Wait a minute before running this monitor again." });
     monitorManualRuns.set(id, Date.now());
