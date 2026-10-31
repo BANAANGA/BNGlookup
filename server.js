@@ -166,6 +166,7 @@ const featureAccessDefaults = {
   monitors: "user",
   "dns-health": "user",
   "mail-server": "user",
+  subdomains: "user",
   reputation: "user",
   lookalike: "user",
   "ip-calc": "user",
@@ -201,6 +202,7 @@ const featureNames = {
   monitors: "Monitoring and email alerts (requires login)",
   "dns-health": "DNS health check (delegation, SOA, zone transfer, open recursion)",
   "mail-server": "Mail server check (open relay, reverse DNS, TLS on port 25)",
+  subdomains: "Subdomain discovery (certificate logs, common names, takeover check)",
   reputation: "Reputation check (protective DNS, blocklists, optional threat feeds)",
   lookalike: "Lookalike domain finder",
   "ip-calc": "IP / CIDR calculator",
@@ -2961,6 +2963,141 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000, deep = false } = {
         ? `Could not reach port 25 (${error.code}). Outbound port 25 may be blocked by this server's network or hosting provider.`
         : `The connection failed (${error.code || error.message}).`));
   });
+}
+
+// ---------------------------------------------------------------- Subdomain discovery
+
+const subdomainWordlist = [
+  "www", "mail", "webmail", "smtp", "imap", "pop", "mx", "autodiscover", "autoconfig", "owa", "exchange", "vpn", "remote",
+  "api", "app", "apps", "admin", "portal", "login", "auth", "sso", "id", "account", "my", "dev", "staging", "stage", "test",
+  "beta", "demo", "sandbox", "uat", "qa", "blog", "news", "shop", "store", "cdn", "static", "assets", "img", "images", "media",
+  "files", "download", "docs", "help", "support", "status", "wiki", "git", "gitlab", "jenkins", "ci", "jira", "confluence",
+  "grafana", "kibana", "monitor", "intranet", "crm", "erp", "cloud", "backup", "db", "ftp", "sftp", "cpanel", "webdisk",
+  "ns1", "ns2", "m", "mobile", "old", "new", "legacy", "events", "careers", "jobs", "partners",
+];
+const subdomainLimits = { names: 300, concurrency: 12, ctNames: 250 };
+const hostingProviders = [
+  [/\.cloudfront\.net$/, "Amazon CloudFront"], [/\.amazonaws\.com$/, "Amazon Web Services"], [/\.elasticbeanstalk\.com$/, "AWS Elastic Beanstalk"],
+  [/\.azurewebsites\.net$|\.cloudapp\.(net|azure\.com)$|\.trafficmanager\.net$|\.azureedge\.net$|\.azurefd\.net$|\.azurestaticapps\.net$|\.windows\.net$/, "Microsoft Azure"],
+  [/\.github\.io$/, "GitHub Pages"], [/\.netlify\.(app|com)$/, "Netlify"], [/\.vercel(-dns)?\.(com|app)$/, "Vercel"], [/\.herokuapp\.com$|\.herokudns\.com$/, "Heroku"],
+  [/\.cdn\.cloudflare\.net$|\.pages\.dev$|\.workers\.dev$/, "Cloudflare"], [/\.fastly\.net$/, "Fastly"], [/\.akamai(edge|technologies)?\.net$|\.edgekey\.net$|\.edgesuite\.net$/, "Akamai"],
+  [/\.googlehosted\.com$|\.appspot\.com$|ghs\.googlehosted\.com$|\.run\.app$/, "Google"], [/\.myshopify\.com$|shops\.myshopify\.com$/, "Shopify"],
+  [/\.wpengine\.com$/, "WP Engine"], [/\.squarespace\.com$/, "Squarespace"], [/\.wixdns\.net$/, "Wix"], [/\.zendesk\.com$/, "Zendesk"],
+  [/\.outlook\.com$|\.office365\.com$/, "Microsoft 365"], [/\.google\.com$/, "Google"],
+];
+
+// Addresses that only exist inside a network: publishing them reveals internal details.
+const internalAddressRanges = new net.BlockList();
+for (const [address, prefix, family] of [["10.0.0.0", 8, "ipv4"], ["172.16.0.0", 12, "ipv4"], ["192.168.0.0", 16, "ipv4"], ["100.64.0.0", 10, "ipv4"],
+  ["127.0.0.0", 8, "ipv4"], ["169.254.0.0", 16, "ipv4"], ["fc00::", 7, "ipv6"], ["fe80::", 10, "ipv6"], ["::1", 128, "ipv6"]]) {
+  internalAddressRanges.addSubnet(address, prefix, family);
+}
+const isInternalAddress = (address) => {
+  const family = isIP(address);
+  return Boolean(family) && internalAddressRanges.check(address, family === 4 ? "ipv4" : "ipv6");
+};
+
+async function resolveSubdomain(name) {
+  const [a, aaaa] = await Promise.all(["A", "AAAA"].map((type) => queryDohDns(name, type).catch(() => null)));
+  const answers = [...(a?.answers || []), ...(aaaa?.answers || [])];
+  const cnames = [...new Set(answers.filter((answer) => answer.type === 5 || answer.typeName === "CNAME").map((answer) => String(answer.data).replace(/\.$/, "").toLowerCase()))];
+  const addresses = [...new Set(answers.filter((answer) => [1, 28].includes(answer.type) || ["A", "AAAA"].includes(answer.typeName)).map((answer) => String(answer.data)))];
+  const status = a?.status ?? aaaa?.status ?? null;
+  return { name, cname: cnames.at(-1) || null, cnameChain: cnames, addresses, status };
+}
+
+function hostingProviderFor(entry) {
+  for (const [pattern, provider] of hostingProviders) if (entry.cnameChain.some((cname) => pattern.test(cname))) return provider;
+  return null;
+}
+
+async function subdomainDiscovery(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const domain = normalizeDomain(hostFromInput(rawName.trim()));
+  if (!domain) return sendJson(response, 400, { error: "Enter a domain name." });
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("subdomains")) return sendJson(response, 503, { error: "The server is busy with other subdomain searches. Try again shortly." });
+  try {
+    const started = Date.now();
+    const [ct, wildcardProbe] = await Promise.all([
+      discoverCertificateTransparencySubdomains(domain, subdomainLimits.ctNames).then((result) => ({ ...result, error: null }), (error) => ({ names: [], source: null, error: error.message })),
+      resolveSubdomain(`bngl-${crypto.randomBytes(6).toString("hex")}.${domain}`),
+    ]);
+    const wildcard = wildcardProbe.addresses.length || wildcardProbe.cname ? { addresses: wildcardProbe.addresses, cname: wildcardProbe.cname } : null;
+    const sources = new Map();
+    for (const name of ct.names) if (!name.startsWith("*.")) sources.set(name, new Set(["Certificates"]));
+    for (const word of subdomainWordlist) {
+      const name = `${word}.${domain}`;
+      sources.set(name, (sources.get(name) || new Set()).add("Common names"));
+    }
+    const names = [...sources.keys()].slice(0, subdomainLimits.names);
+    const resolved = [];
+    let next = 0;
+    await Promise.all(Array.from({ length: subdomainLimits.concurrency }, async () => {
+      while (next < names.length) {
+        const name = names[next];
+        next += 1;
+        resolved.push(await resolveSubdomain(name));
+      }
+    }));
+    const wildcardKey = wildcard ? `${wildcard.cname || ""}|${[...wildcard.addresses].sort().join(",")}` : null;
+    const found = resolved.filter((entry) => {
+      const fromCt = sources.get(entry.name).has("Certificates");
+      if (!entry.addresses.length && !entry.cname) return fromCt && entry.status === 0;
+      // With wildcard DNS every guessed name resolves; keep guesses only when they differ from the wildcard.
+      if (wildcardKey && !fromCt && `${entry.cname || ""}|${[...entry.addresses].sort().join(",")}` === wildcardKey) return false;
+      return true;
+    }).map((entry) => ({
+      name: entry.name,
+      sources: [...sources.get(entry.name)],
+      cname: entry.cname,
+      cnameChain: entry.cnameChain,
+      addresses: entry.addresses.slice(0, 8),
+      private: entry.addresses.some(isInternalAddress),
+      provider: hostingProviderFor(entry),
+      active: entry.addresses.length > 0,
+    })).sort((left, right) => left.name.localeCompare(right.name));
+    const takeover = await checkSubdomainTakeover(found.filter((entry) => entry.cname).map((entry) => ({
+      name: entry.name, records: [{ type: "CNAME", answers: entry.cnameChain.map((data) => ({ data })) }],
+    })), allowLocal);
+    const takeoverByHost = new Map(takeover.findings.map((finding) => [finding.host, finding]));
+    for (const entry of found) {
+      const finding = takeoverByHost.get(entry.name);
+      if (finding && finding.status !== "ok") entry.takeover = { status: finding.status, service: finding.service, evidence: finding.evidence };
+    }
+    const groups = new Map();
+    for (const entry of found) {
+      const key = entry.provider ? `provider:${entry.provider}` : entry.addresses.length ? `address:${entry.addresses[0]}` : "none";
+      const group = groups.get(key) || { key, label: entry.provider || entry.addresses[0] || "No address", kind: entry.provider ? "provider" : entry.addresses.length ? "address" : "none", names: [] };
+      group.names.push(entry.name);
+      groups.set(key, group);
+    }
+    const issues = [];
+    for (const entry of found) {
+      if (entry.takeover?.status === "vulnerable") issues.push({ severity: "high", message: `${entry.name} can probably be taken over: ${entry.takeover.evidence}` });
+      else if (entry.takeover?.status === "dangling") issues.push({ severity: "medium", message: `${entry.name} points to ${entry.cname}, which does not exist (dangling CNAME).` });
+      if (entry.private) issues.push({ severity: "low", message: `${entry.name} resolves to a private address (${entry.addresses.find(isInternalAddress)}), which reveals internal network details.` });
+    }
+    if (ct.error) issues.push({ severity: "low", message: `Certificate Transparency logs could not be searched (${ct.error}); only common names were tried.` });
+    sendJson(response, 200, {
+      domain,
+      sources: { certificates: { source: ct.source, names: ct.names.length, error: ct.error }, commonNames: subdomainWordlist.length },
+      wildcard,
+      checked: names.length,
+      subdomains: found,
+      groups: [...groups.values()].sort((left, right) => right.names.length - left.names.length),
+      takeover: { checked: takeover.checked, vulnerable: takeover.vulnerable, dangling: takeover.dangling },
+      issues,
+      durationMs: Date.now() - started,
+    });
+  } catch (error) {
+    console.error("Subdomain discovery failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the subdomain search." });
+  } finally {
+    releaseHeavyJob("subdomains");
+  }
 }
 
 // ---------------------------------------------------------------- Mail server deep check
@@ -5844,7 +5981,7 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS landing_shares_client ON landing_shares(client_hash, created_at);
 `);
 const landingShareLimits = { payloadBytes: 768 * 1024, anonymousPerDay: 10, anonymousTotal: 5000, userLifetimeMs: 30 * 86400000, anonymousLifetimeMs: 7 * 86400000 };
-const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "subdomains", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
 
 function validLandingSharePayload(body) {
   const target = body?.target;
@@ -6975,7 +7112,7 @@ async function fetchCertificateTransparencyJson(url) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function normalizeCertificateTransparencyNames(entries, domain, readEntryNames) {
+function normalizeCertificateTransparencyNames(entries, domain, readEntryNames, limit = certificateTransparencyCandidateLimit) {
   if (!Array.isArray(entries)) {
     throw new Error("Certificate Transparency service returned invalid data.");
   }
@@ -6999,10 +7136,10 @@ function normalizeCertificateTransparencyNames(entries, domain, readEntryNames) 
       }
     }
   }
-  return [...names].sort().slice(0, certificateTransparencyCandidateLimit);
+  return [...names].sort().slice(0, limit);
 }
 
-async function discoverCertificateTransparencySubdomains(domain) {
+async function discoverCertificateTransparencySubdomains(domain, limit = certificateTransparencyCandidateLimit) {
   const providers = [
     {
       name: "crt.sh",
@@ -7045,6 +7182,7 @@ async function discoverCertificateTransparencySubdomains(domain) {
           entries,
           domain,
           provider.readEntryNames,
+          limit,
         ),
         source: provider.name,
       };
@@ -8261,7 +8399,7 @@ const apiTokenPaths = new Set([
   "/api/dig", "/api/blocklist", "/api/propagation", "/api/email-check", "/api/asn", "/api/web-check", "/api/email-headers",
   "/api/dmarc-sources", "/api/record-import", "/api/bulk-domain-check", "/api/dns-health", "/api/reputation",
   "/api/lookalike", "/api/spf-flatten", "/api/ping", "/api/sslscan", "/api/ping-scan", "/api/traceroute", "/api/multi-traceroute",
-  "/api/mail-server",
+  "/api/mail-server", "/api/subdomains",
 ]);
 const apiTokenUsage = new Map();
 
@@ -9506,7 +9644,7 @@ function handleAdminAbout(request, response) {
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
   "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
-  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports",
+  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports", "subdomains",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 
@@ -10606,7 +10744,7 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3, subdomains: 2 };
 const heavyJobsActive = Object.fromEntries(Object.keys(heavyJobLimits).map((kind) => [kind, 0]));
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
@@ -11818,6 +11956,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/bulk-domain-check": { method: "POST", action: "Bulk domain check" },
     "/api/dns-health": { method: "GET", action: "DNS health check", keys: ["name"] },
     "/api/mail-server": { method: "GET", action: "Mail server check", keys: ["name"] },
+    "/api/subdomains": { method: "GET", action: "Subdomain discovery", keys: ["name"] },
     "/api/reputation": { method: "GET", action: "Reputation check", keys: ["name"] },
     "/api/lookalike": { method: "GET", action: "Lookalike domains", keys: ["name"] },
     "/api/spf-flatten": { method: "GET", action: "SPF flattener", keys: ["name"] },
@@ -12153,6 +12292,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/bulk-domain-check": "bulk-domains",
     "/api/dns-health": "dns-health",
     "/api/mail-server": "mail-server",
+    "/api/subdomains": "subdomains",
     "/api/reputation": "reputation",
     "/api/lookalike": "lookalike",
     "/api/spf-flatten": "record-builder",
@@ -12317,6 +12457,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   const getRoutes = {
     "/api/dns-health": (request, url, response) => dnsHealthCheck(request, url, response),
     "/api/mail-server": (request, url, response) => mailServerCheck(request, url, response),
+    "/api/subdomains": (request, url, response) => subdomainDiscovery(request, url, response),
     "/api/reputation": (request, url, response) => reputationCheck(request, url, response),
     "/api/lookalike": (request, url, response) => lookalikeCheck(request, url, response),
     "/api/spf-flatten": (_request, url, response) => spfFlattenCheck(url, response),

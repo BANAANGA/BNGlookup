@@ -113,6 +113,7 @@ async function runToolMode(toolMode, lookupName) {
   const getTools = {
     "dns-health": ["/api/dns-health", renderDnsHealthResult, (data) => data.zone || data.domain],
     "mail-server": ["/api/mail-server", renderMailServerResult, (data) => data.domain],
+    subdomains: ["/api/subdomains", renderSubdomainsResult, (data) => data.domain],
     reputation: ["/api/reputation", renderReputationResult, (data) => data.target],
     lookalike: ["/api/lookalike", renderLookalikeResult, (data) => data.domain],
     "spf-flatten": ["/api/spf-flatten", renderSpfFlattenResult, (data) => data.domain],
@@ -1089,6 +1090,45 @@ function dnsHealthHtml(data) {
 
 function renderDnsHealthResult(data) {
   resultPanel.innerHTML = dnsHealthHtml(data);
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- Subdomain discovery
+
+function renderSubdomainsResult(data) {
+  const vulnerable = data.subdomains.filter((entry) => entry.takeover?.status === "vulnerable").length;
+  const dangling = data.subdomains.filter((entry) => entry.takeover?.status === "dangling").length;
+  const privateCount = data.subdomains.filter((entry) => entry.private).length;
+  const rows = data.subdomains.map((entry) => `
+    <tr>
+      <td>${copyableResult(entry.name)}${entry.takeover ? `<br>${pill(entry.takeover.status === "vulnerable" ? "fail" : "warn", entry.takeover.status === "vulnerable" ? `Takeover risk${entry.takeover.service ? ` (${entry.takeover.service})` : ""}` : "Dangling CNAME")}` : ""}</td>
+      <td>${entry.cname ? `${escapeHtml(entry.cname)}<br>` : ""}${entry.provider ? pill("info", entry.provider) : ""}</td>
+      <td>${entry.addresses.length ? entry.addresses.map((address) => escapeHtml(address)).join("<br>") : '<span class="trace-silent">no address</span>'}${entry.private ? `<br>${pill("warn", "Private address")}` : ""}</td>
+      <td>${escapeHtml(entry.sources.join(", "))}</td>
+    </tr>`);
+  const groups = data.groups.slice(0, 24).map((group) => `
+    <div class="subdomain-group ${escapeHtml(group.kind)}">
+      <strong>${escapeHtml(group.label)}</strong> <span class="trace-silent">${escapeHtml(`${group.names.length} ${group.names.length === 1 ? "subdomain" : "subdomains"}`)}</span>
+      <div class="subdomain-chips">${group.names.slice(0, 30).map((name) => `<span>${escapeHtml(name.slice(0, -(data.domain.length + 1)) || name)}</span>`).join("")}${group.names.length > 30 ? `<span>+${group.names.length - 30}</span>` : ""}</div>
+    </div>`).join("");
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">SUBDOMAINS</p><h2>${copyableResult(data.domain)}</h2><p class="web-title">${escapeHtml(`${data.checked} names checked in ${(data.durationMs / 1000).toFixed(1)} s`)}</p></div>
+      <span class="status-badge ${vulnerable ? "warning" : "success"}">${escapeHtml(vulnerable ? `${vulnerable} takeover risk(s)` : `${data.subdomains.length} found`)}</span>
+    </div>
+    ${scoreTiles([
+      ["Subdomains", data.subdomains.length ? "ok" : "none", String(data.subdomains.length)],
+      ["Certificate logs", data.sources.certificates.error ? "warn" : "ok", data.sources.certificates.error ? "Unavailable" : `${data.sources.certificates.names} names (${data.sources.certificates.source})`],
+      ["Takeover risk", vulnerable ? "bad" : dangling ? "warn" : "ok", vulnerable ? String(vulnerable) : dangling ? `${dangling} dangling` : "None found"],
+      ["Private addresses", privateCount ? "warn" : "ok", String(privateCount)],
+      ["Wildcard DNS", data.wildcard ? "warn" : "ok", data.wildcard ? "Yes" : "No"],
+    ])}
+    ${data.issues.length ? `<section class="record-section"><h3>Findings</h3><ul class="dnssec-issues">${data.issues.map((issue) => `<li class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join("")}</ul></section>` : ""}
+    ${groups ? `<section class="email-auth"><h3>Where they point</h3><div class="subdomain-map">${groups}</div></section>` : ""}
+    <section class="email-auth"><h3>Subdomains ${pill("info", String(data.subdomains.length))}</h3>
+      ${rows.length ? dataTable(["Name", "Points to", "Addresses", "Found in"], rows, "dmarc-sources-table") : '<p class="empty-result">No subdomains found.</p>'}
+      <p class="scan-disclaimer">Names come from Certificate Transparency logs (every publicly trusted certificate is logged) and from ${escapeHtml(data.sources.commonNames)} common names. Subdomains that never had a certificate and are not common names cannot be found this way.${data.wildcard ? " The domain has wildcard DNS, so guessed names that only match the wildcard are left out." : ""}</p>
+    </section>`;
   resultPanel.hidden = false;
 }
 

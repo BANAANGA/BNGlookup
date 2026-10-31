@@ -1637,3 +1637,11 @@ footer a:hover { color: #e4ffef; }
 .dns-snapshot { margin-top: 6px; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .dns-snapshot th, .dns-snapshot td { padding: 3px 10px 3px 0; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 .dns-snapshot th { color: #888; }
+
+/* Subdomain map */
+.subdomain-map { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.subdomain-group { padding: 10px 12px; border: 1px solid #292929; border-left: 3px solid #54d88f; border-radius: 8px; background: #0d0d0d; }
+.subdomain-group.address { border-left-color: #6aa9ff; }
+.subdomain-group.none { border-left-color: #777; }
+.subdomain-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.subdomain-chips span { padding: 1px 7px; border-radius: 999px; background: #1a1a1a; color: #ccc; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
