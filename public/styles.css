@@ -1645,3 +1645,11 @@ footer a:hover { color: #e4ffef; }
 .subdomain-group.none { border-left-color: #777; }
 .subdomain-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .subdomain-chips span { padding: 1px 7px; border-radius: 999px; background: #1a1a1a; color: #ccc; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+/* Scan-this-site bookmarklet */
+.bookmarklet-drag { margin: 22px 0; text-align: center; }
+.bookmarklet-button { display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px; border: 1px dashed #54d88f; border-radius: 999px; color: #e9e9e9; background: #12201a; font-weight: 700; text-decoration: none; cursor: grab; }
+.bookmarklet-button:active { cursor: grabbing; }
+.bookmarklet-steps { margin: 0 0 14px; padding-left: 20px; color: #c8c8c8; font-size: 14px; line-height: 1.8; }
+.bookmarklet-steps kbd { padding: 1px 6px; border: 1px solid #333; border-radius: 4px; background: #111; font-size: 12px; }
+.bookmarklet-code { width: 100%; padding: 9px 10px; border: 1px solid #333; border-radius: 6px; color: #e9e9e9; background: #080808; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; resize: vertical; }

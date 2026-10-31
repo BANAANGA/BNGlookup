@@ -762,6 +762,11 @@ body.is-loading .shell { opacity: 0; }
 }
 
 .footer:empty { display: none; }
+.footer-links { margin: 0 0 22px; text-align: center; font-size: 12px; }
+.footer-links a { color: var(--muted); text-decoration: none; opacity: 0.8; }
+.footer-links a:hover { color: var(--text); opacity: 1; }
+.footer:empty + .footer-links { margin-top: auto; padding-top: 28px; }
+@media print { .footer-links { display: none; } }
 
 /* How to fix */
 

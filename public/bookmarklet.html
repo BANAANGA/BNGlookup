@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101810">
+    <title>Scan this site · BNGlookup</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="search" type="application/opensearchdescription+xml" href="/opensearch.xml" title="BNGlookup">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/branding.js" defer></script>
+    <script src="/bookmarklet.js" defer></script>
+  </head>
+  <body>
+    <main class="page account-page">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Home">
+          <img class="brand-logo" src="/brand-logo.svg" alt="" width="40" height="40">
+          <span class="brand-name">DNSLookup</span>
+        </a>
+      </header>
+      <article class="account-card bookmarklet-card">
+        <p class="eyebrow">BROWSER</p>
+        <h1>Scan any site with one click</h1>
+        <p class="account-description">Drag the button below to your bookmarks bar. On any website, click the bookmark to open a scan of that site in a new tab.</p>
+        <p class="bookmarklet-drag"><a class="bookmarklet-button" id="bookmarklet-link" href="/">🔍 Scan this site</a></p>
+        <ol class="bookmarklet-steps">
+          <li>Show the bookmarks bar if it is hidden: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> (<kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> on a Mac).</li>
+          <li>Drag the <strong>Scan this site</strong> button onto the bar. (Clicking it here does nothing.)</li>
+          <li>On any website, click the bookmark.</li>
+        </ol>
+        <p class="form-hint">On a phone, bookmark this page, edit the bookmark and replace its address with the code below.</p>
+        <label class="visually-hidden" for="bookmarklet-code">Bookmarklet code</label>
+        <textarea class="bookmarklet-code" id="bookmarklet-code" rows="3" readonly spellcheck="false"></textarea>
+        <h2 class="policy-heading">Search from the address bar</h2>
+        <p class="form-hint" id="opensearch-hint">Add this site as a search engine in your browser's settings (in Chrome and Edge it may already be listed under <em>Site search</em>). Typing its keyword followed by a domain, such as <code>example.com</code>, then scans that domain.</p>
+        <p class="form-hint">Address for manual setup: <code id="search-template"></code></p>
+        <p class="form-hint"><a href="/">← Back to lookup</a></p>
+      </article>
+    </main>
+  </body>
+</html>

@@ -94,6 +94,8 @@ const staticFiles = new Set([
   "/qr.js",
   "/landing.html",
   "/passkeys.js",
+  "/bookmarklet.html",
+  "/bookmarklet.js",
   "/landing.js",
   "/landing.css",
   "/styles.css",
@@ -12816,6 +12818,50 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     (request.method === "GET" || request.method === "HEAD") && serveSiteFile(request, response, url.pathname)) {
     return;
   }
+  // "Scan this site": the bookmarklet and browser search open /scan?url=<page or domain>.
+  if ((url.pathname === "/scan" || url.pathname === "/scan/open") && (request.method === "GET" || request.method === "HEAD")) {
+    const raw = String(url.searchParams.get("url") || url.searchParams.get("q") || "").trim().slice(0, 2048);
+    let target = "";
+    try {
+      target = /^https?:\/\//i.test(raw) ? new URL(raw).hostname.replace(/^\[|\]$/g, "") : raw;
+    } catch {
+      target = "";
+    }
+    target = isIP(target) ? target : normalizeDomain(hostFromInput(target)) || "";
+    if (!target) {
+      sendRedirect(response, "/");
+      return;
+    }
+    // A bookmarklet opens /scan from another site, so the SameSite=Strict session cookie is
+    // not sent. A same-site page that moves on to /scan/open makes the browser send it.
+    if (url.pathname === "/scan") {
+      const next = `/scan/open?${new URLSearchParams({ q: target })}`.replace(/&/g, "&amp;");
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      response.end(request.method === "HEAD" ? undefined : `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${next}"><title>Scanning</title><p><a href="${next}">Continue</a></p>`);
+      return;
+    }
+    const config = readLandingConfig();
+    const signedIn = Boolean(currentUser(request));
+    const choice = readCookie(request, "bng_ui");
+    const simple = signedIn ? (choice === "simple" || choice === "full" ? choice : config.userInterface) === "simple" : config.enabled;
+    sendRedirect(response, simple ? `/#${encodeURIComponent(target)}` : `/?${new URLSearchParams({ q: target })}`);
+    return;
+  }
+  if (url.pathname === "/opensearch.xml" && (request.method === "GET" || request.method === "HEAD")) {
+    const origin = ssoPublicUrl(request, { publicUrl: readSsoConfig().publicUrl });
+    const title = getSiteTitle().replace(/[<>&"]/g, "").slice(0, 16) || "BNGlookup";
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
+  <ShortName>${title}</ShortName>
+  <Description>Scan a domain with ${title}</Description>
+  <InputEncoding>UTF-8</InputEncoding>
+  <Url type="text/html" method="get" template="${origin}/scan?q={searchTerms}"/>
+</OpenSearchDescription>
+`;
+    response.writeHead(200, { "content-type": "application/opensearchdescription+xml; charset=utf-8", "cache-control": "public, max-age=3600" });
+    response.end(request.method === "HEAD" ? undefined : xml);
+    return;
+  }
   if (url.pathname === "/landing/background" && (request.method === "GET" || request.method === "HEAD")) {
     serveLandingBackground(request, response);
     return;
@@ -12840,7 +12886,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     response.setHeader("x-frame-options", "SAMEORIGIN");
   }
   const sharedScan = /^\/s\/[A-Za-z0-9_-]{22}$/.test(url.pathname);
-  const requestedPath = url.pathname === "/landing" || landingRoot || sharedScan ? "/landing.html" : url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
+  const requestedPath = url.pathname === "/landing" || landingRoot || sharedScan ? "/landing.html" : url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/bookmarklet" ? "/bookmarklet.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
   if (!staticFiles.has(requestedPath)) {
     response.writeHead(404);
     response.end();
