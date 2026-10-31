@@ -78,8 +78,10 @@ function render() {
           <button type="button" data-action="toggle">${monitor.enabled ? "Pause" : "Resume"}</button>
           <button type="button" data-action="notify">${monitor.notify ? "Mute alerts" : "Alert me"}</button>
           <select data-action="interval" aria-label="Check interval">${[1, 6, 12, 24].map((hours) => `<option value="${hours}" ${hours === monitor.intervalHours ? "selected" : ""}>every ${hours} h</option>`).join("")}</select>
+          ${monitor.kind === "dns" ? '<button type="button" data-action="dns-history">DNS history</button>' : ""}
           <button type="button" data-action="delete" class="history-clear">Delete</button>
         </div>
+        <div class="dns-history" data-history="${monitor.id}" hidden></div>
         ${monitor.events.length ? `<details class="monitor-events"><summary>History (${monitor.events.length})</summary><ul>${monitor.events.map((event) => `
           <li class="monitor-event ${escapeHtml(event.level)}"><time>${escapeHtml(new Date(event.at).toLocaleString())}</time><span>${escapeHtml(event.message)}</span></li>`).join("")}</ul></details>` : ""}
       </article>`;
@@ -154,7 +156,9 @@ list.addEventListener("click", async (event) => {
   showError("");
   button.disabled = true;
   try {
-    if (button.dataset.action === "run") {
+    if (button.dataset.action === "dns-history") {
+      await toggleDnsHistory(monitor.id, button);
+    } else if (button.dataset.action === "run") {
       button.textContent = "Checking…";
       replaceMonitor(await api(`/api/monitors/${monitor.id}/run`, { method: "POST", body: "{}" }));
     } else if (button.dataset.action === "toggle") {
@@ -188,3 +192,40 @@ list.addEventListener("change", async (event) => {
 });
 
 load();
+
+// DNS change history: every distinct answer the monitor saw, newest first, with what changed.
+async function toggleDnsHistory(id, button) {
+  const panel = list.querySelector(`[data-history="${id}"]`);
+  if (!panel.hidden) {
+    panel.hidden = true;
+    button.textContent = "DNS history";
+    return;
+  }
+  button.textContent = "Hide DNS history";
+  panel.hidden = false;
+  panel.innerHTML = '<p class="monitor-meta">Loading…</p>';
+  try {
+    const data = await api(`/api/monitors/${id}/history`);
+    if (!data.entries.length) {
+      panel.innerHTML = '<p class="monitor-meta">No DNS answers recorded yet. Use “Check now”.</p>';
+      return;
+    }
+    const records = (snapshot) => Object.entries(snapshot).filter(([type]) => type !== "exists")
+      .map(([type, values]) => `<tr><th>${escapeHtml(type)}</th><td>${values.length ? values.map((value) => escapeHtml(value)).join("<br>") : "—"}</td></tr>`).join("");
+    panel.innerHTML = `
+      <p class="monitor-meta">${escapeHtml(`${data.entries.length} distinct ${data.entries.length === 1 ? "answer" : "answers"} recorded (the last ${data.limit} are kept). Newest first.`)}</p>
+      <ol class="dns-timeline">${data.entries.map((entry, index) => `
+        <li>
+          <time>${escapeHtml(new Date(entry.at).toLocaleString())}</time>
+          ${index === data.entries.length - 1 ? '<p class="dns-change-first">First recorded answer</p>' : ""}
+          ${entry.changes.map((change) => `
+            <div class="dns-change"><strong>${escapeHtml(change.type)}</strong>
+              ${change.added.map((value) => `<span class="dns-added">+ ${escapeHtml(value)}</span>`).join("")}
+              ${change.removed.map((value) => `<span class="dns-removed">− ${escapeHtml(value)}</span>`).join("")}
+            </div>`).join("")}
+          <details><summary>Records at this time</summary><table class="dns-snapshot">${records(entry.snapshot) || "<tr><td>No records</td></tr>"}</table></details>
+        </li>`).join("")}</ol>`;
+  } catch (error) {
+    panel.innerHTML = `<p class="monitor-meta">${escapeHtml(error.message)}</p>`;
+  }
+}

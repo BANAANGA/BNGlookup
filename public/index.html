@@ -6,6 +6,7 @@
     <meta name="theme-color" content="#f6f8fb">
     <title>DNS Lookup</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="search" type="application/opensearchdescription+xml" href="/opensearch.xml" title="BNGlookup">
     <link rel="stylesheet" href="/styles.css">
     <script src="/branding.js" defer></script>
     <script src="/app.js" defer></script>
@@ -59,6 +60,9 @@
           <button class="mode-tab" id="propagation-tab" type="button" role="tab" aria-selected="false" data-mode="propagation" hidden>
             <span aria-hidden="true">≋</span> Propagation
           </button>
+          <button class="mode-tab" id="ipv6-tab" type="button" role="tab" aria-selected="false" data-mode="ipv6" hidden>
+            <span aria-hidden="true">⁶</span> IPv6
+          </button>
           <button class="mode-tab" id="mac-tab" type="button" role="tab" aria-selected="false" data-mode="mac" hidden>
             <span aria-hidden="true">◇</span> MAC lookup
           </button>
@@ -68,7 +72,7 @@
           <button class="mode-tab" id="sslscan-tab" type="button" role="tab" aria-selected="false" data-mode="sslscan" hidden>
             <span aria-hidden="true">▣</span> SSLscan
           </button>
-          <button class="mode-tab" id="web-tab" type="button" role="tab" aria-selected="false" data-mode="web" hidden>
+          <button class="mode-tab" id="web-tab" type="button" role="tab" aria-selected="false" data-mode="web" data-group="web" hidden>
             <span aria-hidden="true">⌂</span> Web check
           </button>
           <button class="mode-tab" id="security-tab" type="button" role="tab" aria-selected="false" data-mode="security" data-group="security" hidden>

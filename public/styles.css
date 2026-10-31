@@ -1617,3 +1617,39 @@ footer a:hover { color: #e4ffef; }
 .passkey-add { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; gap: 10px; align-items: center; margin-top: 12px; }
 .passkey-add input { min-width: 0; height: 39px; padding: 0 10px; border: 1px solid #333; border-radius: 6px; color: #e9e9e9; background: #080808; font-size: 14px; }
 @media (max-width: 640px) { .passkey-add { grid-template-columns: 1fr; } }
+
+/* DNS change history */
+.dns-history { margin-top: 12px; padding-top: 10px; border-top: 1px solid #222; }
+.dns-history[hidden] { display: none; }
+.dns-timeline { position: relative; margin: 8px 0 0; padding: 0 0 0 18px; list-style: none; }
+.dns-timeline::before { content: ""; position: absolute; top: 6px; bottom: 6px; left: 4px; width: 2px; background: #2a2a2a; }
+.dns-timeline li { position: relative; margin-bottom: 14px; font-size: 13px; }
+.dns-timeline li::before { content: ""; position: absolute; top: 5px; left: -18px; width: 10px; height: 10px; border-radius: 50%; background: #54d88f; box-shadow: 0 0 0 3px #54d88f22; }
+.dns-timeline time { color: #aaa; font-weight: 600; }
+.dns-change { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin-top: 4px; }
+.dns-change strong { min-width: 48px; }
+.dns-added, .dns-removed { padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.dns-added { color: #8aeab1; background: #54d88f1a; }
+.dns-removed { color: #ff9a9a; background: #ff6b6b1a; text-decoration: line-through; }
+.dns-change-first { margin: 4px 0 0; color: #888; }
+.dns-timeline details { margin-top: 4px; }
+.dns-timeline summary { color: #8aeab1; cursor: pointer; font-size: 12px; }
+.dns-snapshot { margin-top: 6px; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.dns-snapshot th, .dns-snapshot td { padding: 3px 10px 3px 0; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.dns-snapshot th { color: #888; }
+
+/* Subdomain map */
+.subdomain-map { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.subdomain-group { padding: 10px 12px; border: 1px solid #292929; border-left: 3px solid #54d88f; border-radius: 8px; background: #0d0d0d; }
+.subdomain-group.address { border-left-color: #6aa9ff; }
+.subdomain-group.none { border-left-color: #777; }
+.subdomain-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.subdomain-chips span { padding: 1px 7px; border-radius: 999px; background: #1a1a1a; color: #ccc; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+/* Scan-this-site bookmarklet */
+.bookmarklet-drag { margin: 22px 0; text-align: center; }
+.bookmarklet-button { display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px; border: 1px dashed #54d88f; border-radius: 999px; color: #e9e9e9; background: #12201a; font-weight: 700; text-decoration: none; cursor: grab; }
+.bookmarklet-button:active { cursor: grabbing; }
+.bookmarklet-steps { margin: 0 0 14px; padding-left: 20px; color: #c8c8c8; font-size: 14px; line-height: 1.8; }
+.bookmarklet-steps kbd { padding: 1px 6px; border: 1px solid #333; border-radius: 4px; background: #111; font-size: 12px; }
+.bookmarklet-code { width: 100%; padding: 9px 10px; border: 1px solid #333; border-radius: 6px; color: #e9e9e9; background: #080808; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; resize: vertical; }

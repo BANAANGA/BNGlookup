@@ -113,6 +113,9 @@ async function runToolMode(toolMode, lookupName) {
   const getTools = {
     "dns-health": ["/api/dns-health", renderDnsHealthResult, (data) => data.zone || data.domain],
     "mail-server": ["/api/mail-server", renderMailServerResult, (data) => data.domain],
+    subdomains: ["/api/subdomains", renderSubdomainsResult, (data) => data.domain],
+    ipv6: ["/api/ipv6", renderIpv6Result, (data) => data.domain],
+    privacy: ["/api/privacy", renderPrivacyResult, (data) => data.finalUrl || data.input],
     reputation: ["/api/reputation", renderReputationResult, (data) => data.target],
     lookalike: ["/api/lookalike", renderLookalikeResult, (data) => data.domain],
     "spf-flatten": ["/api/spf-flatten", renderSpfFlattenResult, (data) => data.domain],
@@ -1089,6 +1092,115 @@ function dnsHealthHtml(data) {
 
 function renderDnsHealthResult(data) {
   resultPanel.innerHTML = dnsHealthHtml(data);
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- Privacy check
+
+function renderPrivacyResult(data) {
+  if (data.error) {
+    resultPanel.innerHTML = `<div class="result-heading"><div><p class="eyebrow">PRIVACY</p><h2>${copyableResult(data.input)}</h2></div></div><p class="detail-notice">${escapeHtml(data.error)}</p>`;
+    resultPanel.hidden = false;
+    return;
+  }
+  const ungated = data.thirdParties.filter((party) => party.tracking && !party.gated);
+  const partyRows = data.thirdParties.map((party) => `
+    <tr><td><strong>${escapeHtml(party.name)}</strong><br><span class="trace-silent">${escapeHtml(party.hosts.join(", "))}</span></td>
+      <td>${pill(party.tracking ? (party.category === "advertising" || party.category === "session-replay" ? "fail" : "warn") : party.category === "consent" || party.category === "privacy-friendly-analytics" ? "ok" : "info", party.categoryLabel)}</td>
+      <td>${party.gated ? pill("ok", "After consent") : party.tracking ? pill("fail", "Immediately") : escapeHtml("Immediately")}</td>
+      <td>${escapeHtml(party.kinds.join(", "))}</td></tr>`);
+  const cookieRows = data.cookies.map((cookie) => `
+    <tr><td><code>${escapeHtml(cookie.name)}</code>${cookie.tracker ? `<br>${pill("fail", cookie.tracker)}` : ""}</td><td>${escapeHtml(cookie.domain)}</td>
+      <td>${escapeHtml(cookie.session ? "Session" : `${cookie.lifetimeDays} days`)}</td>
+      <td>${escapeHtml([cookie.secure && "Secure", cookie.httpOnly && "HttpOnly", cookie.sameSite && `SameSite=${cookie.sameSite}`].filter(Boolean).join(", ") || "none")}</td></tr>`);
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">PRIVACY</p><h2>${copyableResult(data.finalUrl)}</h2><p class="web-title">${escapeHtml(`HTTP ${data.status}`)}</p></div>
+      <span class="status-badge ${data.score >= 80 ? "success" : "warning"}">${escapeHtml(`${data.score}/100 · ${data.grade}`)}</span>
+    </div>
+    ${scoreTiles([
+      ["Trackers before consent", ungated.length ? "bad" : "ok", String(ungated.length)],
+      ["Third parties", data.thirdParties.length > 10 ? "warn" : "ok", `${data.thirdParties.length} (${data.thirdPartyDomains} hosts)`],
+      ["Cookies before consent", data.cookies.some((cookie) => cookie.tracker) ? "bad" : "ok", `${data.cookies.length}${data.cookies.some((cookie) => cookie.tracker) ? ` · ${data.cookies.filter((cookie) => cookie.tracker).length} tracking` : ""}`],
+      ["Consent banner", data.consent.length ? "ok" : ungated.length ? "bad" : "none", data.consent.length ? data.consent.join(", ") : "Not found"],
+      ["Privacy policy link", data.privacyLink ? "ok" : "warn", data.privacyLink ? "Found" : "Not found"],
+    ])}
+    ${data.issues.length ? `<section class="record-section"><h3>Findings</h3><ul class="dnssec-issues">${data.issues.map((issue) => `<li class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join("")}</ul></section>` : ""}
+    <section class="email-auth"><h3>Third parties ${pill("info", String(data.thirdParties.length))}</h3>
+      ${partyRows.length ? dataTable(["Service", "Kind", "Loads", "Through"], partyRows, "dmarc-sources-table") : '<p class="empty-result">The page loads nothing from other domains.</p>'}</section>
+    <section class="email-auth"><h3>Cookies set before consent ${pill("info", String(data.cookies.length))}</h3>
+      ${cookieRows.length ? dataTable(["Cookie", "Domain", "Lifetime", "Flags"], cookieRows) : '<p class="empty-result">The server sets no cookies when the page is opened.</p>'}</section>
+    <p class="scan-disclaimer">This check reads the page's HTML and the cookies the server sets, as a first-time visitor who has not consented. Scripts are not run, so trackers that other scripts add later (for example through a tag manager) and cookies set by JavaScript are not seen. Scripts marked to run only after consent are shown as "After consent". This is not legal advice.</p>`;
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- IPv6 readiness
+
+function renderIpv6Result(data) {
+  const tone = (percent) => (percent === null ? "none" : percent >= 100 ? "ok" : percent > 0 ? "warn" : "bad");
+  const label = (percent) => (percent === null ? "Not used" : percent >= 100 ? "Ready" : percent > 0 ? "Partly" : "No IPv6");
+  const list = (values) => values.length ? values.map((value) => escapeHtml(value)).join("<br>") : '<span class="trace-silent">none</span>';
+  const webRows = data.web.map((entry) => `<tr><td>${copyableResult(entry.host)}</td><td>${list(entry.v4)}</td><td>${list(entry.v6)}</td>
+    <td>${!entry.v6.length ? pill("fail", "No AAAA") : entry.reachable === true ? pill("ok", `Answers (HTTP ${entry.status})`) : entry.reachable === false ? pill("fail", `No answer (${entry.error})`) : pill("info", "Not tested")}</td></tr>`);
+  const mailRows = data.mail.hosts.map((host) => `<tr><td>${copyableResult(host.host)}<br><span class="trace-silent">priority ${escapeHtml(host.priority)}</span></td><td>${list(host.v4)}</td><td>${list(host.v6)}</td>
+    <td>${host.v6.length ? host.v6.map((address) => host.ptr[address] ? pill("ok", host.ptr[address]) : pill("warn", "No reverse DNS")).join("<br>") : pill("fail", "No AAAA")}</td></tr>`);
+  const nsRows = data.nameservers.map((server) => `<tr><td>${copyableResult(server.host)}</td><td>${list(server.v4)}</td><td>${list(server.v6)}</td><td>${server.v6.length ? pill("ok", "IPv6") : pill("fail", "IPv4 only")}</td></tr>`);
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">IPV6 READINESS</p><h2>${copyableResult(data.domain)}</h2></div>
+      <span class="status-badge ${data.score >= 100 ? "success" : "warning"}">${escapeHtml(`${data.score}/100 · ${data.grade}`)}</span>
+    </div>
+    ${scoreTiles([
+      ["Website", tone(data.parts.web), label(data.parts.web)],
+      ["Mail", tone(data.parts.mail), data.mail.nullMx ? "Does not receive mail" : label(data.parts.mail)],
+      ["Name servers", tone(data.parts.dns), label(data.parts.dns)],
+      ["Score", data.score >= 100 ? "ok" : data.score >= 50 ? "warn" : "bad", `${data.score}/100`],
+    ])}
+    ${!data.serverHasIpv6 ? '<p class="detail-notice">This server has no IPv6 connection, so it can only check the records, not whether the website really answers over IPv6.</p>' : ""}
+    ${data.issues.length ? `<section class="record-section"><h3>Findings</h3><ul class="dnssec-issues">${data.issues.map((issue) => `<li class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join("")}</ul></section>` : ""}
+    ${webRows.length ? `<section class="email-auth"><h3>Website</h3>${dataTable(["Host", "IPv4", "IPv6", "Over IPv6"], webRows)}</section>` : ""}
+    ${mailRows.length ? `<section class="email-auth"><h3>Mail servers</h3>${dataTable(["Mail server", "IPv4", "IPv6", "Reverse DNS (IPv6)"], mailRows)}</section>` : ""}
+    ${nsRows.length ? `<section class="email-auth"><h3>Name servers</h3>${dataTable(["Name server", "IPv4", "IPv6", "Result"], nsRows)}</section>` : ""}
+    <p class="scan-disclaimer">The score weighs the website (40), mail (30) and name servers (30); parts the domain does not use are left out. Fully ready means every part works for IPv6-only visitors and mail servers.</p>`;
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- Subdomain discovery
+
+function renderSubdomainsResult(data) {
+  const vulnerable = data.subdomains.filter((entry) => entry.takeover?.status === "vulnerable").length;
+  const dangling = data.subdomains.filter((entry) => entry.takeover?.status === "dangling").length;
+  const privateCount = data.subdomains.filter((entry) => entry.private).length;
+  const rows = data.subdomains.map((entry) => `
+    <tr>
+      <td>${copyableResult(entry.name)}${entry.takeover ? `<br>${pill(entry.takeover.status === "vulnerable" ? "fail" : "warn", entry.takeover.status === "vulnerable" ? `Takeover risk${entry.takeover.service ? ` (${entry.takeover.service})` : ""}` : "Dangling CNAME")}` : ""}</td>
+      <td>${entry.cname ? `${escapeHtml(entry.cname)}<br>` : ""}${entry.provider ? pill("info", entry.provider) : ""}</td>
+      <td>${entry.addresses.length ? entry.addresses.map((address) => escapeHtml(address)).join("<br>") : '<span class="trace-silent">no address</span>'}${entry.private ? `<br>${pill("warn", "Private address")}` : ""}</td>
+      <td>${escapeHtml(entry.sources.join(", "))}</td>
+    </tr>`);
+  const groups = data.groups.slice(0, 24).map((group) => `
+    <div class="subdomain-group ${escapeHtml(group.kind)}">
+      <strong>${escapeHtml(group.label)}</strong> <span class="trace-silent">${escapeHtml(`${group.names.length} ${group.names.length === 1 ? "subdomain" : "subdomains"}`)}</span>
+      <div class="subdomain-chips">${group.names.slice(0, 30).map((name) => `<span>${escapeHtml(name.slice(0, -(data.domain.length + 1)) || name)}</span>`).join("")}${group.names.length > 30 ? `<span>+${group.names.length - 30}</span>` : ""}</div>
+    </div>`).join("");
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">SUBDOMAINS</p><h2>${copyableResult(data.domain)}</h2><p class="web-title">${escapeHtml(`${data.checked} names checked in ${(data.durationMs / 1000).toFixed(1)} s`)}</p></div>
+      <span class="status-badge ${vulnerable ? "warning" : "success"}">${escapeHtml(vulnerable ? `${vulnerable} takeover risk(s)` : `${data.subdomains.length} found`)}</span>
+    </div>
+    ${scoreTiles([
+      ["Subdomains", data.subdomains.length ? "ok" : "none", String(data.subdomains.length)],
+      ["Certificate logs", data.sources.certificates.error ? "warn" : "ok", data.sources.certificates.error ? "Unavailable" : `${data.sources.certificates.names} names (${data.sources.certificates.source})`],
+      ["Takeover risk", vulnerable ? "bad" : dangling ? "warn" : "ok", vulnerable ? String(vulnerable) : dangling ? `${dangling} dangling` : "None found"],
+      ["Private addresses", privateCount ? "warn" : "ok", String(privateCount)],
+      ["Wildcard DNS", data.wildcard ? "warn" : "ok", data.wildcard ? "Yes" : "No"],
+    ])}
+    ${data.issues.length ? `<section class="record-section"><h3>Findings</h3><ul class="dnssec-issues">${data.issues.map((issue) => `<li class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join("")}</ul></section>` : ""}
+    ${groups ? `<section class="email-auth"><h3>Where they point</h3><div class="subdomain-map">${groups}</div></section>` : ""}
+    <section class="email-auth"><h3>Subdomains ${pill("info", String(data.subdomains.length))}</h3>
+      ${rows.length ? dataTable(["Name", "Points to", "Addresses", "Found in"], rows, "dmarc-sources-table") : '<p class="empty-result">No subdomains found.</p>'}
+      <p class="scan-disclaimer">Names come from Certificate Transparency logs (every publicly trusted certificate is logged) and from ${escapeHtml(data.sources.commonNames)} common names. Subdomains that never had a certificate and are not common names cannot be found this way.${data.wildcard ? " The domain has wildcard DNS, so guessed names that only match the wildcard are left out." : ""}</p>
+    </section>`;
   resultPanel.hidden = false;
 }
 

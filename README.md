@@ -263,12 +263,12 @@ addresses unless the user's role allows local targets.
 
 | Area | Tools |
 | --- | --- |
-| DNS and domains | [Auto lookup](#auto-lookup) · [DNS lookup and DNSSEC](#dns-lookup-and-dnssec) · [Reverse lookup](#reverse-lookup) · [Whois](#whois) · [Dig](#dig) · [Propagation](#propagation) · [ASN](#asn) · [Magic scan](#magic-scan) |
+| DNS and domains | [Auto lookup](#auto-lookup) · [DNS lookup and DNSSEC](#dns-lookup-and-dnssec) · [Reverse lookup](#reverse-lookup) · [Whois](#whois) · [Dig](#dig) · [Propagation](#propagation) · [IPv6 readiness](#ipv6-readiness) · [ASN](#asn) · [Magic scan](#magic-scan) |
 | Email | [Email check](#email-check) · [Mail server check](#mail-server-check) · [Header analyzer](#header-analyzer) · [DMARC reports](#dmarc-reports) · [TLS reports](#tls-reports) · [Record builder](#record-builder) · [SPF flattener](#spf-flattener) |
-| Web and TLS | [Web check](#web-check) · [SSLscan and TLS grade](#sslscan-and-tls-grade) · [Website previews](#website-previews) |
-| Security | [DNS health](#dns-health) · [Reputation](#reputation) · [Lookalike domains](#lookalike-domains) · [Blocklists](#blocklists) · [Subdomain takeover](#subdomain-takeover) |
+| Web and TLS | [Web check](#web-check) · [Privacy check](#privacy-check) · [SSLscan and TLS grade](#sslscan-and-tls-grade) · [Website previews](#website-previews) |
+| Security | [DNS health](#dns-health) · [Subdomain discovery](#subdomain-discovery) · [Reputation](#reputation) · [Lookalike domains](#lookalike-domains) · [Blocklists](#blocklists) · [Subdomain takeover](#subdomain-takeover) |
 | Network | [Ping](#ping) · [Traceroute](#traceroute) · [Ping scan](#ping-scan) · [Port scan and Bulk port scan](#port-scan-and-bulk-port-scan) · [Nmap](#nmap) · [MAC lookup](#mac-lookup) · [IP calculator](#ip-calculator) |
-| Productivity | [Bulk check](#bulk-check) · [Monitors](#monitors) · [History](#history) · [Share links](#share-links) · [Print and PDF](#print-and-pdf) |
+| Productivity | [Bulk check](#bulk-check) · [Monitors](#monitors) · [History](#history) · [Share links](#share-links) · [Print and PDF](#print-and-pdf) · [Scan from your browser](#scan-from-your-browser) |
 
 All result tables are searchable and sortable; click any value to copy it.
 
@@ -334,6 +334,20 @@ Queries one name and type through each built-in DoH resolver (Cloudflare,
 Google, Quad9, DNS4EU, plus `DOH_ENDPOINT`) and directly at the zone's
 authoritative name servers, groups identical answers and highlights resolvers
 that differ. Name servers on private addresses are not queried.
+
+#### IPv6 readiness
+
+Checks whether a domain works for visitors and mail servers that only have IPv6:
+
+- **Website**: AAAA records for the domain and `www`, and whether the site really
+  answers over IPv6 (when this server has IPv6 itself; otherwise only the records
+  are checked, and the result says so).
+- **Mail**: AAAA records for the mail servers and reverse DNS for their IPv6
+  addresses, which receivers require.
+- **Name servers**: IPv6 addresses for the domain's name servers.
+
+The score weighs the website (40), mail (30) and name servers (30); parts the
+domain does not use are left out.
 
 #### ASN
 
@@ -500,6 +514,26 @@ A+ for HSTS, T for untrusted, M for name mismatch, F for critical issues).
 - Grades can differ slightly from SSL Labs, which tests every address of a host
   and runs a few extra checks.
 
+#### Privacy check
+
+On the **Privacy** sub-tab of Web check: opens a page as a first-time visitor who
+has not consented and shows:
+
+- every **third party** the page's HTML loads, recognised from a catalog of about
+  60 services (analytics, advertising, session recording, social media, tag
+  managers, fonts, embeds, chat, consent banners) and inline snippets such as
+  `gtag('config')` or `fbq('init')`;
+- whether trackers load **straight away or only after consent** (scripts marked
+  `type="text/plain"` with a consent attribute);
+- the **cookies the server sets** before consent, with known tracking cookies
+  (`_ga`, `_fbp`, …), lifetime and flags;
+- a consent banner, a privacy policy link, Google Fonts loaded from Google, YouTube
+  embeds without `youtube-nocookie.com` and the Referrer-Policy, with a score.
+
+Scripts are not run, so trackers added later by other scripts (for example
+through a tag manager) and cookies set by JavaScript are not seen. Results are
+rated on the dashboard. This is not legal advice.
+
 #### Website previews
 
 A live view of the site appears in Web check (the final page), Magic scan (the
@@ -538,6 +572,22 @@ Checks a zone's name server setup by querying every name server directly
   unusual SOA timers.
 
 Also available as a Magic scan option. Results are rated on the dashboard.
+
+#### Subdomain discovery
+
+Finds a domain's subdomains in **Certificate Transparency logs** (crt.sh, or
+CertSpotter as a fallback) and by trying 80 common names, then resolves each one:
+
+- what it points to (CNAME and addresses) and the hosting provider recognised from
+  the CNAME (AWS, Azure, GitHub Pages, Netlify, Vercel, Heroku, Shopify, …), with a
+  map that groups subdomains by provider or address;
+- **takeover risks**: CNAMEs to unclaimed cloud resources or to names that no longer
+  exist (the same check as in Magic scan);
+- subdomains that point to **internal addresses** (10.x, 192.168.x, …).
+
+Wildcard DNS is detected first, so guessed names that only match the wildcard are
+left out. Subdomains that never had a certificate and are not common names cannot
+be found this way.
 
 #### Reputation
 
@@ -673,7 +723,7 @@ page (requires a login). Each user can create up to 25 monitors (administrators
 | --- | --- |
 | Website up | The site stops answering, returns an error or redirects elsewhere. |
 | Certificate | It expires within 14 days, becomes untrusted or is replaced. |
-| DNS records | A, AAAA, CNAME, MX, NS, TXT or CAA records change. |
+| DNS records | A, AAAA, CNAME, MX, NS, TXT or CAA records change. **DNS history** shows a timeline of every change. |
 | Email security | MX, SPF, DMARC or the MTA-STS mode change, or SPF or DMARC break. |
 | Blocklists | The domain or its address is listed or delisted. |
 | New certificates (CT logs) | A new certificate for the domain or a subdomain appears in Certificate Transparency logs. |
@@ -682,6 +732,10 @@ The first check runs when a monitor is added. Alerts go to the account's email
 address once [email](#email-delivery) is configured. *Monitor this* below DNS,
 SSLscan, Email, Web check, Magic scan, DNS health, Reputation and Lookalike results opens the
 Monitors page with the target filled in.
+
+For DNS monitors, **DNS history** shows every distinct answer seen (the last 200),
+newest first, with the records added and removed per type and the full set of
+records at each point in time.
 
 #### History
 
@@ -697,6 +751,15 @@ re-renders it for anyone with the link. Users manage their links on *My account*
 and administrators can delete any link. Up to 200 links per user and 1 MB per
 result. Links are unguessable but not password-protected.
 
+#### Scan from your browser
+
+The **/bookmarklet** page (linked from the landing page and My account) offers a
+*Scan this site* button to drag to the bookmarks bar. Clicking it on any website
+opens a scan of that site in the simple or full interface, depending on the
+user's login and Simple / Full choice. Browsers can also add the site as a search
+engine (`/opensearch.xml`), so typing its keyword and a domain in the address
+bar scans that domain. `/scan?url=<address or domain>` works as a direct link too.
+
 #### Print and PDF
 
 *Print / save as PDF* below every result prints only the result, in dark-on-white
@@ -711,7 +774,7 @@ Users are **Admins** or **Users**. Administrators set each feature to
 
 | Default access | Features |
 | --- | --- |
-| Logged-in users | DNS lookup, Reverse lookup, Whois, Dig, Propagation, ASN, MAC lookup, Ping, Traceroute, SSLscan, Email check and email tools, Web check, Website previews, DNS health, Reputation, Lookalike domains, IP calculator, Blocklists, Monitors, History, API tokens |
+| Logged-in users | DNS lookup, Reverse lookup, Whois, Dig, Propagation, ASN, MAC lookup, Ping, Traceroute, SSLscan, Email check and email tools, Web check, Website previews, Privacy check, DNS health, Subdomain discovery, IPv6 readiness, Mail server check, Reputation, Lookalike domains, IP calculator, Blocklists, Monitors, History, API tokens |
 | Administrators | Magic scan, Ping scan, Multi traceroute, Port scan, Bulk port scan, Nmap, Bulk check |
 
 - Ping scan, Multi traceroute, both port scans, Nmap and Bulk check need a login
@@ -1032,13 +1095,13 @@ BNGlookup sends data to third parties only to perform the requested check:
 | Visitor IP (landing page reverse DNS and registration) | DoH resolver, `rdap.org` |
 | Domains and IPs for Whois | `rdap.org`, `ipwho.is` (ASN fallback), RIPE Stat; `whois.iana.org` and the registry's WHOIS server on TCP port 43 when RDAP is unavailable |
 | Public IPs in results | `ipwho.is` (geolocation); private IPs are never sent |
-| Domains in Magic scan and CT monitors | `crt.sh`, CertSpotter on failure |
+| Domains in Magic scan, Subdomain discovery and CT monitors | `crt.sh`, CertSpotter on failure |
 | Names and IPs for blocklists | The blocklist operators, through `BLOCKLIST_RESOLVER` or the system resolver |
 | Domains for Reputation | Quad9, Cloudflare for Families, DNS4EU and CleanBrowsing; URLhaus, VirusTotal and Google Safe Browsing only when their keys are set |
 | Threat lists | Downloaded from Spamhaus, abuse.ch and OpenPhish; queried names are not sent |
 | AS numbers and prefixes | RIPE Stat |
 | MAC addresses | `maclookup.app` |
-| Target sites and mail servers | Contacted by the server for Web check, SSLscan, the TLS test, website previews (the page and its images, styles and fonts), the Email check (port 25) and BIMI/MTA-STS fetches |
+| Target sites and mail servers | Contacted by the server for Web check, SSLscan, the TLS test, website previews (the page and its images, styles and fonts), the Privacy check, the IPv6 check, the Email and Mail server checks (port 25) and BIMI/MTA-STS fetches |
 | Update check | The GitHub API, at most every 6 hours while an administrator views the dashboard (`UPDATE_CHECK=false` turns it off) |
 | Cloudflare IP ranges | Downloaded from Cloudflare when automatic trust is enabled |
 

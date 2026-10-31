@@ -49,11 +49,12 @@ const watchResultLink = document.querySelector("#watch-result");
 // Tabs that group several tools, shown as sub-tabs under the main tab bar.
 const modeGroups = {
   email: [["email", "Domain check"], ["mail-server", "Mail server"], ["email-headers", "Header analyzer"], ["dmarc-reports", "DMARC reports"], ["tlsrpt-reports", "TLS reports"], ["record-builder", "Record builder"], ["spf-flatten", "SPF flattener"]],
-  security: [["dns-health", "DNS health"], ["reputation", "Reputation"], ["lookalike", "Lookalike domains"]],
+  web: [["web", "Web check"], ["privacy", "Privacy"]],
+  security: [["dns-health", "DNS health"], ["subdomains", "Subdomains"], ["reputation", "Reputation"], ["lookalike", "Lookalike domains"]],
 };
 const modeFeatures = { details: "whois", "spf-flatten": "record-builder" };
 // Tools whose requests and rendering live in tools.js.
-const toolModes = new Set(["web", "bulk-domains", "email-headers", "dmarc-reports", "tlsrpt-reports", "dns-health", "mail-server", "reputation", "lookalike", "spf-flatten", "ip-calc"]);
+const toolModes = new Set(["web", "bulk-domains", "email-headers", "dmarc-reports", "tlsrpt-reports", "dns-health", "mail-server", "subdomains", "ipv6", "privacy", "reputation", "lookalike", "spf-flatten", "ip-calc"]);
 
 function featureForMode(toolMode) {
   return modeFeatures[toolMode] || toolMode;
@@ -98,7 +99,7 @@ const shareModeLabels = {
   "multi-traceroute": "Multi traceroute", scan: "Magic scan", "custom-port": "Port scan", "bulk-port": "Bulk port scan",
   nmap: "Nmap", dnssec: "DNSSEC check", web: "Web check", "email-headers": "Header analysis",
   "dmarc-reports": "DMARC reports", "tlsrpt-reports": "TLS reports", "bulk-domains": "Bulk domain check", "dns-health": "DNS health",
-  "mail-server": "Mail server check", reputation: "Reputation", lookalike: "Lookalike domains", "spf-flatten": "SPF flattener", "ip-calc": "IP calculator",
+  "mail-server": "Mail server check", subdomains: "Subdomain discovery", ipv6: "IPv6 readiness", privacy: "Privacy check", reputation: "Reputation", lookalike: "Lookalike domains", "spf-flatten": "SPF flattener", "ip-calc": "IP calculator",
 };
 
 function historyEnabled() {
@@ -322,6 +323,9 @@ function submitLabel(currentMode) {
     "bulk-domains": "Check domains",
     "dns-health": "Check DNS health",
     "mail-server": "Check mail servers",
+    subdomains: "Find subdomains",
+    ipv6: "Check IPv6",
+    privacy: "Check privacy",
     reputation: "Check reputation",
     lookalike: "Find lookalikes",
     "spf-flatten": "Flatten SPF",
@@ -349,11 +353,11 @@ function setMode(nextMode) {
   const dmarcReports = mode === "dmarc-reports";
   const tlsrptReports = mode === "tlsrpt-reports";
   const recordBuilder = mode === "record-builder";
-  const webCheck = mode === "web";
+  const webCheck = mode === "web" || mode === "privacy";
   const bulkDomains = mode === "bulk-domains";
   const group = groupOfMode(mode);
   const toolInputMode = emailHeaders || dmarcReports || tlsrptReports || recordBuilder || bulkDomains;
-  const plainInputMode = ["web", "dns-health", "mail-server", "reputation", "lookalike", "spf-flatten", "ip-calc"].includes(mode);
+  const plainInputMode = ["web", "privacy", "dns-health", "mail-server", "subdomains", "ipv6", "reputation", "lookalike", "spf-flatten", "ip-calc"].includes(mode);
   const asnMode = mode === "asn";
   const ping = mode === "ping";
   const sslscan = mode === "sslscan";
@@ -379,7 +383,7 @@ function setMode(nextMode) {
   nameLabel.textContent = automatic
     ? "Search"
     : reverse ? "IP address" : mac ? "MAC address" : dig ? "dig command" : propagation ? "DNS name" : email ? "Domain or email address" : asnMode ? "IP address, domain or AS number"
-    : ["dns-health", "lookalike", "spf-flatten"].includes(mode) ? "Domain name"
+    : ["dns-health", "lookalike", "spf-flatten", "subdomains", "ipv6"].includes(mode) ? "Domain name"
     : mode === "mail-server" ? "Domain or email address"
     : mode === "reputation" ? "Domain, URL or IP address"
     : mode === "ip-calc" ? "IP address or prefix"
@@ -400,7 +404,7 @@ function setMode(nextMode) {
       ? "e.g. example.com, a URL or 203.0.113.7"
     : mode === "ip-calc"
       ? "e.g. 192.168.10.0/22, 10.1.2.3 255.255.255.0 or 2001:db8::/48"
-    : ["dns-health", "lookalike", "spf-flatten", "mail-server"].includes(mode)
+    : ["dns-health", "lookalike", "spf-flatten", "mail-server", "subdomains", "ipv6"].includes(mode)
       ? "e.g. example.com"
     : details || ping || sslscan || traceroute || nmapScan
       ? "e.g. example.com or 8.8.8.8"
@@ -414,7 +418,7 @@ function setMode(nextMode) {
   typeControl.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || plainInputMode;
   customType.hidden = automatic || reverse || details || mac || dig || email || asnMode || ping || sslscan || traceroute || listMode || scan || portScan || plainInputMode || recordType.value !== "custom";
   modeSubtabs.hidden = !group;
-  modeSubtabs.setAttribute("aria-label", group === "security" ? "Security tools" : "Email tools");
+  modeSubtabs.setAttribute("aria-label", group === "security" ? "Security tools" : group === "web" ? "Website tools" : "Email tools");
   modeSubtabs.innerHTML = group
     ? modeGroups[group].filter(([member]) => featureAllowed(featureForMode(member))).map(([member, label]) => `
       <button class="email-subtab${member === mode ? " active" : ""}" type="button" role="tab" aria-selected="${member === mode}" data-mode="${member}">${escapeHtml(label)}</button>`).join("")
@@ -484,6 +488,10 @@ function setMode(nextMode) {
         ? "Read DMARC aggregate (rua) reports to see who sends mail as your domain and whether it passes, before you tighten your DMARC policy."
       : recordBuilder
         ? "Build correct SPF, DMARC, MTA-STS, TLS-RPT and BIMI records. Load a domain's current records to start from them."
+      : mode === "ipv6"
+        ? "Check whether a domain works for visitors and mail servers that only have IPv6: AAAA records and IPv6 reachability of the website, IPv6 mail servers with reverse DNS, and name servers with IPv6 addresses."
+      : mode === "subdomains"
+        ? "Find a domain's subdomains in Certificate Transparency logs and by trying common names, see where each one points, and check for subdomains that can be taken over or reveal internal addresses."
       : mode === "mail-server"
         ? "Connect to each mail server (MX) on port 25: STARTTLS and its certificate, whether it is an open relay (no message is sent), forward-confirmed reverse DNS, the name it introduces itself with, and password login offered before encryption."
       : mode === "dns-health"
@@ -496,6 +504,8 @@ function setMode(nextMode) {
         ? "Replace include, a and mx mechanisms with the IP ranges they resolve to, to get under SPF's limit of 10 DNS lookups. Flattened records must be refreshed when your providers change their addresses."
       : mode === "ip-calc"
         ? "Work out the network, broadcast, host range and size of an IPv4 or IPv6 prefix, convert a netmask or wildcard, and split a network into smaller subnets. Calculated in your browser."
+      : mode === "privacy"
+        ? "See which third parties a page loads (analytics, advertising, session recording, social media, fonts), which cookies are set before a visitor can consent, and whether there is a consent banner and a privacy policy."
       : webCheck
         ? "Follow a site's redirects and check its HTTPS setup, security headers, cookies, compression and HTTP/2 and HTTP/3 support."
       : bulkDomains
@@ -3093,6 +3103,9 @@ function renderSharedResult(shareMode, payload) {
     case "bulk-domains": renderBulkDomainsResult(data); break;
     case "dns-health": renderDnsHealthResult(data); break;
     case "mail-server": renderMailServerResult(data); break;
+    case "subdomains": renderSubdomainsResult(data); break;
+    case "ipv6": renderIpv6Result(data); break;
+    case "privacy": renderPrivacyResult(data); break;
     case "reputation": renderReputationResult(data); break;
     case "lookalike": renderLookalikeResult(data); break;
     case "spf-flatten": renderSpfFlattenResult(data); break;

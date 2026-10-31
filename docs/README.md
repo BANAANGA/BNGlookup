@@ -24,6 +24,7 @@ the main [README](../README.md).
 | [Whois](whois.md) | Shows who registered a domain or IP and when it expires. |
 | [Dig](dig.md) | Runs a real `dig` command for raw DNS output. |
 | [Propagation](propagation.md) | Shows whether a DNS change has reached the big resolvers. |
+| [IPv6 readiness](ipv6.md) | Checks whether the website, mail and name servers work over IPv6. |
 | [ASN](asn.md) | Shows which network announces an IP, and its other ranges. |
 | [Magic scan](magic-scan.md) | One-click overview of a whole domain. |
 
@@ -44,6 +45,7 @@ the main [README](../README.md).
 | Tool | In one sentence |
 | --- | --- |
 | [Web check](web-check.md) | Grades a site's HTTPS, redirects and security headers. |
+| [Privacy check](privacy.md) | Shows trackers, third parties and cookies set before consent. |
 | [SSLscan and TLS grade](sslscan.md) | Tests a server's TLS and grades it like SSL Labs. |
 | [Website previews](website-previews.md) | Safe live views of sites, loaded through the server. |
 
@@ -52,6 +54,7 @@ the main [README](../README.md).
 | Tool | In one sentence |
 | --- | --- |
 | [DNS health](dns-health.md) | Checks name servers for delegation errors, open transfers and open recursion. |
+| [Subdomain discovery](subdomains.md) | Finds subdomains in certificate logs and common names, with takeover checks. |
 | [Reputation](reputation.md) | Asks security services and threat lists whether a site is malicious. |
 | [Lookalike domains](lookalike-domains.md) | Finds registered typo and look-alike domains. |
 | [Blocklists](blocklists.md) | Checks spam and abuse blocklists. |
@@ -75,10 +78,11 @@ the main [README](../README.md).
 | Tool | In one sentence |
 | --- | --- |
 | [Bulk check](bulk-check.md) | Checks up to 50 domains at once, with CSV export. |
-| [Monitors](monitors.md) | Scheduled checks with email alerts. |
+| [Monitors](monitors.md) | Scheduled checks with email alerts and DNS change history. |
 | [History](history.md) | View, re-run and compare your recent lookups. |
 | [Share links](share-links.md) | Share a result with anyone for 30 days. |
 | [Print and PDF](print.md) | Print a result or save it as a PDF. |
+| [Scan from your browser](bookmarklet.md) | A bookmark and address-bar search that scan the site you are on. |
 
 ## Account and administration
 

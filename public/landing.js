@@ -208,11 +208,14 @@ function planJobs(target, allowed, token) {
     add("email", { id: "email", category: "email", title: "Email security", render: renderEmail, load: () => call(query("/api/email-check", { name })) });
     add("mail-server", { id: "mail-server", category: "email", title: "Mail servers", render: renderMailServers, load: () => call(query("/api/mail-server", { name })) });
     add("web", { id: "web", category: "web", title: "Website", render: renderWeb, load: () => call(query("/api/web-check", { name })) });
+    add("privacy", { id: "privacy", category: "web", title: "Privacy", render: renderPrivacy, load: () => call(query("/api/privacy", { name })) });
     add("sslscan", { id: "tls", category: "web", title: "TLS certificate", render: renderTls, load: () => call(query("/api/sslscan", { name, port: "443" })) });
     add("reputation", { id: "reputation", category: "security", title: "Reputation", render: renderReputation, load: () => call(query("/api/reputation", { name })) });
+    add("subdomains", { id: "subdomains", category: "security", title: "Subdomains", render: renderSubdomains, load: () => call(query("/api/subdomains", { name })) });
     add("lookalike", { id: "lookalike", category: "security", title: "Look-alike domains", render: renderLookalike, load: () => call(query("/api/lookalike", { name })) });
     add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name, call) });
     add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => call(query("/api/asn", { name })) });
+    add("ipv6", { id: "ipv6", category: "network", title: "IPv6 readiness", render: renderIpv6, load: () => call(query("/api/ipv6", { name })) });
   } else if (target.kind === "ip") {
     add("reverse", { id: "reverse", category: "dns", title: "Reverse DNS", render: renderReverse, load: () => call(query("/api/lookup", { name, reverse: "true" })) });
     add("whois", { id: "whois", category: "dns", title: "IP registration", render: renderIpWhois, load: () => call(query("/api/domain-info", { name })) });
@@ -460,6 +463,24 @@ function renderReputation(data) {
   };
 }
 
+function renderSubdomains(data) {
+  const issues = normalizeIssues(data.issues);
+  const risky = data.subdomains.filter((entry) => entry.takeover || entry.private);
+  return {
+    status: statusFromIssues(issues),
+    summary: `${plural(data.subdomains.length, "subdomain")} found${data.sources.certificates.error ? " (certificate logs unavailable)" : ""}.`,
+    facts: [["Where they point", data.groups.slice(0, 5).map((group) => `${group.label}: ${group.names.length}`).join("\n")]].filter(([, value]) => value),
+    checks: (risky.length ? risky : data.subdomains.slice(0, 12)).map((entry) => ({
+      state: entry.takeover?.status === "vulnerable" ? "bad" : entry.takeover || entry.private ? "warn" : "info",
+      label: entry.name,
+      text: entry.takeover ? (entry.takeover.status === "vulnerable" ? `takeover risk${entry.takeover.service ? ` (${entry.takeover.service})` : ""}` : `dangling CNAME to ${entry.cname}`)
+        : entry.private ? `private address ${entry.addresses[0]}` : entry.provider || entry.addresses[0] || "no address",
+      mono: true,
+    })),
+    issues,
+  };
+}
+
 function renderLookalike(data) {
   const registered = data.registered || [];
   const high = data.counts?.high || 0;
@@ -502,6 +523,36 @@ function renderAsn(data) {
       ["Registry", data.as?.registry],
       ["Announced", data.prefixes ? `${plural(data.prefixes.ipv4Count || 0, "IPv4 prefix", "IPv4 prefixes")}, ${plural(data.prefixes.ipv6Count || 0, "IPv6 prefix", "IPv6 prefixes")}` : ""],
     ].filter(([, value]) => value),
+    issues,
+  };
+}
+
+function renderPrivacy(data) {
+  if (data.error) return { status: "info", summary: data.error, facts: [], issues: [] };
+  const issues = normalizeIssues(data.issues);
+  const ungated = data.thirdParties.filter((party) => party.tracking && !party.gated);
+  return {
+    status: statusFromIssues(issues),
+    grade: data.grade,
+    summary: ungated.length ? `${plural(ungated.length, "tracker")} load before a visitor can consent.` : `No trackers load before consent; ${plural(data.thirdParties.length, "third party", "third parties")} in total.`,
+    checks: data.thirdParties.slice(0, 12).map((party) => ({
+      state: party.tracking && !party.gated ? (party.category === "advertising" || party.category === "session-replay" ? "bad" : "warn") : party.gated || party.category === "consent" ? "good" : "info",
+      label: party.name,
+      text: `${party.categoryLabel}${party.gated ? " · after consent" : ""}`,
+    })),
+    facts: [["Consent banner", data.consent.join(", ") || "not found"], ["Cookies set at once", String(data.cookies.length)]],
+    issues,
+  };
+}
+
+function renderIpv6(data) {
+  const issues = normalizeIssues(data.issues);
+  const part = (label, percent) => ({ state: percent === null ? "info" : percent >= 100 ? "good" : percent > 0 ? "warn" : "bad", label, text: percent === null ? "not used" : percent >= 100 ? "ready for IPv6" : percent > 0 ? "partly ready" : "IPv4 only" });
+  return {
+    status: data.score >= 100 ? "good" : statusFromIssues(issues, "warn"),
+    grade: data.grade,
+    summary: `${data.score}/100 for IPv6.${data.serverHasIpv6 ? "" : " Only the records could be checked; this server has no IPv6."}`,
+    checks: [part("Website", data.parts.web), part("Mail", data.parts.mail), part("Name servers", data.parts.dns)],
     issues,
   };
 }
@@ -552,6 +603,15 @@ const fixCatalog = [
   { match: /open relay|accepts mail for other domains/i, text: "Only relay mail for your own domains and for users who log in. In Postfix, check smtpd_relay_restrictions (permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination)." },
   { match: /login before tls|auth\) before encryption|password login/i, text: "Only offer AUTH after STARTTLS. For Postfix: smtpd_tls_auth_only = yes." },
   { match: /reverse dns.*(not confirmed|does not point back)|not forward-confirmed/i, text: "Make the reverse DNS (PTR) name of the mail server's address resolve back to the same address, ideally the name it uses in HELO. Your hosting provider sets the PTR record." },
+  { match: /before a visitor can give consent|no consent banner/i, text: "Load analytics, advertising and session-recording scripts only after the visitor agrees: use a consent banner (CMP) and mark those scripts to run after consent, or switch to cookieless, privacy-friendly analytics." },
+  { match: /google fonts are loaded/i, text: "Download the fonts and serve them from your own website (for example with the google-webfonts-helper), then remove the links to fonts.googleapis.com." },
+  { match: /embedded from youtube\.com/i, text: "Change the embed address from www.youtube.com/embed/… to www.youtube-nocookie.com/embed/…." },
+  { match: /no link to a privacy/i, text: "Add a link to your privacy and cookie policy in the footer of every page." },
+  { match: /tag manager is used/i, text: "Review the tags in your tag manager and make every tracking tag wait for consent." },
+  { match: /no aaaa record|ipv4 only|no ipv6 address|ipv6 address .* without reverse dns|does not answer over ipv6/i, text: "Ask your hosting, mail or DNS provider to enable IPv6, then publish AAAA records for the website, mail servers and name servers (and reverse DNS for IPv6 mail servers). Test before publishing: an AAAA record that does not answer is worse than none." },
+  { match: /can probably be taken over|takeover risk/i, text: "Delete the DNS record of the unused subdomain, or claim the resource it points to again (the app, bucket or site at the provider)." },
+  { match: /dangling cname/i, text: "Remove the CNAME record: it points to a name that no longer exists, and someone who registers that name controls your subdomain." },
+  { match: /private address/i, text: "Remove public DNS records that point to internal addresses, or move them to an internal DNS zone." },
   { match: /bimi requires dmarc/i, text: "BIMI logos are only shown when DMARC is enforced: raise the DMARC policy to quarantine or reject.", snippet: (d) => `_dmarc.${d}. TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@${d}"` },
   { match: /logo could not be fetched|logo.*served as/i, text: "Serve the BIMI logo directly (no redirects) over HTTPS as image/svg+xml in the SVG Tiny Portable/Secure format. BNGlookup can host it at /logo.svg." },
   { match: /mark certificate.*(expire|not valid)/i, text: "Renew the Verified Mark Certificate with your certificate authority and replace the file at the a= address." },
@@ -627,6 +687,9 @@ document.addEventListener("click", async (event) => {
 
 const fullModes = {
   "mail-server": "mail-server",
+  subdomains: "subdomains",
+  ipv6: "ipv6",
+  privacy: "privacy",
   records: "forward", dnssec: "forward", whois: "details", propagation: "propagation", "dns-health": "dns-health", email: "email",
   web: "web", tls: "sslscan", reputation: "reputation", lookalike: "lookalike", ping: "ping", asn: "asn", reverse: "reverse", mac: "mac",
 };
@@ -1308,7 +1371,7 @@ function setCompareMode(on) {
 
 // ------------------------------------------------------------------ Share and PDF
 
-const allLandingFeatures = new Set(["forward", "whois", "propagation", "dns-health", "email", "mail-server", "web", "sslscan", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+const allLandingFeatures = new Set(["forward", "whois", "propagation", "dns-health", "email", "mail-server", "subdomains", "ipv6", "privacy", "web", "sslscan", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
 
 async function shareScan() {
   const box = byId("share-box");

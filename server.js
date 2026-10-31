@@ -21,6 +21,7 @@ const { createAcmeManager } = require("./acme");
 const { sendMail, validAddress } = require("./mail");
 const { analyzeEmailHeaders, organizationalDomain } = require("./email-headers");
 const webauthn = require("./webauthn");
+const { analyzePrivacy } = require("./privacy");
 const oidc = require("./oidc");
 
 const port = Number(process.env.PORT || 3000);
@@ -93,6 +94,8 @@ const staticFiles = new Set([
   "/qr.js",
   "/landing.html",
   "/passkeys.js",
+  "/bookmarklet.html",
+  "/bookmarklet.js",
   "/landing.js",
   "/landing.css",
   "/styles.css",
@@ -166,6 +169,9 @@ const featureAccessDefaults = {
   monitors: "user",
   "dns-health": "user",
   "mail-server": "user",
+  subdomains: "user",
+  ipv6: "user",
+  privacy: "user",
   reputation: "user",
   lookalike: "user",
   "ip-calc": "user",
@@ -201,6 +207,9 @@ const featureNames = {
   monitors: "Monitoring and email alerts (requires login)",
   "dns-health": "DNS health check (delegation, SOA, zone transfer, open recursion)",
   "mail-server": "Mail server check (open relay, reverse DNS, TLS on port 25)",
+  subdomains: "Subdomain discovery (certificate logs, common names, takeover check)",
+  ipv6: "IPv6 readiness (website, mail and name servers)",
+  privacy: "Privacy check (trackers, third parties, cookies before consent)",
   reputation: "Reputation check (protective DNS, blocklists, optional threat feeds)",
   lookalike: "Lookalike domain finder",
   "ip-calc": "IP / CIDR calculator",
@@ -2131,7 +2140,7 @@ function fetchPinnedHttps(hostname, address, requestPath, { timeoutMs = 6000, ma
 }
 
 // Latest result per domain and check type, for the admin dashboard's best/worst lists.
-const ratingKinds = { web: "Web security headers", tls: "TLS grade", email: "Email security", dns: "DNS health", takeover: "Subdomain takeover risk" };
+const ratingKinds = { web: "Web security headers", tls: "TLS grade", email: "Email security", dns: "DNS health", privacy: "Privacy", takeover: "Subdomain takeover risk" };
 const ratingRetentionMs = 180 * 86400000;
 const tlsGradeScores = { "A+": 100, A: 95, "A-": 90, B: 80, C: 70, D: 60, E: 50, F: 35, T: 25, M: 25 };
 
@@ -2283,6 +2292,8 @@ async function followWebRedirects(startUrl, allowLocal, options = {}) {
     }
     const location = response.headers.location;
     const hop = { url: current.href, address, status: response.status, timeMs: response.totalMs, location: location || null };
+    // Kept for the privacy check: cookies set by every response, redirects included.
+    Object.defineProperty(hop, "setCookies", { value: [].concat(response.headers["set-cookie"] || []), enumerable: false });
     hops.push(hop);
     final = { url: current, response };
     if (response.status >= 300 && response.status < 400 && location) {
@@ -2961,6 +2972,302 @@ function testSmtpStartTls(host, address, { timeoutMs = 15000, deep = false } = {
         ? `Could not reach port 25 (${error.code}). Outbound port 25 may be blocked by this server's network or hosting provider.`
         : `The connection failed (${error.code || error.message}).`));
   });
+}
+
+// ---------------------------------------------------------------- Subdomain discovery
+
+const subdomainWordlist = [
+  "www", "mail", "webmail", "smtp", "imap", "pop", "mx", "autodiscover", "autoconfig", "owa", "exchange", "vpn", "remote",
+  "api", "app", "apps", "admin", "portal", "login", "auth", "sso", "id", "account", "my", "dev", "staging", "stage", "test",
+  "beta", "demo", "sandbox", "uat", "qa", "blog", "news", "shop", "store", "cdn", "static", "assets", "img", "images", "media",
+  "files", "download", "docs", "help", "support", "status", "wiki", "git", "gitlab", "jenkins", "ci", "jira", "confluence",
+  "grafana", "kibana", "monitor", "intranet", "crm", "erp", "cloud", "backup", "db", "ftp", "sftp", "cpanel", "webdisk",
+  "ns1", "ns2", "m", "mobile", "old", "new", "legacy", "events", "careers", "jobs", "partners",
+];
+const subdomainLimits = { names: 300, concurrency: 12, ctNames: 250 };
+const hostingProviders = [
+  [/\.cloudfront\.net$/, "Amazon CloudFront"], [/\.amazonaws\.com$/, "Amazon Web Services"], [/\.elasticbeanstalk\.com$/, "AWS Elastic Beanstalk"],
+  [/\.azurewebsites\.net$|\.cloudapp\.(net|azure\.com)$|\.trafficmanager\.net$|\.azureedge\.net$|\.azurefd\.net$|\.azurestaticapps\.net$|\.windows\.net$/, "Microsoft Azure"],
+  [/\.github\.io$/, "GitHub Pages"], [/\.netlify\.(app|com)$/, "Netlify"], [/\.vercel(-dns)?\.(com|app)$/, "Vercel"], [/\.herokuapp\.com$|\.herokudns\.com$/, "Heroku"],
+  [/\.cdn\.cloudflare\.net$|\.pages\.dev$|\.workers\.dev$/, "Cloudflare"], [/\.fastly\.net$/, "Fastly"], [/\.akamai(edge|technologies)?\.net$|\.edgekey\.net$|\.edgesuite\.net$/, "Akamai"],
+  [/\.googlehosted\.com$|\.appspot\.com$|ghs\.googlehosted\.com$|\.run\.app$/, "Google"], [/\.myshopify\.com$|shops\.myshopify\.com$/, "Shopify"],
+  [/\.wpengine\.com$/, "WP Engine"], [/\.squarespace\.com$/, "Squarespace"], [/\.wixdns\.net$/, "Wix"], [/\.zendesk\.com$/, "Zendesk"],
+  [/\.outlook\.com$|\.office365\.com$/, "Microsoft 365"], [/\.google\.com$/, "Google"],
+];
+
+// Addresses that only exist inside a network: publishing them reveals internal details.
+const internalAddressRanges = new net.BlockList();
+for (const [address, prefix, family] of [["10.0.0.0", 8, "ipv4"], ["172.16.0.0", 12, "ipv4"], ["192.168.0.0", 16, "ipv4"], ["100.64.0.0", 10, "ipv4"],
+  ["127.0.0.0", 8, "ipv4"], ["169.254.0.0", 16, "ipv4"], ["fc00::", 7, "ipv6"], ["fe80::", 10, "ipv6"], ["::1", 128, "ipv6"]]) {
+  internalAddressRanges.addSubnet(address, prefix, family);
+}
+const isInternalAddress = (address) => {
+  const family = isIP(address);
+  return Boolean(family) && internalAddressRanges.check(address, family === 4 ? "ipv4" : "ipv6");
+};
+
+async function resolveSubdomain(name) {
+  const [a, aaaa] = await Promise.all(["A", "AAAA"].map((type) => queryDohDns(name, type).catch(() => null)));
+  const answers = [...(a?.answers || []), ...(aaaa?.answers || [])];
+  const cnames = [...new Set(answers.filter((answer) => answer.type === 5 || answer.typeName === "CNAME").map((answer) => String(answer.data).replace(/\.$/, "").toLowerCase()))];
+  const addresses = [...new Set(answers.filter((answer) => [1, 28].includes(answer.type) || ["A", "AAAA"].includes(answer.typeName)).map((answer) => String(answer.data)))];
+  const status = a?.status ?? aaaa?.status ?? null;
+  return { name, cname: cnames.at(-1) || null, cnameChain: cnames, addresses, status };
+}
+
+function hostingProviderFor(entry) {
+  for (const [pattern, provider] of hostingProviders) if (entry.cnameChain.some((cname) => pattern.test(cname))) return provider;
+  return null;
+}
+
+async function subdomainDiscovery(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const domain = normalizeDomain(hostFromInput(rawName.trim()));
+  if (!domain) return sendJson(response, 400, { error: "Enter a domain name." });
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("subdomains")) return sendJson(response, 503, { error: "The server is busy with other subdomain searches. Try again shortly." });
+  try {
+    const started = Date.now();
+    const [ct, wildcardProbe] = await Promise.all([
+      discoverCertificateTransparencySubdomains(domain, subdomainLimits.ctNames).then((result) => ({ ...result, error: null }), (error) => ({ names: [], source: null, error: error.message })),
+      resolveSubdomain(`bngl-${crypto.randomBytes(6).toString("hex")}.${domain}`),
+    ]);
+    const wildcard = wildcardProbe.addresses.length || wildcardProbe.cname ? { addresses: wildcardProbe.addresses, cname: wildcardProbe.cname } : null;
+    const sources = new Map();
+    for (const name of ct.names) if (!name.startsWith("*.")) sources.set(name, new Set(["Certificates"]));
+    for (const word of subdomainWordlist) {
+      const name = `${word}.${domain}`;
+      sources.set(name, (sources.get(name) || new Set()).add("Common names"));
+    }
+    const names = [...sources.keys()].slice(0, subdomainLimits.names);
+    const resolved = [];
+    let next = 0;
+    await Promise.all(Array.from({ length: subdomainLimits.concurrency }, async () => {
+      while (next < names.length) {
+        const name = names[next];
+        next += 1;
+        resolved.push(await resolveSubdomain(name));
+      }
+    }));
+    const wildcardKey = wildcard ? `${wildcard.cname || ""}|${[...wildcard.addresses].sort().join(",")}` : null;
+    const found = resolved.filter((entry) => {
+      const fromCt = sources.get(entry.name).has("Certificates");
+      if (!entry.addresses.length && !entry.cname) return fromCt && entry.status === 0;
+      // With wildcard DNS every guessed name resolves; keep guesses only when they differ from the wildcard.
+      if (wildcardKey && !fromCt && `${entry.cname || ""}|${[...entry.addresses].sort().join(",")}` === wildcardKey) return false;
+      return true;
+    }).map((entry) => ({
+      name: entry.name,
+      sources: [...sources.get(entry.name)],
+      cname: entry.cname,
+      cnameChain: entry.cnameChain,
+      addresses: entry.addresses.slice(0, 8),
+      private: entry.addresses.some(isInternalAddress),
+      provider: hostingProviderFor(entry),
+      active: entry.addresses.length > 0,
+    })).sort((left, right) => left.name.localeCompare(right.name));
+    const takeover = await checkSubdomainTakeover(found.filter((entry) => entry.cname).map((entry) => ({
+      name: entry.name, records: [{ type: "CNAME", answers: entry.cnameChain.map((data) => ({ data })) }],
+    })), allowLocal);
+    const takeoverByHost = new Map(takeover.findings.map((finding) => [finding.host, finding]));
+    for (const entry of found) {
+      const finding = takeoverByHost.get(entry.name);
+      if (finding && finding.status !== "ok") entry.takeover = { status: finding.status, service: finding.service, evidence: finding.evidence };
+    }
+    const groups = new Map();
+    for (const entry of found) {
+      const key = entry.provider ? `provider:${entry.provider}` : entry.addresses.length ? `address:${entry.addresses[0]}` : "none";
+      const group = groups.get(key) || { key, label: entry.provider || entry.addresses[0] || "No address", kind: entry.provider ? "provider" : entry.addresses.length ? "address" : "none", names: [] };
+      group.names.push(entry.name);
+      groups.set(key, group);
+    }
+    const issues = [];
+    for (const entry of found) {
+      if (entry.takeover?.status === "vulnerable") issues.push({ severity: "high", message: `${entry.name} can probably be taken over: ${entry.takeover.evidence}` });
+      else if (entry.takeover?.status === "dangling") issues.push({ severity: "medium", message: `${entry.name} points to ${entry.cname}, which does not exist (dangling CNAME).` });
+      if (entry.private) issues.push({ severity: "low", message: `${entry.name} resolves to a private address (${entry.addresses.find(isInternalAddress)}), which reveals internal network details.` });
+    }
+    if (ct.error) issues.push({ severity: "low", message: `Certificate Transparency logs could not be searched (${ct.error}); only common names were tried.` });
+    sendJson(response, 200, {
+      domain,
+      sources: { certificates: { source: ct.source, names: ct.names.length, error: ct.error }, commonNames: subdomainWordlist.length },
+      wildcard,
+      checked: names.length,
+      subdomains: found,
+      groups: [...groups.values()].sort((left, right) => right.names.length - left.names.length),
+      takeover: { checked: takeover.checked, vulnerable: takeover.vulnerable, dangling: takeover.dangling },
+      issues,
+      durationMs: Date.now() - started,
+    });
+  } catch (error) {
+    console.error("Subdomain discovery failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the subdomain search." });
+  } finally {
+    releaseHeavyJob("subdomains");
+  }
+}
+
+// ---------------------------------------------------------------- Privacy check
+
+async function privacyCheck(request, url, response) {
+  const rawName = queryInput(url, "name", 2048, response);
+  if (rawName === null) return;
+  const input = rawName.trim();
+  let start;
+  try {
+    start = /^https?:\/\//i.test(input) ? new URL(input) : null;
+  } catch {
+    start = null;
+  }
+  const host = start ? normalizeDomain(start.hostname) : normalizeDomain(hostFromInput(input));
+  if (!host) return sendJson(response, 400, { error: "Enter a domain name or a web address." });
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("privacy")) return sendJson(response, 503, { error: "The server is busy with other privacy checks. Try again shortly." });
+  try {
+    const started = Date.now();
+    let result = null;
+    for (const candidate of start ? [start] : [new URL(`https://${host}/`), new URL(`http://${host}/`)]) {
+      result = await followWebRedirects(candidate, allowLocal, { maxBytes: 1024 * 1024 });
+      if (result.final && !result.hops.at(-1)?.error) break;
+    }
+    const { hops, final } = result;
+    if (!final || hops.at(-1)?.error) {
+      return sendJson(response, 200, { input, error: hops.at(-1)?.error || "The website could not be loaded.", hops });
+    }
+    const html = decodeBody(final.response.body, String(final.response.headers["content-encoding"] || ""));
+    const analysis = analyzePrivacy({
+      html,
+      setCookies: hops.flatMap((hop) => hop.setCookies || []),
+      pageUrl: final.url.href,
+      siteDomain: organizationalDomain(final.url.hostname),
+      organizationalDomain,
+      headers: final.response.headers,
+    });
+    recordDomainRating("privacy", organizationalDomain(final.url.hostname), gradeForScore(analysis.score), analysis.score,
+      analysis.issues.filter((issue) => issue.severity !== "low").map((issue) => issue.message).slice(0, 3).join(" ") || "No problems found");
+    sendJson(response, 200, {
+      input, finalUrl: final.url.href, status: final.response.status, https: final.url.protocol === "https:",
+      hops: hops.map(({ url: hopUrl, status }) => ({ url: hopUrl, status })),
+      ...analysis, grade: gradeForScore(analysis.score), durationMs: Date.now() - started,
+    });
+  } catch (error) {
+    console.error("Privacy check failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the privacy check." });
+  } finally {
+    releaseHeavyJob("privacy");
+  }
+}
+
+// ---------------------------------------------------------------- IPv6 readiness
+
+let ipv6Connectivity = { checkedAt: 0, available: false };
+
+// Whether this server itself can reach the internet over IPv6; without it, reachability
+// cannot be tested and is reported as such instead of as a failure.
+function serverHasIpv6() {
+  if (Date.now() - ipv6Connectivity.checkedAt < 10 * 60_000) return Promise.resolve(ipv6Connectivity.available);
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "2606:4700:4700::1111", port: 443, family: 6, timeout: 3000 });
+    const done = (available) => {
+      socket.destroy();
+      ipv6Connectivity = { checkedAt: Date.now(), available };
+      resolve(available);
+    };
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+  });
+}
+
+async function addressesOf(name) {
+  const [v4, v6] = await Promise.all(["A", "AAAA"].map((type) => queryDohDns(name, type).then(
+    (data) => data.answers.filter((answer) => answer.type === (type === "A" ? 1 : 28) || answer.typeName === type).map((answer) => String(answer.data)),
+    () => [],
+  )));
+  return { v4: [...new Set(v4)], v6: [...new Set(v6)] };
+}
+
+async function ipv6Readiness(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const domain = normalizeDomain(hostFromInput(rawName.trim()));
+  if (!domain) return sendJson(response, 400, { error: "Enter a domain name." });
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("ipv6")) return sendJson(response, 503, { error: "The server is busy with other IPv6 checks. Try again shortly." });
+  try {
+    const started = Date.now();
+    const nsNames = await queryDohDns(domain, "NS").then((data) => data.answers.filter((answer) => answer.type === 2 || answer.typeName === "NS")
+      .map((answer) => String(answer.data).replace(/\.$/, "").toLowerCase()), () => []);
+    const [apex, www, mail, nameservers, canTest] = await Promise.all([
+      addressesOf(domain),
+      addressesOf(`www.${domain}`),
+      resolveMailHosts(domain),
+      Promise.all([...new Set(nsNames)].slice(0, 8).map(async (host) => ({ host, ...await addressesOf(host) }))),
+      serverHasIpv6(),
+    ]);
+    const web = await Promise.all([[domain, apex], [`www.${domain}`, www]].filter(([, addresses]) => addresses.v4.length || addresses.v6.length).map(async ([host, addresses]) => {
+      const entry = { host, v4: addresses.v4, v6: addresses.v6, reachable: null, status: null, error: null };
+      const address = addresses.v6.find((candidate) => isScannableAddress(candidate, allowLocal));
+      if (!address || !canTest) return entry;
+      for (const scheme of ["https", "http"]) {
+        try {
+          const page = await requestPinnedUrl(new URL(`${scheme}://${host}/`), address, { timeoutMs: 6000, maxBytes: 4096 });
+          Object.assign(entry, { reachable: true, status: page.status, error: null });
+          break;
+        } catch (error) {
+          Object.assign(entry, { reachable: false, error: String(error.code || error.message).slice(0, 120) });
+        }
+      }
+      return entry;
+    }));
+    const mailHosts = await Promise.all(mail.records.slice(0, 5).map(async (record) => {
+      const v6 = record.addresses.filter((address) => isIP(address) === 6);
+      const ptr = v6.length ? await fetchPtrLookups(v6.slice(0, 2)) : {};
+      return {
+        host: record.host,
+        priority: record.priority,
+        v4: record.addresses.filter((address) => isIP(address) === 4),
+        v6,
+        ptr: Object.fromEntries(Object.entries(ptr).map(([address, result]) => [address, result.answers?.[0]?.replace(/\.$/, "") || null])),
+      };
+    }));
+    const issues = [];
+    const webV6 = web.filter((entry) => entry.v6.length);
+    const webScore = !web.length ? null
+      : webV6.length === web.length ? (canTest && webV6.some((entry) => entry.reachable === false) ? 20 : 40) : webV6.length ? 25 : 0;
+    for (const entry of web) {
+      if (!entry.v6.length) issues.push({ severity: "medium", message: `${entry.host} has no AAAA record, so IPv6-only visitors cannot reach the website.` });
+      else if (entry.reachable === false) issues.push({ severity: "high", message: `${entry.host} has an AAAA record, but the website does not answer over IPv6 (${entry.error}).` });
+    }
+    const mailV6 = mailHosts.filter((host) => host.v6.length);
+    const mailScore = mail.nullMx || !mailHosts.length ? null : mailV6.length ? (mailV6.every((host) => host.v6.every((address) => host.ptr[address])) ? 30 : 20) : 0;
+    if (mailScore === 0) issues.push({ severity: "medium", message: "No mail server has an AAAA record, so mail cannot be delivered to this domain over IPv6." });
+    for (const host of mailV6) {
+      for (const address of host.v6) if (!host.ptr[address]) issues.push({ severity: "medium", message: `${host.host} has IPv6 address ${address} without reverse DNS; many receivers reject mail sent from such addresses.` });
+    }
+    const nsV6 = nameservers.filter((server) => server.v6.length);
+    const dnsScore = !nameservers.length ? null : nsV6.length === nameservers.length ? 30 : nsV6.length ? 20 : 0;
+    if (nameservers.length && !nsV6.length) issues.push({ severity: "medium", message: "No name server has an IPv6 address, so IPv6-only resolvers cannot look up this domain." });
+    else if (nsV6.length < nameservers.length) issues.push({ severity: "low", message: `${nameservers.length - nsV6.length} of ${nameservers.length} name servers have no IPv6 address.` });
+    // Missing parts (no website, no mail) do not count against the score.
+    const parts = [[webScore, 40], [mailScore, 30], [dnsScore, 30]].filter(([score]) => score !== null);
+    const score = parts.length ? Math.round(parts.reduce((sum, [value]) => sum + value, 0) / parts.reduce((sum, [, max]) => sum + max, 0) * 100) : 0;
+    sendJson(response, 200, {
+      domain, score, grade: gradeForScore(score), serverHasIpv6: canTest,
+      web, mail: { nullMx: mail.nullMx, hosts: mailHosts }, nameservers,
+      parts: { web: webScore === null ? null : Math.round(webScore / 40 * 100), mail: mailScore === null ? null : Math.round(mailScore / 30 * 100), dns: dnsScore === null ? null : Math.round(dnsScore / 30 * 100) },
+      issues, durationMs: Date.now() - started,
+    });
+  } catch (error) {
+    console.error("IPv6 check failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the IPv6 check." });
+  } finally {
+    releaseHeavyJob("ipv6");
+  }
 }
 
 // ---------------------------------------------------------------- Mail server deep check
@@ -3647,6 +3954,55 @@ const monitorKinds = {
 const monitorIntervals = [1, 6, 12, 24];
 const monitorLimits = { perUser: { user: 25, admin: 100 }, events: 50, concurrency: 3, checkMs: 90000, manualRunGapMs: 60000 };
 const monitorDnsTypes = ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "CAA"];
+// Every distinct DNS answer a monitor sees is kept, so its history can be shown as a timeline.
+database.exec(`
+  CREATE TABLE IF NOT EXISTS dns_history (
+    id INTEGER PRIMARY KEY,
+    monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+    taken_at INTEGER NOT NULL,
+    snapshot TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS dns_history_monitor ON dns_history(monitor_id, id DESC);
+`);
+const dnsHistoryLimit = 200;
+
+function recordDnsHistory(monitorId, snapshot) {
+  const text = JSON.stringify(snapshot);
+  const last = database.prepare("SELECT snapshot FROM dns_history WHERE monitor_id = ? ORDER BY id DESC LIMIT 1").get(monitorId);
+  if (last?.snapshot === text) return;
+  database.prepare("INSERT INTO dns_history (monitor_id, taken_at, snapshot) VALUES (?, ?, ?)").run(monitorId, Date.now(), text);
+  database.prepare(`DELETE FROM dns_history WHERE monitor_id = ? AND id NOT IN (
+    SELECT id FROM dns_history WHERE monitor_id = ? ORDER BY id DESC LIMIT ?)`).run(monitorId, monitorId, dnsHistoryLimit);
+}
+
+function dnsHistoryEntries(monitorId) {
+  const rows = database.prepare("SELECT taken_at, snapshot FROM dns_history WHERE monitor_id = ? ORDER BY id").all(monitorId);
+  let previous = null;
+  const entries = rows.map((row) => {
+    let snapshot = {};
+    try {
+      snapshot = JSON.parse(row.snapshot);
+    } catch {
+      snapshot = {};
+    }
+    const changes = [];
+    if (previous) {
+      for (const type of [...new Set([...Object.keys(previous), ...Object.keys(snapshot)])]) {
+        if (type === "exists") continue;
+        const before = new Set(Array.isArray(previous[type]) ? previous[type] : []);
+        const after = new Set(Array.isArray(snapshot[type]) ? snapshot[type] : []);
+        const added = [...after].filter((value) => !before.has(value));
+        const removed = [...before].filter((value) => !after.has(value));
+        if (added.length || removed.length) changes.push({ type, added, removed });
+      }
+      if (previous.exists === false && snapshot.exists !== false) changes.push({ type: "domain", added: ["exists again"], removed: [] });
+      if (snapshot.exists === false && previous.exists !== false) changes.push({ type: "domain", added: [], removed: ["stopped existing (NXDOMAIN)"] });
+    }
+    previous = snapshot;
+    return { at: new Date(row.taken_at).toISOString(), snapshot, changes };
+  });
+  return entries.reverse();
+}
 const monitorRuns = new Set();
 const monitorManualRuns = new Map();
 
@@ -3859,6 +4215,7 @@ async function runMonitor(row) {
       previousSnapshot = null;
     }
     const firstRun = !row.last_run_at;
+    if (row.kind === "dns" && result.snapshot) recordDnsHistory(row.id, result.snapshot);
     const changes = firstRun ? [] : describeSnapshotChanges(row.kind, previousSnapshot, result.snapshot);
     const statusChanged = !firstRun && row.last_status !== result.status;
     if (firstRun) addMonitorEvent(row.id, result.status, `First check: ${result.summary}`);
@@ -3920,7 +4277,7 @@ function describeMonitor(row, events = []) {
 async function handleMonitors(request, response, url) {
   if (!checkFeatureAccess(request, response, "monitors", true)) return;
   const user = currentUser(request);
-  const match = url.pathname.match(/^\/api\/monitors(?:\/(\d+))?(\/run)?$/);
+  const match = url.pathname.match(/^\/api\/monitors(?:\/(\d+))?(\/run|\/history)?$/);
   if (!match) {
     sendJson(response, 404, { error: "Not found." });
     return;
@@ -3964,7 +4321,16 @@ async function handleMonitors(request, response, url) {
     sendJson(response, 201, describeMonitor(fresh, database.prepare("SELECT * FROM monitor_events WHERE monitor_id = ? ORDER BY id DESC LIMIT 10").all(row.id)));
     return;
   }
-  if (id && match[2] && request.method === "POST") {
+  if (id && match[2] === "/history" && request.method === "GET") {
+    if (own.kind !== "dns") return sendJson(response, 400, { error: "History is kept for DNS monitors." });
+    // Monitors created before history existed start from their last known answer.
+    if (own.last_snapshot && !database.prepare("SELECT 1 FROM dns_history WHERE monitor_id = ?").get(own.id)) {
+      database.prepare("INSERT INTO dns_history (monitor_id, taken_at, snapshot) VALUES (?, ?, ?)").run(own.id, own.last_run_at || Date.now(), own.last_snapshot);
+    }
+    sendJson(response, 200, { target: own.target, entries: dnsHistoryEntries(own.id), limit: dnsHistoryLimit });
+    return;
+  }
+  if (id && match[2] === "/run" && request.method === "POST") {
     const last = monitorManualRuns.get(id) || 0;
     if (Date.now() - last < monitorLimits.manualRunGapMs) return sendJson(response, 429, { error: "Wait a minute before running this monitor again." });
     monitorManualRuns.set(id, Date.now());
@@ -5785,7 +6151,7 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS landing_shares_client ON landing_shares(client_hash, created_at);
 `);
 const landingShareLimits = { payloadBytes: 768 * 1024, anonymousPerDay: 10, anonymousTotal: 5000, userLifetimeMs: 30 * 86400000, anonymousLifetimeMs: 7 * 86400000 };
-const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "subdomains", "ipv6", "privacy", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
 
 function validLandingSharePayload(body) {
   const target = body?.target;
@@ -6916,7 +7282,7 @@ async function fetchCertificateTransparencyJson(url) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function normalizeCertificateTransparencyNames(entries, domain, readEntryNames) {
+function normalizeCertificateTransparencyNames(entries, domain, readEntryNames, limit = certificateTransparencyCandidateLimit) {
   if (!Array.isArray(entries)) {
     throw new Error("Certificate Transparency service returned invalid data.");
   }
@@ -6940,10 +7306,10 @@ function normalizeCertificateTransparencyNames(entries, domain, readEntryNames) 
       }
     }
   }
-  return [...names].sort().slice(0, certificateTransparencyCandidateLimit);
+  return [...names].sort().slice(0, limit);
 }
 
-async function discoverCertificateTransparencySubdomains(domain) {
+async function discoverCertificateTransparencySubdomains(domain, limit = certificateTransparencyCandidateLimit) {
   const providers = [
     {
       name: "crt.sh",
@@ -6986,6 +7352,7 @@ async function discoverCertificateTransparencySubdomains(domain) {
           entries,
           domain,
           provider.readEntryNames,
+          limit,
         ),
         source: provider.name,
       };
@@ -8202,7 +8569,7 @@ const apiTokenPaths = new Set([
   "/api/dig", "/api/blocklist", "/api/propagation", "/api/email-check", "/api/asn", "/api/web-check", "/api/email-headers",
   "/api/dmarc-sources", "/api/record-import", "/api/bulk-domain-check", "/api/dns-health", "/api/reputation",
   "/api/lookalike", "/api/spf-flatten", "/api/ping", "/api/sslscan", "/api/ping-scan", "/api/traceroute", "/api/multi-traceroute",
-  "/api/mail-server",
+  "/api/mail-server", "/api/subdomains", "/api/ipv6", "/api/privacy",
 ]);
 const apiTokenUsage = new Map();
 
@@ -9447,7 +9814,7 @@ function handleAdminAbout(request, response) {
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
   "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
-  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports",
+  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports", "subdomains", "ipv6", "privacy",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 
@@ -9784,7 +10151,7 @@ function handleAdminInsights(request, url, response) {
   database.prepare("DELETE FROM domain_ratings WHERE checked_at < ?").run(Date.now() - ratingRetentionMs);
   const describe = (row) => ({ domain: row.domain, grade: row.grade, score: row.score, detail: row.detail, checkedAt: new Date(row.checked_at).toISOString() });
   const ratings = {};
-  for (const kind of ["web", "tls", "email", "dns"]) {
+  for (const kind of ["web", "tls", "email", "dns", "privacy"]) {
     const summary = database.prepare("SELECT COUNT(*) AS count, AVG(score) AS average FROM domain_ratings WHERE kind = ? AND checked_at >= ?").get(kind, since);
     ratings[kind] = {
       label: ratingKinds[kind],
@@ -10547,7 +10914,7 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3, subdomains: 2, ipv6: 4, privacy: 4 };
 const heavyJobsActive = Object.fromEntries(Object.keys(heavyJobLimits).map((kind) => [kind, 0]));
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
@@ -11759,6 +12126,9 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/bulk-domain-check": { method: "POST", action: "Bulk domain check" },
     "/api/dns-health": { method: "GET", action: "DNS health check", keys: ["name"] },
     "/api/mail-server": { method: "GET", action: "Mail server check", keys: ["name"] },
+    "/api/subdomains": { method: "GET", action: "Subdomain discovery", keys: ["name"] },
+    "/api/ipv6": { method: "GET", action: "IPv6 readiness", keys: ["name"] },
+    "/api/privacy": { method: "GET", action: "Privacy check", keys: ["name"] },
     "/api/reputation": { method: "GET", action: "Reputation check", keys: ["name"] },
     "/api/lookalike": { method: "GET", action: "Lookalike domains", keys: ["name"] },
     "/api/spf-flatten": { method: "GET", action: "SPF flattener", keys: ["name"] },
@@ -12094,6 +12464,9 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/bulk-domain-check": "bulk-domains",
     "/api/dns-health": "dns-health",
     "/api/mail-server": "mail-server",
+    "/api/subdomains": "subdomains",
+    "/api/ipv6": "ipv6",
+    "/api/privacy": "privacy",
     "/api/reputation": "reputation",
     "/api/lookalike": "lookalike",
     "/api/spf-flatten": "record-builder",
@@ -12258,6 +12631,9 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
   const getRoutes = {
     "/api/dns-health": (request, url, response) => dnsHealthCheck(request, url, response),
     "/api/mail-server": (request, url, response) => mailServerCheck(request, url, response),
+    "/api/subdomains": (request, url, response) => subdomainDiscovery(request, url, response),
+    "/api/ipv6": (request, url, response) => ipv6Readiness(request, url, response),
+    "/api/privacy": (request, url, response) => privacyCheck(request, url, response),
     "/api/reputation": (request, url, response) => reputationCheck(request, url, response),
     "/api/lookalike": (request, url, response) => lookalikeCheck(request, url, response),
     "/api/spf-flatten": (_request, url, response) => spfFlattenCheck(url, response),
@@ -12442,6 +12818,50 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     (request.method === "GET" || request.method === "HEAD") && serveSiteFile(request, response, url.pathname)) {
     return;
   }
+  // "Scan this site": the bookmarklet and browser search open /scan?url=<page or domain>.
+  if ((url.pathname === "/scan" || url.pathname === "/scan/open") && (request.method === "GET" || request.method === "HEAD")) {
+    const raw = String(url.searchParams.get("url") || url.searchParams.get("q") || "").trim().slice(0, 2048);
+    let target = "";
+    try {
+      target = /^https?:\/\//i.test(raw) ? new URL(raw).hostname.replace(/^\[|\]$/g, "") : raw;
+    } catch {
+      target = "";
+    }
+    target = isIP(target) ? target : normalizeDomain(hostFromInput(target)) || "";
+    if (!target) {
+      sendRedirect(response, "/");
+      return;
+    }
+    // A bookmarklet opens /scan from another site, so the SameSite=Strict session cookie is
+    // not sent. A same-site page that moves on to /scan/open makes the browser send it.
+    if (url.pathname === "/scan") {
+      const next = `/scan/open?${new URLSearchParams({ q: target })}`.replace(/&/g, "&amp;");
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      response.end(request.method === "HEAD" ? undefined : `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${next}"><title>Scanning</title><p><a href="${next}">Continue</a></p>`);
+      return;
+    }
+    const config = readLandingConfig();
+    const signedIn = Boolean(currentUser(request));
+    const choice = readCookie(request, "bng_ui");
+    const simple = signedIn ? (choice === "simple" || choice === "full" ? choice : config.userInterface) === "simple" : config.enabled;
+    sendRedirect(response, simple ? `/#${encodeURIComponent(target)}` : `/?${new URLSearchParams({ q: target })}`);
+    return;
+  }
+  if (url.pathname === "/opensearch.xml" && (request.method === "GET" || request.method === "HEAD")) {
+    const origin = ssoPublicUrl(request, { publicUrl: readSsoConfig().publicUrl });
+    const title = getSiteTitle().replace(/[<>&"]/g, "").slice(0, 16) || "BNGlookup";
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
+  <ShortName>${title}</ShortName>
+  <Description>Scan a domain with ${title}</Description>
+  <InputEncoding>UTF-8</InputEncoding>
+  <Url type="text/html" method="get" template="${origin}/scan?q={searchTerms}"/>
+</OpenSearchDescription>
+`;
+    response.writeHead(200, { "content-type": "application/opensearchdescription+xml; charset=utf-8", "cache-control": "public, max-age=3600" });
+    response.end(request.method === "HEAD" ? undefined : xml);
+    return;
+  }
   if (url.pathname === "/landing/background" && (request.method === "GET" || request.method === "HEAD")) {
     serveLandingBackground(request, response);
     return;
@@ -12466,7 +12886,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     response.setHeader("x-frame-options", "SAMEORIGIN");
   }
   const sharedScan = /^\/s\/[A-Za-z0-9_-]{22}$/.test(url.pathname);
-  const requestedPath = url.pathname === "/landing" || landingRoot || sharedScan ? "/landing.html" : url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
+  const requestedPath = url.pathname === "/landing" || landingRoot || sharedScan ? "/landing.html" : url.pathname === "/" ? "/index.html" : url.pathname === "/about" ? "/about.html" : url.pathname === "/bookmarklet" ? "/bookmarklet.html" : url.pathname === "/history" ? "/history.html" : url.pathname === "/monitors" ? "/monitors.html" : url.pathname;
   if (!staticFiles.has(requestedPath)) {
     response.writeHead(404);
     response.end();
