@@ -214,6 +214,7 @@ function planJobs(target, allowed, token) {
     add("lookalike", { id: "lookalike", category: "security", title: "Look-alike domains", render: renderLookalike, load: () => call(query("/api/lookalike", { name })) });
     add("ping", { id: "ping", category: "network", title: "Reachability", render: renderPing, load: () => pingTarget(name, call) });
     add("asn", { id: "asn", category: "network", title: "Network (ASN)", render: renderAsn, load: () => call(query("/api/asn", { name })) });
+    add("ipv6", { id: "ipv6", category: "network", title: "IPv6 readiness", render: renderIpv6, load: () => call(query("/api/ipv6", { name })) });
   } else if (target.kind === "ip") {
     add("reverse", { id: "reverse", category: "dns", title: "Reverse DNS", render: renderReverse, load: () => call(query("/api/lookup", { name, reverse: "true" })) });
     add("whois", { id: "whois", category: "dns", title: "IP registration", render: renderIpWhois, load: () => call(query("/api/domain-info", { name })) });
@@ -525,6 +526,18 @@ function renderAsn(data) {
   };
 }
 
+function renderIpv6(data) {
+  const issues = normalizeIssues(data.issues);
+  const part = (label, percent) => ({ state: percent === null ? "info" : percent >= 100 ? "good" : percent > 0 ? "warn" : "bad", label, text: percent === null ? "not used" : percent >= 100 ? "ready for IPv6" : percent > 0 ? "partly ready" : "IPv4 only" });
+  return {
+    status: data.score >= 100 ? "good" : statusFromIssues(issues, "warn"),
+    grade: data.grade,
+    summary: `${data.score}/100 for IPv6.${data.serverHasIpv6 ? "" : " Only the records could be checked; this server has no IPv6."}`,
+    checks: [part("Website", data.parts.web), part("Mail", data.parts.mail), part("Name servers", data.parts.dns)],
+    issues,
+  };
+}
+
 function renderReverse(data) {
   const names = (data.answers || []).map((answer) => answer.data);
   return {
@@ -571,6 +584,7 @@ const fixCatalog = [
   { match: /open relay|accepts mail for other domains/i, text: "Only relay mail for your own domains and for users who log in. In Postfix, check smtpd_relay_restrictions (permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination)." },
   { match: /login before tls|auth\) before encryption|password login/i, text: "Only offer AUTH after STARTTLS. For Postfix: smtpd_tls_auth_only = yes." },
   { match: /reverse dns.*(not confirmed|does not point back)|not forward-confirmed/i, text: "Make the reverse DNS (PTR) name of the mail server's address resolve back to the same address, ideally the name it uses in HELO. Your hosting provider sets the PTR record." },
+  { match: /no aaaa record|ipv4 only|no ipv6 address|ipv6 address .* without reverse dns|does not answer over ipv6/i, text: "Ask your hosting, mail or DNS provider to enable IPv6, then publish AAAA records for the website, mail servers and name servers (and reverse DNS for IPv6 mail servers). Test before publishing: an AAAA record that does not answer is worse than none." },
   { match: /can probably be taken over|takeover risk/i, text: "Delete the DNS record of the unused subdomain, or claim the resource it points to again (the app, bucket or site at the provider)." },
   { match: /dangling cname/i, text: "Remove the CNAME record: it points to a name that no longer exists, and someone who registers that name controls your subdomain." },
   { match: /private address/i, text: "Remove public DNS records that point to internal addresses, or move them to an internal DNS zone." },
@@ -650,6 +664,7 @@ document.addEventListener("click", async (event) => {
 const fullModes = {
   "mail-server": "mail-server",
   subdomains: "subdomains",
+  ipv6: "ipv6",
   records: "forward", dnssec: "forward", whois: "details", propagation: "propagation", "dns-health": "dns-health", email: "email",
   web: "web", tls: "sslscan", reputation: "reputation", lookalike: "lookalike", ping: "ping", asn: "asn", reverse: "reverse", mac: "mac",
 };
@@ -1331,7 +1346,7 @@ function setCompareMode(on) {
 
 // ------------------------------------------------------------------ Share and PDF
 
-const allLandingFeatures = new Set(["forward", "whois", "propagation", "dns-health", "email", "mail-server", "subdomains", "web", "sslscan", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+const allLandingFeatures = new Set(["forward", "whois", "propagation", "dns-health", "email", "mail-server", "subdomains", "ipv6", "web", "sslscan", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
 
 async function shareScan() {
   const box = byId("share-box");

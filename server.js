@@ -167,6 +167,7 @@ const featureAccessDefaults = {
   "dns-health": "user",
   "mail-server": "user",
   subdomains: "user",
+  ipv6: "user",
   reputation: "user",
   lookalike: "user",
   "ip-calc": "user",
@@ -203,6 +204,7 @@ const featureNames = {
   "dns-health": "DNS health check (delegation, SOA, zone transfer, open recursion)",
   "mail-server": "Mail server check (open relay, reverse DNS, TLS on port 25)",
   subdomains: "Subdomain discovery (certificate logs, common names, takeover check)",
+  ipv6: "IPv6 readiness (website, mail and name servers)",
   reputation: "Reputation check (protective DNS, blocklists, optional threat feeds)",
   lookalike: "Lookalike domain finder",
   "ip-calc": "IP / CIDR calculator",
@@ -3100,6 +3102,115 @@ async function subdomainDiscovery(request, url, response) {
   }
 }
 
+// ---------------------------------------------------------------- IPv6 readiness
+
+let ipv6Connectivity = { checkedAt: 0, available: false };
+
+// Whether this server itself can reach the internet over IPv6; without it, reachability
+// cannot be tested and is reported as such instead of as a failure.
+function serverHasIpv6() {
+  if (Date.now() - ipv6Connectivity.checkedAt < 10 * 60_000) return Promise.resolve(ipv6Connectivity.available);
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "2606:4700:4700::1111", port: 443, family: 6, timeout: 3000 });
+    const done = (available) => {
+      socket.destroy();
+      ipv6Connectivity = { checkedAt: Date.now(), available };
+      resolve(available);
+    };
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+  });
+}
+
+async function addressesOf(name) {
+  const [v4, v6] = await Promise.all(["A", "AAAA"].map((type) => queryDohDns(name, type).then(
+    (data) => data.answers.filter((answer) => answer.type === (type === "A" ? 1 : 28) || answer.typeName === type).map((answer) => String(answer.data)),
+    () => [],
+  )));
+  return { v4: [...new Set(v4)], v6: [...new Set(v6)] };
+}
+
+async function ipv6Readiness(request, url, response) {
+  const rawName = queryInput(url, "name", 253, response);
+  if (rawName === null) return;
+  const domain = normalizeDomain(hostFromInput(rawName.trim()));
+  if (!domain) return sendJson(response, 400, { error: "Enter a domain name." });
+  const user = currentUser(request);
+  const allowLocal = Boolean(user) && getPortScanPolicy().localScanByRole[user.role];
+  if (!acquireHeavyJob("ipv6")) return sendJson(response, 503, { error: "The server is busy with other IPv6 checks. Try again shortly." });
+  try {
+    const started = Date.now();
+    const nsNames = await queryDohDns(domain, "NS").then((data) => data.answers.filter((answer) => answer.type === 2 || answer.typeName === "NS")
+      .map((answer) => String(answer.data).replace(/\.$/, "").toLowerCase()), () => []);
+    const [apex, www, mail, nameservers, canTest] = await Promise.all([
+      addressesOf(domain),
+      addressesOf(`www.${domain}`),
+      resolveMailHosts(domain),
+      Promise.all([...new Set(nsNames)].slice(0, 8).map(async (host) => ({ host, ...await addressesOf(host) }))),
+      serverHasIpv6(),
+    ]);
+    const web = await Promise.all([[domain, apex], [`www.${domain}`, www]].filter(([, addresses]) => addresses.v4.length || addresses.v6.length).map(async ([host, addresses]) => {
+      const entry = { host, v4: addresses.v4, v6: addresses.v6, reachable: null, status: null, error: null };
+      const address = addresses.v6.find((candidate) => isScannableAddress(candidate, allowLocal));
+      if (!address || !canTest) return entry;
+      for (const scheme of ["https", "http"]) {
+        try {
+          const page = await requestPinnedUrl(new URL(`${scheme}://${host}/`), address, { timeoutMs: 6000, maxBytes: 4096 });
+          Object.assign(entry, { reachable: true, status: page.status, error: null });
+          break;
+        } catch (error) {
+          Object.assign(entry, { reachable: false, error: String(error.code || error.message).slice(0, 120) });
+        }
+      }
+      return entry;
+    }));
+    const mailHosts = await Promise.all(mail.records.slice(0, 5).map(async (record) => {
+      const v6 = record.addresses.filter((address) => isIP(address) === 6);
+      const ptr = v6.length ? await fetchPtrLookups(v6.slice(0, 2)) : {};
+      return {
+        host: record.host,
+        priority: record.priority,
+        v4: record.addresses.filter((address) => isIP(address) === 4),
+        v6,
+        ptr: Object.fromEntries(Object.entries(ptr).map(([address, result]) => [address, result.answers?.[0]?.replace(/\.$/, "") || null])),
+      };
+    }));
+    const issues = [];
+    const webV6 = web.filter((entry) => entry.v6.length);
+    const webScore = !web.length ? null
+      : webV6.length === web.length ? (canTest && webV6.some((entry) => entry.reachable === false) ? 20 : 40) : webV6.length ? 25 : 0;
+    for (const entry of web) {
+      if (!entry.v6.length) issues.push({ severity: "medium", message: `${entry.host} has no AAAA record, so IPv6-only visitors cannot reach the website.` });
+      else if (entry.reachable === false) issues.push({ severity: "high", message: `${entry.host} has an AAAA record, but the website does not answer over IPv6 (${entry.error}).` });
+    }
+    const mailV6 = mailHosts.filter((host) => host.v6.length);
+    const mailScore = mail.nullMx || !mailHosts.length ? null : mailV6.length ? (mailV6.every((host) => host.v6.every((address) => host.ptr[address])) ? 30 : 20) : 0;
+    if (mailScore === 0) issues.push({ severity: "medium", message: "No mail server has an AAAA record, so mail cannot be delivered to this domain over IPv6." });
+    for (const host of mailV6) {
+      for (const address of host.v6) if (!host.ptr[address]) issues.push({ severity: "medium", message: `${host.host} has IPv6 address ${address} without reverse DNS; many receivers reject mail sent from such addresses.` });
+    }
+    const nsV6 = nameservers.filter((server) => server.v6.length);
+    const dnsScore = !nameservers.length ? null : nsV6.length === nameservers.length ? 30 : nsV6.length ? 20 : 0;
+    if (nameservers.length && !nsV6.length) issues.push({ severity: "medium", message: "No name server has an IPv6 address, so IPv6-only resolvers cannot look up this domain." });
+    else if (nsV6.length < nameservers.length) issues.push({ severity: "low", message: `${nameservers.length - nsV6.length} of ${nameservers.length} name servers have no IPv6 address.` });
+    // Missing parts (no website, no mail) do not count against the score.
+    const parts = [[webScore, 40], [mailScore, 30], [dnsScore, 30]].filter(([score]) => score !== null);
+    const score = parts.length ? Math.round(parts.reduce((sum, [value]) => sum + value, 0) / parts.reduce((sum, [, max]) => sum + max, 0) * 100) : 0;
+    sendJson(response, 200, {
+      domain, score, grade: gradeForScore(score), serverHasIpv6: canTest,
+      web, mail: { nullMx: mail.nullMx, hosts: mailHosts }, nameservers,
+      parts: { web: webScore === null ? null : Math.round(webScore / 40 * 100), mail: mailScore === null ? null : Math.round(mailScore / 30 * 100), dns: dnsScore === null ? null : Math.round(dnsScore / 30 * 100) },
+      issues, durationMs: Date.now() - started,
+    });
+  } catch (error) {
+    console.error("IPv6 check failed:", error);
+    sendJson(response, 500, { error: "Unable to complete the IPv6 check." });
+  } finally {
+    releaseHeavyJob("ipv6");
+  }
+}
+
 // ---------------------------------------------------------------- Mail server deep check
 
 async function resolveMailHosts(domain) {
@@ -5981,7 +6092,7 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS landing_shares_client ON landing_shares(client_hash, created_at);
 `);
 const landingShareLimits = { payloadBytes: 768 * 1024, anonymousPerDay: 10, anonymousTotal: 5000, userLifetimeMs: 30 * 86400000, anonymousLifetimeMs: 7 * 86400000 };
-const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "subdomains", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
+const landingJobIds = new Set(["records", "dnssec", "whois", "propagation", "dns-health", "email", "mail-server", "subdomains", "ipv6", "web", "tls", "reputation", "lookalike", "ping", "asn", "reverse", "mac"]);
 
 function validLandingSharePayload(body) {
   const target = body?.target;
@@ -8399,7 +8510,7 @@ const apiTokenPaths = new Set([
   "/api/dig", "/api/blocklist", "/api/propagation", "/api/email-check", "/api/asn", "/api/web-check", "/api/email-headers",
   "/api/dmarc-sources", "/api/record-import", "/api/bulk-domain-check", "/api/dns-health", "/api/reputation",
   "/api/lookalike", "/api/spf-flatten", "/api/ping", "/api/sslscan", "/api/ping-scan", "/api/traceroute", "/api/multi-traceroute",
-  "/api/mail-server", "/api/subdomains",
+  "/api/mail-server", "/api/subdomains", "/api/ipv6",
 ]);
 const apiTokenUsage = new Map();
 
@@ -9644,7 +9755,7 @@ function handleAdminAbout(request, response) {
 const shareableModes = new Set([
   "forward", "reverse", "details", "mac", "dig", "propagation", "ping", "sslscan", "ping-scan",
   "traceroute", "multi-traceroute", "scan", "custom-port", "bulk-port", "nmap", "dnssec", "email", "asn",
-  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports", "subdomains",
+  "web", "email-headers", "dmarc-reports", "bulk-domains", "dns-health", "reputation", "lookalike", "spf-flatten", "ip-calc", "mail-server", "tlsrpt-reports", "subdomains", "ipv6",
 ]);
 const shareLimits = { payloadBytes: 1024 * 1024, perUser: 200, lifetimeMs: 30 * 24 * 3600_000 };
 
@@ -10744,7 +10855,7 @@ function runSinglePing(address) {
   });
 }
 
-const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3, subdomains: 2 };
+const heavyJobLimits = { traceroute: 8, pingScan: 2, nmap: 1, sslscan: 4, zmap: 1, tlsGrade: 2, dig: 8, emailCheck: 4, webCheck: 6, bulkDomains: 1, dnsHealth: 4, lookalike: 2, reputation: 6, mailServer: 3, subdomains: 2, ipv6: 4 };
 const heavyJobsActive = Object.fromEntries(Object.keys(heavyJobLimits).map((kind) => [kind, 0]));
 const nmapScanStatuses = new Map();
 const nmapStatusCleanupTimers = new Map();
@@ -11957,6 +12068,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/dns-health": { method: "GET", action: "DNS health check", keys: ["name"] },
     "/api/mail-server": { method: "GET", action: "Mail server check", keys: ["name"] },
     "/api/subdomains": { method: "GET", action: "Subdomain discovery", keys: ["name"] },
+    "/api/ipv6": { method: "GET", action: "IPv6 readiness", keys: ["name"] },
     "/api/reputation": { method: "GET", action: "Reputation check", keys: ["name"] },
     "/api/lookalike": { method: "GET", action: "Lookalike domains", keys: ["name"] },
     "/api/spf-flatten": { method: "GET", action: "SPF flattener", keys: ["name"] },
@@ -12293,6 +12405,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/dns-health": "dns-health",
     "/api/mail-server": "mail-server",
     "/api/subdomains": "subdomains",
+    "/api/ipv6": "ipv6",
     "/api/reputation": "reputation",
     "/api/lookalike": "lookalike",
     "/api/spf-flatten": "record-builder",
@@ -12458,6 +12571,7 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     "/api/dns-health": (request, url, response) => dnsHealthCheck(request, url, response),
     "/api/mail-server": (request, url, response) => mailServerCheck(request, url, response),
     "/api/subdomains": (request, url, response) => subdomainDiscovery(request, url, response),
+    "/api/ipv6": (request, url, response) => ipv6Readiness(request, url, response),
     "/api/reputation": (request, url, response) => reputationCheck(request, url, response),
     "/api/lookalike": (request, url, response) => lookalikeCheck(request, url, response),
     "/api/spf-flatten": (_request, url, response) => spfFlattenCheck(url, response),

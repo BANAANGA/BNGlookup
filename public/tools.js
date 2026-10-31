@@ -114,6 +114,7 @@ async function runToolMode(toolMode, lookupName) {
     "dns-health": ["/api/dns-health", renderDnsHealthResult, (data) => data.zone || data.domain],
     "mail-server": ["/api/mail-server", renderMailServerResult, (data) => data.domain],
     subdomains: ["/api/subdomains", renderSubdomainsResult, (data) => data.domain],
+    ipv6: ["/api/ipv6", renderIpv6Result, (data) => data.domain],
     reputation: ["/api/reputation", renderReputationResult, (data) => data.target],
     lookalike: ["/api/lookalike", renderLookalikeResult, (data) => data.domain],
     "spf-flatten": ["/api/spf-flatten", renderSpfFlattenResult, (data) => data.domain],
@@ -1090,6 +1091,37 @@ function dnsHealthHtml(data) {
 
 function renderDnsHealthResult(data) {
   resultPanel.innerHTML = dnsHealthHtml(data);
+  resultPanel.hidden = false;
+}
+
+// ---------------------------------------------------------------- IPv6 readiness
+
+function renderIpv6Result(data) {
+  const tone = (percent) => (percent === null ? "none" : percent >= 100 ? "ok" : percent > 0 ? "warn" : "bad");
+  const label = (percent) => (percent === null ? "Not used" : percent >= 100 ? "Ready" : percent > 0 ? "Partly" : "No IPv6");
+  const list = (values) => values.length ? values.map((value) => escapeHtml(value)).join("<br>") : '<span class="trace-silent">none</span>';
+  const webRows = data.web.map((entry) => `<tr><td>${copyableResult(entry.host)}</td><td>${list(entry.v4)}</td><td>${list(entry.v6)}</td>
+    <td>${!entry.v6.length ? pill("fail", "No AAAA") : entry.reachable === true ? pill("ok", `Answers (HTTP ${entry.status})`) : entry.reachable === false ? pill("fail", `No answer (${entry.error})`) : pill("info", "Not tested")}</td></tr>`);
+  const mailRows = data.mail.hosts.map((host) => `<tr><td>${copyableResult(host.host)}<br><span class="trace-silent">priority ${escapeHtml(host.priority)}</span></td><td>${list(host.v4)}</td><td>${list(host.v6)}</td>
+    <td>${host.v6.length ? host.v6.map((address) => host.ptr[address] ? pill("ok", host.ptr[address]) : pill("warn", "No reverse DNS")).join("<br>") : pill("fail", "No AAAA")}</td></tr>`);
+  const nsRows = data.nameservers.map((server) => `<tr><td>${copyableResult(server.host)}</td><td>${list(server.v4)}</td><td>${list(server.v6)}</td><td>${server.v6.length ? pill("ok", "IPv6") : pill("fail", "IPv4 only")}</td></tr>`);
+  resultPanel.innerHTML = `
+    <div class="result-heading">
+      <div><p class="eyebrow">IPV6 READINESS</p><h2>${copyableResult(data.domain)}</h2></div>
+      <span class="status-badge ${data.score >= 100 ? "success" : "warning"}">${escapeHtml(`${data.score}/100 · ${data.grade}`)}</span>
+    </div>
+    ${scoreTiles([
+      ["Website", tone(data.parts.web), label(data.parts.web)],
+      ["Mail", tone(data.parts.mail), data.mail.nullMx ? "Does not receive mail" : label(data.parts.mail)],
+      ["Name servers", tone(data.parts.dns), label(data.parts.dns)],
+      ["Score", data.score >= 100 ? "ok" : data.score >= 50 ? "warn" : "bad", `${data.score}/100`],
+    ])}
+    ${!data.serverHasIpv6 ? '<p class="detail-notice">This server has no IPv6 connection, so it can only check the records, not whether the website really answers over IPv6.</p>' : ""}
+    ${data.issues.length ? `<section class="record-section"><h3>Findings</h3><ul class="dnssec-issues">${data.issues.map((issue) => `<li class="dnssec-issue ${escapeHtml(issue.severity)}">${escapeHtml(issue.message)}</li>`).join("")}</ul></section>` : ""}
+    ${webRows.length ? `<section class="email-auth"><h3>Website</h3>${dataTable(["Host", "IPv4", "IPv6", "Over IPv6"], webRows)}</section>` : ""}
+    ${mailRows.length ? `<section class="email-auth"><h3>Mail servers</h3>${dataTable(["Mail server", "IPv4", "IPv6", "Reverse DNS (IPv6)"], mailRows)}</section>` : ""}
+    ${nsRows.length ? `<section class="email-auth"><h3>Name servers</h3>${dataTable(["Name server", "IPv4", "IPv6", "Result"], nsRows)}</section>` : ""}
+    <p class="scan-disclaimer">The score weighs the website (40), mail (30) and name servers (30); parts the domain does not use are left out. Fully ready means every part works for IPv6-only visitors and mail servers.</p>`;
   resultPanel.hidden = false;
 }
 
