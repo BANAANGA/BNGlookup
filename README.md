@@ -39,6 +39,28 @@ Each tool is explained in more detail, with a screenshot, in the **[wiki](docs/R
 
 ## Screenshots
 
+### Simple interface
+
+The [landing page](#landing-page) for visitors and users who prefer it: one
+search runs every public tool, with results in tabs, fixes, sharing and
+comparison. Scans of test domains are shown.
+
+<table>
+  <tr>
+    <td align="center" colspan="2"><strong>Start page</strong><br><img src="assets/simple-start.jpg" alt="Simple interface start page with one search box, example searches and a small login button" width="820"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Results</strong><br><img src="assets/simple-results.jpg" alt="Scan result with score ring, counts, category tabs and the most important findings" width="560"></td>
+    <td align="center"><strong>How to fix</strong><br><img src="assets/simple-fix.jpg" alt="Web and TLS tab with the website grade, an opened How to fix suggestion with a copyable header, and the privacy card" width="560"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Compare two domains</strong><br><img src="assets/simple-compare.jpg" alt="Two domains side by side with scores and every check, the better result highlighted" width="560"></td>
+    <td align="center"><strong>On a phone</strong><br><img src="assets/simple-phone.jpg" alt="Simple interface on a phone with the score and category tabs" width="260"></td>
+  </tr>
+</table>
+
+### Full interface
+
 Log and statistics screenshots use illustrative sample data.
 
 <table>
