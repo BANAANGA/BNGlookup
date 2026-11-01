@@ -735,7 +735,7 @@ function landingDraft() {
     blur: Number(value("blur")),
   });
   const content = Object.fromEntries(landingTextFields.map(([key]) => [key, value(`text-${key}`)]));
-  return { enabled: landingForm.elements.enabled.checked, userInterface: value("userInterface"), theme, content };
+  return { enabled: landingForm.elements.enabled.checked, userInterface: value("userInterface"), themeFullInterface: landingForm.elements.themeFullInterface.checked, theme, content };
 }
 
 function sendLandingPreview() {
@@ -750,6 +750,7 @@ function sendLandingPreview() {
 function fillLandingForm(config) {
   landingForm.elements.enabled.checked = config.enabled;
   landingForm.elements.userInterface.value = config.userInterface || "full";
+  landingForm.elements.themeFullInterface.checked = Boolean(config.themeFullInterface);
   for (const [key] of landingColorFields) landingForm.elements[`color-${key}`].value = config.theme[key];
   for (const name of ["font", "radius", "backgroundMode", "overlay", "blur"]) landingForm.elements[name].value = config.theme[name];
   landingForm.elements.animations.checked = config.theme.animations;
@@ -817,7 +818,7 @@ landingForm.addEventListener("submit", async (event) => {
 
 document.querySelector("#landing-reset").addEventListener("click", () => {
   if (!landingState || !window.confirm("Reset the theme and all texts to the defaults? Nothing is saved until you click Save.")) return;
-  fillLandingForm({ ...landingState.defaults, enabled: landingForm.elements.enabled.checked, userInterface: landingForm.elements.userInterface.value });
+  fillLandingForm({ ...landingState.defaults, enabled: landingForm.elements.enabled.checked, userInterface: landingForm.elements.userInterface.value, themeFullInterface: landingForm.elements.themeFullInterface.checked });
 });
 
 landingBackgroundUpload.addEventListener("change", async () => {

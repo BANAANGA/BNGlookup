@@ -91,6 +91,7 @@ goes live until you click *Save landing page*.
 | --- | --- |
 | Show at `/` | Turn off to show the full interface (with its login prompt) at `/` again to visitors who are not logged in |
 | Logged-in users | Start in the full or the simple interface (users can switch at any time) |
+| Theme the full interface | Use the same colors, font and background for every page of the full interface; light themes make it light |
 | Theme presets | Midnight, Daylight, Ocean, Sunset, Forest, Mono |
 | Colors | Background, second background, cards, text, muted text, two accents, good, warning and problem |
 | Font and rounding | System, rounded, serif, mono or geometric; corner rounding 0–32 px |
