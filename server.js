@@ -5972,6 +5972,7 @@ const landingFonts = {
 const landingDefaults = {
   enabled: true,
   userInterface: "full",
+  themeFullInterface: false,
   theme: {
     background: "#06080f", background2: "#11203d", surface: "#0f1524", text: "#eef2ff", muted: "#8b96b2",
     accent: "#7c5cff", accent2: "#22d3ee", success: "#34d399", warning: "#fbbf24", danger: "#f87171",
@@ -6006,6 +6007,7 @@ function readLandingConfig() {
   return {
     enabled: typeof saved.enabled === "boolean" ? saved.enabled : landingDefaults.enabled,
     userInterface: saved.userInterface === "simple" ? "simple" : "full",
+    themeFullInterface: saved.themeFullInterface === true,
     theme: { ...landingDefaults.theme, ...(saved.theme || {}) },
     content: { ...landingDefaults.content, ...(saved.content || {}) },
     background: saved.background || null,
@@ -6046,7 +6048,7 @@ function validateLandingConfig(body) {
     if (!content[key]) return { error: `The text for "${key}" cannot be empty.` };
   }
   if (!["full", "simple"].includes(source.userInterface)) return { error: "Choose the interface logged-in users start in." };
-  return { value: { enabled: source.enabled !== false, userInterface: source.userInterface, theme, content } };
+  return { value: { enabled: source.enabled !== false, userInterface: source.userInterface, themeFullInterface: source.themeFullInterface === true, theme, content } };
 }
 
 function publicLandingConfig(config = readLandingConfig()) {
@@ -6054,6 +6056,7 @@ function publicLandingConfig(config = readLandingConfig()) {
   return {
     enabled: config.enabled,
     userInterface: config.userInterface,
+    themeFullInterface: config.themeFullInterface,
     siteTitle: getSiteTitle(),
     iconUrl: getSiteIconUrl(),
     theme: { ...config.theme, fontStack: landingFonts[config.theme.font] || landingFonts.system },
@@ -6215,6 +6218,88 @@ async function handleLandingShares(request, url, response) {
     .run(id, user?.id ?? null, clientHash, payload.target.value, text, now, expiresAt);
   recordAdminLog("audit", request, "Landing scan shared", payload.target.value, 201, user?.username ?? null);
   sendJson(response, 201, { id, url: `/s/${id}`, expiresAt: new Date(expiresAt).toISOString() });
+}
+
+// ---------------------------------------------------------------- Landing theme for the full interface
+// The full interface's stylesheet uses fixed colors. When the landing page theme is also used
+// for the full interface, every color is mapped onto the theme: greys onto the scale from the
+// theme's background through its cards and muted text to its text, and greens, blues, reds and
+// yellows onto the accent, second accent, problem and warning colors, keeping how light or dark
+// each one was. Light themes therefore turn the whole interface light.
+
+const hexToRgb = (hex) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
+const rgbToHex = (rgb) => `#${rgb.map((value) => Math.round(Math.min(255, Math.max(0, value))).toString(16).padStart(2, "0")).join("")}`;
+const mixRgb = (from, to, amount) => from.map((value, index) => value + (to[index] - value) * Math.min(1, Math.max(0, amount)));
+
+function rgbToHsl([red, green, blue]) {
+  const [r, g, b] = [red / 255, green / 255, blue / 255];
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const lightness = (max + min) / 2;
+  if (max === min) return [0, 0, lightness];
+  const delta = max - min;
+  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  const hue = max === r ? ((g - b) / delta + (g < b ? 6 : 0)) : max === g ? (b - r) / delta + 2 : (r - g) / delta + 4;
+  return [hue * 60, saturation, lightness];
+}
+
+function themeColorMapper(theme) {
+  const palette = Object.fromEntries(["background", "surface", "text", "muted", "accent", "accent2", "success", "warning", "danger"]
+    .map((key) => [key, hexToRgb(theme[key])]));
+  // Original reference lightness of each accent family in the full interface's dark theme.
+  const families = [
+    { test: (hue) => hue >= 75 && hue < 175, color: palette.accent, reference: 0.59 },
+    { test: (hue) => hue >= 175 && hue < 265, color: palette.accent2, reference: 0.6 },
+    { test: (hue) => hue >= 265 && hue < 330, color: palette.accent2, reference: 0.6 },
+    { test: (hue) => hue >= 330 || hue < 18, color: palette.danger, reference: 0.64 },
+    { test: (hue) => hue >= 18 && hue < 75, color: palette.warning, reference: 0.56 },
+  ];
+  return (rgb) => {
+    const [hue, saturation, lightness] = rgbToHsl(rgb);
+    if (saturation < 0.14 || lightness < 0.04 || lightness > 0.97) {
+      if (lightness <= 0.1) return mixRgb(palette.background, palette.surface, (lightness - 0.02) / 0.08);
+      if (lightness <= 0.6) return mixRgb(palette.surface, palette.muted, (lightness - 0.1) / 0.5);
+      return mixRgb(palette.muted, palette.text, (lightness - 0.6) / 0.4);
+    }
+    const family = families.find((entry) => entry.test(hue));
+    return lightness <= family.reference
+      ? mixRgb(family.color, palette.background, (family.reference - lightness) / family.reference)
+      : mixRgb(family.color, palette.text, (lightness - family.reference) / (1 - family.reference));
+  };
+}
+
+let themedStylesheetCache = { key: "", css: "" };
+
+function themedStylesheet(config) {
+  const source = fs.readFileSync(path.join(publicDir, "styles.css"), "utf8");
+  const theme = config.theme;
+  const key = JSON.stringify([theme, config.background?.updatedAt || null, source.length]);
+  if (themedStylesheetCache.key === key) return themedStylesheetCache.css;
+  const map = themeColorMapper(theme);
+  const expand = (hex) => (hex.length <= 5 ? `#${[...hex.slice(1)].map((digit) => digit + digit).join("")}` : hex);
+  let css = source
+    .replace(/#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})\b/gi, (match) => {
+      const full = expand(match.toLowerCase());
+      return rgbToHex(map(hexToRgb(full.slice(0, 7)))) + full.slice(7);
+    })
+    .replace(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(,\s*[\d.]+\s*)?\)/gi, (_match, red, green, blue, alpha) => {
+      const mapped = map([Number(red), Number(green), Number(blue)]).map(Math.round);
+      return alpha ? `rgba(${mapped.join(", ")}${alpha})` : `rgb(${mapped.join(", ")})`;
+    })
+    .replace(/font-family:\s*("DM Sans"|Manrope)[^;}]*/g, `font-family: ${landingFonts[theme.font] || landingFonts.system}`);
+  const light = rgbToHsl(hexToRgb(theme.background))[2] > 0.5;
+  const alpha = (hex, opacity) => `rgba(${hexToRgb(hex).join(", ")}, ${opacity})`;
+  const backdrop = config.background && theme.backgroundMode === "image"
+    ? `linear-gradient(${alpha(theme.background, theme.overlay / 100)}, ${alpha(theme.background, theme.overlay / 100)}), url("/landing/background?v=${encodeURIComponent(config.background.updatedAt)}")`
+    : theme.backgroundMode === "solid" ? "none"
+      : `radial-gradient(circle at 12% -10%, ${alpha(theme.accent, light ? 0.12 : 0.22)}, transparent 45%), radial-gradient(circle at 95% 5%, ${alpha(theme.accent2, light ? 0.1 : 0.16)}, transparent 40%)`;
+  css += `
+/* Landing page theme */
+:root { color-scheme: ${light ? "light" : "dark"}; background: ${theme.background}; }
+body { background-color: ${theme.background}; background-image: ${backdrop}; background-size: cover; background-attachment: fixed; }
+`;
+  themedStylesheetCache = { key, css };
+  return css;
 }
 
 // A combined landing scan counts as one public lookup: the token it returns lets the
@@ -12893,6 +12978,20 @@ const server = http.createServer({ maxHeaderSize: 8192 }, (request, response) =>
     return;
   }
   const filePath = path.join(publicDir, requestedPath.slice(1));
+
+  if (requestedPath === "/styles.css") {
+    const config = readLandingConfig();
+    if (config.themeFullInterface) {
+      try {
+        const css = themedStylesheet(config);
+        response.writeHead(200, { "content-type": "text/css; charset=utf-8", "x-content-type-options": "nosniff" });
+        response.end(request.method === "HEAD" ? undefined : css);
+        return;
+      } catch (error) {
+        console.error("The themed stylesheet could not be built:", error.message);
+      }
+    }
+  }
 
   fs.lstat(filePath, (statError, stats) => {
     if (statError || !stats.isFile()) {

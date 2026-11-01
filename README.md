@@ -955,7 +955,10 @@ browser, and the administrator chooses which one they start in.
 color, font, rounding, animations and frosted glass, a background (aurora,
 gradient, solid or an uploaded PNG/JPEG/WebP/GIF up to 5 MB, with dimming and
 blur), all texts and tab names, and the interface logged-in users start in. It
-can also be turned off for visitors who are not logged in. See the
+can also be turned off for visitors who are not logged in. **Use this theme for the
+full interface too** applies the same colors, font and background to every page:
+the full interface's colors are mapped onto the theme, so a light theme such as
+Daylight makes the whole site light. See the
 [wiki page](docs/landing-page.md).
 
 #### Backup and restore
